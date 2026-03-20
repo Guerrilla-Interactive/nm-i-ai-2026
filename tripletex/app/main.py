@@ -112,7 +112,8 @@ LANGUAGE HINTS:
 - de: Erstellen=create, Abteilung=department, Abteilungsnummer=department_number, Mitarbeiter=employee,
   Buchhaltungsdimension=accounting_dimension, Beleg=voucher, Kostenstelle=cost_center,
   Lieferant/Lieferanten=supplier (NOT customer!), Registrieren=register
-- fr: Créer=create, département=department, numéro=number, employé=employee, dimension=dimension
+- fr: Créer=create, département=department, numéro=number, employé=employee, dimension=dimension,
+  paie=payroll, salaire=salary, prime=bonus, fournisseur=supplier, enregistrez=register
 - es: Crear=create, departamento=department, empleado=employee, cliente=customer
 - pt: Criar=create, departamento=department, empregado=employee
 
@@ -164,6 +165,10 @@ Input: "Registrieren Sie den Lieferanten Nordlicht GmbH mit der Organisationsnum
 Output: {{"task_type":"create_supplier","confidence":0.97,"fields":{{"name":"Nordlicht GmbH","organization_number":"922976457","email":"faktura@nordlichtgmbh.no"}}}}
 
 CRITICAL: Lieferant/leverandør/supplier = create_supplier (NOT create_customer). These are different entities in Tripletex.
+CRITICAL: paie/lønn/payroll/Gehalt/salaire = run_payroll. Extract base_salary and bonus as separate numeric fields.
+
+Input: "Exécutez la paie de Jules Leroy (jules.leroy@example.org) pour ce mois. Le salaire de base est de 56950 NOK. Ajoutez une prime unique de 9350 NOK."
+Output: {{"task_type":"run_payroll","confidence":0.97,"fields":{{"employee_identifier":"Jules Leroy","first_name":"Jules","last_name":"Leroy","email":"jules.leroy@example.org","base_salary":56950.0,"bonus":9350.0}}}}
 
 If unsure, use "unknown" with confidence 0.0.
 Respond with ONLY a JSON object, no markdown."""
@@ -249,6 +254,11 @@ _KEYWORD_MAP = [
                                 r"\bny\w?\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé)\b",
                                 r"\b(ansatt|tilsett|employee)\b.*\b(som\s+heter|named?|called)\b",
                                 r"\b(ansatt|tilsett|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b"]),
+    # --- Payroll (MUST come before employee patterns — "paie de X" should not match employee) ---
+    (TaskType.RUN_PAYROLL, [
+        r"\b(?:paie|payroll|lønn|gehalt|nómina|salaire|lønnskjøring|lønnsslipp|salary)\b",
+        r"\b(?:kjør|run|execute|exécutez|exécuter|ejecutar|processar)\b.*\b(?:lønn|payroll|paie|gehalt|nómina)\b",
+    ]),
     # --- Dimension + Voucher (MUST come before invoice/voucher patterns — "Beleg" alone could trigger invoice) ---
     (TaskType.CREATE_DIMENSION_VOUCHER, [
         r"\b(?:dimensjon|dimension|buchhaltungsdimension|fri\s+dimensjon|custom\s+dimension|benutzerdefinierte\s+dimension)\b",
@@ -264,8 +274,8 @@ _KEYWORD_MAP = [
     ]),
     # --- Supplier (register supplier entity — after supplier invoice, before customer) ---
     (TaskType.CREATE_SUPPLIER, [
-        r"\b(?:registrer|opprett|create|register|add|erstellen|registrieren|créer|crear|criar)\w*\b.*\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b",
-        r"\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b.*\b(?:registrer|opprett|create|register|add|ny|new|erstellen|registrieren)\w*\b",
+        r"\b(?:registrer|opprett|create|register|add|erstellen|registrieren|créer|crear|criar|enregistre)\w*\b.*\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b",
+        r"\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b.*\b(?:registrer|opprett|create|register|add|ny|new|erstellen|registrieren|enregistre)\w*\b",
     ]),
     # --- Invoice (MUST come before customer to avoid "opprett faktura for kunde" → CREATE_CUSTOMER) ---
     (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b"]),
@@ -885,6 +895,38 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             }
             fields["user_type"] = role_map.get(role_raw, role_raw)
 
+    # --- Payroll: extract employee, salary, bonus ---
+    if task_type == TaskType.RUN_PAYROLL:
+        # Employee name: "de Jules Leroy" / "for ansatt Kari Hansen" / "für Mitarbeiter X Y"
+        m = re.search(
+            r"(?:de|for|für|pour|para|av|of)\s+(?:ansatt\s+|employee\s+|mitarbeiter\s+|employé\s+)?"
+            r"([A-ZÆØÅ\u00C0-\u024F]\S+)\s+([A-ZÆØÅ\u00C0-\u024F]\S+)",
+            text,
+        )
+        if m:
+            fields["first_name"] = m.group(1).rstrip(",.")
+            fields["last_name"] = m.group(2).rstrip(",.")
+            fields["employee_identifier"] = f"{fields['first_name']} {fields['last_name']}"
+        # Base salary
+        m = re.search(
+            r"(?:salaire\s+de\s+base|grunnlønn|grundgehalt|base\s+salary|sueldo\s+base|basislønn)\s+(?:est\s+de\s+|er\s+|ist\s+)?(\d[\d\s.,]*)\s*(?:kr|NOK)?",
+            text, re.I,
+        )
+        if m:
+            fields["base_salary"] = float(m.group(1).replace(",", ".").replace(" ", ""))
+        else:
+            # Fallback: first amount
+            m = re.search(r"(\d+[\d.,]*)\s*(?:kr|NOK)", text, re.I)
+            if m:
+                fields["base_salary"] = float(m.group(1).replace(",", ".").replace(" ", ""))
+        # Bonus
+        m = re.search(
+            r"(?:prime|bonus|tillegg|Prämie|Zuschlag|bonificación|bônus|gratification)\s+(?:unique\s+)?(?:de\s+|på\s+|von\s+|of\s+)?(\d[\d\s.,]*)\s*(?:kr|NOK)?",
+            text, re.I,
+        )
+        if m:
+            fields["bonus"] = float(m.group(1).replace(",", ".").replace(" ", ""))
+
     # --- Supplier: extract name, org number, email ---
     if task_type == TaskType.CREATE_SUPPLIER:
         m = re.search(
@@ -1068,6 +1110,7 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
 
     # Last resort: single-word heuristic — NEVER return UNKNOWN if there's any signal
     _LAST_RESORT_WORDS = [
+        (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "salary"], TaskType.RUN_PAYROLL),
         (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
         (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
         (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
