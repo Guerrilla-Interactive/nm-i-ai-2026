@@ -54,6 +54,17 @@ class TripletexClient:
         self.api_call_count = 0
         self.error_count = 0
 
+        # Per-request caches (auto-reset per /solve — each creates a new client)
+        self._bank_account_ensured: bool = False
+        self._bank_account_data: dict | None = None  # cached ledger account 1920 data
+        self._vat_type_cache: dict[float, int] = {}  # vat_pct -> vatType ID
+        self._department_cache: dict[str, int] = {}   # dept_name -> dept ID
+        self._default_department_id: int | None = None # first/default dept ID
+        self._payment_type_cache: list | None = None   # invoice payment types
+        self._customer_search_cache: dict[str, dict | None] = {}  # name -> customer or None
+        self._employee_search_cache: dict[str, dict | None] = {}  # name -> employee or None
+        self._empty_collections: set[str] = set()  # entity types known to be empty (e.g. "customers", "employees")
+
     async def close(self):
         await self._client.aclose()
 
@@ -362,6 +373,23 @@ class TripletexClient:
         resp = await self._request("GET", "/travelExpense/costCategory")
         return self._extract_values(resp)
 
+    async def create_per_diem_compensation(self, data: dict) -> dict:
+        """POST /travelExpense/perDiemCompensation — add per diem to a travel expense."""
+        resp = await self._request("POST", "/travelExpense/perDiemCompensation", json=data)
+        return self._extract_value(resp)
+
+    async def get_rate_categories(self, params: dict | None = None) -> list:
+        """GET /travelExpense/rateCategory — rate categories for per diem and mileage."""
+        p = dict(params or {})
+        p.setdefault("count", 100)
+        resp = await self._request("GET", "/travelExpense/rateCategory", params=p)
+        return self._extract_values(resp)
+
+    async def create_mileage_allowance(self, data: dict) -> dict:
+        """POST /travelExpense/mileageAllowance — add mileage allowance to travel expense."""
+        resp = await self._request("POST", "/travelExpense/mileageAllowance", json=data)
+        return self._extract_value(resp)
+
     # ------------------------------------------------------------------
     # Ledger Account (for bank account setup before invoicing)
     # ------------------------------------------------------------------
@@ -397,11 +425,37 @@ class TripletexClient:
         return self._extract_value(resp)
 
     # ------------------------------------------------------------------
+    # Accounting Dimensions (Tier 3 — free dimensions / regnskapsdimensjon)
+    # ------------------------------------------------------------------
+
+    async def get_dimension_names(self, params: dict | None = None) -> list:
+        """GET /ledger/accountingDimensionName — list dimension names."""
+        resp = await self._request("GET", "/ledger/accountingDimensionName", params=params)
+        return self._extract_values(resp)
+
+    async def create_dimension_name(self, data: dict) -> dict:
+        """POST /ledger/accountingDimensionName — create a free dimension."""
+        resp = await self._request("POST", "/ledger/accountingDimensionName", json=data)
+        return self._extract_value(resp)
+
+    async def search_dimension_values(self, params: dict | None = None) -> list:
+        """GET /ledger/accountingDimensionValue/search — search dimension values."""
+        resp = await self._request("GET", "/ledger/accountingDimensionValue/search", params=params)
+        return self._extract_values(resp)
+
+    async def create_dimension_value(self, data: dict) -> dict:
+        """POST /ledger/accountingDimensionValue — create a value for a dimension."""
+        resp = await self._request("POST", "/ledger/accountingDimensionValue", json=data)
+        return self._extract_value(resp)
+
+    # ------------------------------------------------------------------
     # Ledger Voucher (Tier 3)
     # ------------------------------------------------------------------
 
-    async def create_voucher(self, data: dict) -> dict:
-        resp = await self._request("POST", "/ledger/voucher", json=data)
+    async def create_voucher(self, data: dict, send_to_ledger: bool = False) -> dict:
+        resp = await self._request("POST", "/ledger/voucher",
+                                   json=data,
+                                   params={"sendToLedger": str(send_to_ledger).lower()})
         return self._extract_value(resp)
 
     async def get_vouchers(self, params: dict | None = None) -> list:
@@ -437,6 +491,65 @@ class TripletexClient:
         """GET /ledger/voucherType — list voucher types."""
         resp = await self._request("GET", "/ledger/voucherType", params=params)
         return self._extract_values(resp)
+
+    # ------------------------------------------------------------------
+    # Incoming Invoice (supplier invoice)
+    # ------------------------------------------------------------------
+
+    async def create_incoming_invoice(self, data: dict) -> dict:
+        """POST /incomingInvoice — register a supplier/incoming invoice."""
+        resp = await self._request("POST", "/incomingInvoice", json=data)
+        return self._extract_value(resp)
+
+    async def get_incoming_invoice_vat_types(self, params: dict | None = None) -> list:
+        """GET /incomingInvoice/vatType — list incoming invoice VAT types."""
+        resp = await self._request("GET", "/incomingInvoice/vatType", params=params or {"count": 100})
+        return self._extract_values(resp)
+
+    # ------------------------------------------------------------------
+    # Employment (prerequisite for salary)
+    # ------------------------------------------------------------------
+
+    async def get_employments(self, params: dict | None = None) -> list:
+        """GET /employee/employment — list employments."""
+        resp = await self._request("GET", "/employee/employment", params=params)
+        return self._extract_values(resp)
+
+    async def create_employment(self, data: dict) -> dict:
+        """POST /employee/employment — create an employment record for an employee."""
+        resp = await self._request("POST", "/employee/employment", json=data)
+        return self._extract_value(resp)
+
+    # ------------------------------------------------------------------
+    # Salary / Payroll (Tier 3)
+    # ------------------------------------------------------------------
+
+    async def create_salary_transaction(self, data: dict) -> dict:
+        """POST /salary/transaction — create a salary/payroll transaction."""
+        resp = await self._request("POST", "/salary/transaction", json=data)
+        return self._extract_value(resp)
+
+    async def get_salary_transactions(self, params: dict | None = None) -> list:
+        """GET /salary/transaction — list salary transactions."""
+        resp = await self._request("GET", "/salary/transaction", params=params)
+        return self._extract_values(resp)
+
+    async def get_salary_types(self, params: dict | None = None) -> list:
+        """GET /salary/type — list salary types (Fastlønn, Bonus, etc.)."""
+        p = dict(params or {})
+        p.setdefault("count", 100)
+        resp = await self._request("GET", "/salary/type", params=p)
+        return self._extract_values(resp)
+
+    async def get_payslips(self, params: dict | None = None) -> list:
+        """GET /salary/payslip — list payslips."""
+        resp = await self._request("GET", "/salary/payslip", params=params)
+        return self._extract_values(resp)
+
+    async def get_payslip(self, id: int) -> dict:
+        """GET /salary/payslip/{id}."""
+        resp = await self._request("GET", f"/salary/payslip/{id}", params={"fields": "*"})
+        return self._extract_value(resp)
 
     # ------------------------------------------------------------------
     # Annual Account / Year-End (Tier 3)
@@ -498,8 +611,22 @@ class TripletexClient:
         return self._extract_value(resp)
 
     async def get_suppliers(self, params: dict | None = None) -> list:
-        resp = await self._request("GET", "/supplier", params=params)
+        p = dict(params or {})
+        p.setdefault("fields", "*")
+        resp = await self._request("GET", "/supplier", params=p)
         return self._extract_values(resp)
+
+    async def get_supplier(self, id: int) -> dict:
+        resp = await self._request("GET", f"/supplier/{id}", params={"fields": "*"})
+        return self._extract_value(resp)
+
+    async def update_supplier(self, id: int, data: dict) -> dict:
+        resp = await self._request("PUT", f"/supplier/{id}", json=data)
+        return self._extract_value(resp)
+
+    async def delete_supplier(self, id: int) -> bool:
+        await self._request("DELETE", f"/supplier/{id}")
+        return True
 
     # ------------------------------------------------------------------
     # Company Modules

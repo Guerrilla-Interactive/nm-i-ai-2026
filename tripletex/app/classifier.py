@@ -129,12 +129,18 @@ when the prompt implies the customer already exists in the system.
 - Travel expense keywords: "reiseregning", "reise", "diett", "kjøregodtgjørelse", "utlegg"
 - When a prompt mentions both creating a project AND linking it to a customer → project_with_customer
 - "Legg til rolle" / "set role" / "set access" → set_employee_roles
-- CRITICAL: If the prompt describes a customer with an unpaid invoice and asks to register payment, \
-this is invoice_with_payment (create customer + invoice + payment in one flow), NOT register_payment. \
-register_payment is ONLY for registering payment on an ALREADY EXISTING invoice in the system.
-- "facture impayée" / "unbezahlte Rechnung" / "unpaid invoice" + customer details → invoice_with_payment
-- If the prompt gives customer details (name, org number) AND invoice details (amount, description) \
-AND mentions payment → invoice_with_payment
+- CRITICAL distinction between register_payment and invoice_with_payment:
+  * register_payment: The invoice ALREADY EXISTS in the system. Keywords: "outstanding invoice", \
+"existing invoice", "has an invoice", "utestående faktura", "betale fakturaen", "register payment ON this invoice". \
+The prompt refers to an invoice that was previously created and needs payment registered.
+  * invoice_with_payment: The invoice does NOT exist yet — create it AND register payment in one go. \
+Keywords: "create invoice and register payment", "unpaid invoice" with NEW customer/product details, \
+"facture impayée" with full invoice line details that need to be created.
+  * KEY TEST: If the prompt says the customer "has" an invoice or the invoice is "outstanding"/"utestående", \
+it means the invoice already exists → register_payment. If the prompt asks to CREATE a new invoice and pay it → invoice_with_payment.
+- CRITICAL: "Setting a fixed price for a project" / "Festpreis festlegen" / "fast pris" on an existing project \
+is ONLY update_project (with is_fixed_price=true and fixed_price=<amount>). It is NOT a batch with an invoice. \
+Do NOT split this into multiple tasks. The update_project task type supports is_fixed_price and fixed_price fields.
 
 ## FEW-SHOT EXAMPLES
 
@@ -213,6 +219,19 @@ Input: "Registrer innbetaling på faktura 10042 med beløp 15000 kr, dato 15.03.
 Output:
 {{"task_type": "register_payment", "confidence": 0.97, "fields": {{"invoice_identifier": "10042", "amount": 15000.0, "payment_date": "2026-03-15"}}}}
 
+### Example 11b — Register payment on outstanding invoice (English)
+Input: "The customer Windmill Ltd (org no. 830362894) has an outstanding invoice for 32200 NOK excluding VAT for System Development. Register full payment on this invoice."
+Output:
+{{"task_type": "register_payment", "confidence": 0.99, "fields": {{"invoice_identifier": "Windmill Ltd", "amount": 32200.0}}}}
+NOTE: This is register_payment because the invoice ALREADY EXISTS ("has an outstanding invoice"). \
+Do NOT use invoice_with_payment here — that would create a duplicate invoice.
+
+### Example 11c — Error correction / payment reversal (Bokmål)
+Input: "Betalingen fra Havbris AS for fakturaen Programvarelisens ble returnert av banken. Reverser betalingen slik at fakturaen igjen viser utestående beløp."
+Output:
+{{"task_type": "error_correction", "confidence": 0.97, "fields": {{"voucher_identifier": "Betaling for Programvarelisens fra Havbris AS", "correction_description": "Betalingen ble returnert av banken. Reverser betalingen."}}}}
+NOTE: Payment reversal = error_correction, NOT register_payment. The payment was already registered; now reverse it.
+
 ### Example 12 — Create travel expense (Bokmål)
 Input: "Opprett reiseregning for ansatt Per Hansen, dagsreise fra Bergen til Oslo 19. mars 2026, formål: kundemøte"
 Output:
@@ -268,10 +287,19 @@ Input: "Set employee John Doe as a standard user with no access"
 Output:
 {{"task_type": "set_employee_roles", "confidence": 0.94, "fields": {{"employee_identifier": "John Doe", "user_type": "NO_ACCESS"}}}}
 
+### Example 20b — Set fixed price on existing project (German)
+Input: "Legen Sie einen Festpreis von 473250 NOK für das Projekt 'Datensicherheit' für Windkraft GmbH fest"
+Output:
+{{"task_type": "update_project", "confidence": 0.97, "fields": {{"project_identifier": "Datensicherheit", "is_fixed_price": true, "fixed_price": 473250.0}}}}
+
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
 return a JSON object with a "batch" array containing one classification per entity:
 {{"batch": [{{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "X"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Y"}}}}, ...]}}
+
+CRITICAL: Only use batch mode when the prompt EXPLICITLY asks to create MULTIPLE separate entities. \
+Do NOT split a single task into multiple tasks. For example, "set a fixed price for a project" is ONE \
+update_project task, NOT a batch of update_project + invoice_existing_customer.
 
 ### Example 21 — Batch departments
 Input: "Create three departments in Tripletex: Utvikling, Innkjøp, and Salg."
