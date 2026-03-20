@@ -1528,6 +1528,8 @@ async def _exec_update_project(fields: dict, client: TripletexClient) -> dict:
         "startDate": _get(fields, "new_start_date") or _get(fields, "start_date") or proj.get("startDate"),
         "endDate": _get(fields, "new_end_date") or _get(fields, "end_date"),
         "isClosed": _get(fields, "is_closed"),
+        "isFixedPrice": _get(fields, "is_fixed_price"),
+        "fixedprice": _get(fields, "fixed_price"),
         "projectManager": proj.get("projectManager"),
     })
     result = await client.update_project(int(project_id), update)

@@ -236,6 +236,7 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
         "optional": [
             "new_name", "new_description", "new_start_date", "new_end_date",
             "is_closed", "project_manager_name", "department_name",
+            "is_fixed_price", "fixed_price",
         ],
     },
     TaskType.DELETE_PROJECT: {
