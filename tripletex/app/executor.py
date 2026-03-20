@@ -88,6 +88,24 @@ def _clean(payload: dict) -> dict:
 _bank_account_configured: dict[int, bool] = {}
 _cached_payment_types: dict[int, list] = {}
 _cached_vat_types: dict[int, list] = {}
+_cached_voucher_types: dict[int, list] = {}
+
+
+async def _get_voucher_type_id(client: TripletexClient, preferred_keywords: list[str] | None = None) -> int | None:
+    """Look up a voucher type, with caching. Returns the id or None."""
+    cid = id(client)
+    if cid not in _cached_voucher_types:
+        _cached_voucher_types[cid] = await client.get_voucher_types()
+    voucher_types = _cached_voucher_types[cid]
+    if not voucher_types:
+        return None
+
+    keywords = (preferred_keywords or []) + ["memorial", "memorialnota"]
+    for vt in voucher_types:
+        vt_name = (vt.get("name") or "").lower()
+        if any(kw in vt_name for kw in keywords):
+            return vt["id"]
+    return voucher_types[0]["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -1919,9 +1937,11 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
                 ]
 
             try:
+                vt_id = await _get_voucher_type_id(client, ["bank", "innbetaling"])
                 voucher_data = {
                     "date": txn_date,
                     "description": f"Bank reconciliation: {txn_description}",
+                    "voucherType": {"id": vt_id} if vt_id else None,
                     "postings": postings,
                 }
                 voucher = await client.create_voucher(voucher_data)
@@ -2070,10 +2090,12 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                             }))
 
                         if reversed_postings:
+                            corr_vt_id = await _get_voucher_type_id(client, ["korreksjon", "correction"])
                             correction_voucher = _clean({
                                 "date": _today(),
                                 "description": _get(fields, "correction_description")
                                                or f"Korreksjon av bilag {voucher_identifier}",
+                                "voucherType": {"id": corr_vt_id} if corr_vt_id else None,
                                 "postings": reversed_postings,
                             })
                             try:
@@ -2115,9 +2137,11 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                 "description": _get(np, "description") or correction_desc,
             }))
 
+        corr_vt_id2 = await _get_voucher_type_id(client, ["korreksjon", "correction"])
         correction_payload = _clean({
             "date": _today(),
             "description": correction_desc or f"Korrigering etter bilag {voucher_identifier}",
+            "voucherType": {"id": corr_vt_id2} if corr_vt_id2 else None,
             "postings": formatted_postings,
         })
         try:
@@ -2215,18 +2239,8 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     # Revenue (3xxx) + expenses (4xxx-7xxx) net result → equity (2050).
     try:
         # Get voucher types to find a suitable one
-        voucher_types = await client.get_voucher_types()
-        voucher_type_id = None
-        for vt in voucher_types:
-            vt_name = (vt.get("name") or "").lower()
-            if any(kw in vt_name for kw in [
-                "årsavslutning", "year-end", "closing", "avslutning",
-                "årsoppgjør", "memorial", "memorialnota",
-            ]):
-                voucher_type_id = vt["id"]
-                break
-        if not voucher_type_id and voucher_types:
-            voucher_type_id = voucher_types[0]["id"]
+        voucher_type_id = await _get_voucher_type_id(
+            client, ["årsavslutning", "year-end", "closing", "avslutning", "årsoppgjør"])
 
         if not voucher_type_id:
             return {"success": False, "error": "No voucher types available for closing entries"}
@@ -2553,6 +2567,10 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
         return {"success": False, "error": "Could not find salary/liability ledger accounts",
                 "employee_id": emp_id}
 
+    # Get voucher type (required to avoid "system-generated" 422 error)
+    voucher_type_id = await _get_voucher_type_id(
+        client, ["lønn", "salary", "payroll"])
+
     description = f"Salary payment: {emp_name}"
     postings = []
 
@@ -2588,6 +2606,7 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
     voucher_payload = {
         "date": today,
         "description": description,
+        "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
         "postings": postings,
     }
 
@@ -2685,18 +2704,8 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
                 "supplier_id": supplier_id}
 
     # Step 3b: Get voucher type (required to avoid "system-generated" 422 error)
-    voucher_types = await client.get_voucher_types()
-    voucher_type_id = None
-    for vt in voucher_types:
-        vt_name = (vt.get("name") or "").lower()
-        if any(kw in vt_name for kw in [
-            "leverandør", "inngående", "supplier", "incoming",
-            "memorial", "memorialnota",
-        ]):
-            voucher_type_id = vt["id"]
-            break
-    if not voucher_type_id and voucher_types:
-        voucher_type_id = voucher_types[0]["id"]
+    voucher_type_id = await _get_voucher_type_id(
+        client, ["leverandør", "inngående", "supplier", "incoming"])
 
     # Step 4: Create voucher with postings
     invoice_number = _get(fields, "invoice_number")
@@ -2981,9 +2990,11 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
         "description": description,
     }
 
+    dim_vt_id = await _get_voucher_type_id(client)
     voucher_payload = {
         "date": voucher_date,
         "description": description,
+        "voucherType": {"id": dim_vt_id} if dim_vt_id else None,
         "postings": [debit_posting, credit_posting],
     }
 
