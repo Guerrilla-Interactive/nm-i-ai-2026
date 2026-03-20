@@ -46,6 +46,8 @@ elif os.environ.get("ANTHROPIC_API_KEY"):
 
 log("INFO", f"Starting Tripletex Agent — LLM mode: {LLM_MODE}")
 
+_request_counter = 0
+
 
 # ---------------------------------------------------------------------------
 # Claude-based classifier (local dev)
@@ -204,8 +206,9 @@ async def _classify_with_claude(prompt: str, files: Optional[list[dict]] = None)
 
 _KEYWORD_MAP = [
     # --- Enable Module (MUST come before travel — "Aktiver modul Reiseregning" must not match travel) ---
-    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer)\w*\b.*\b(modul|module)\b",
-                               r"\bslå\s+på\b.*\b(modul|module)\b"]),
+    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate)\w*\b.*\b(modul|module|módulo)\b",
+                               r"\bslå\s+på\b.*\b(modul|module)\b",
+                               r"\b(activar|ativar|activate)\b.*\b(módulo|module|modul)\b"]),
     # --- T3: Bank / Year-end / Error (before travel/employee to catch compound words) ---
     (TaskType.BANK_RECONCILIATION, [r"\bbankavstem\w*\b",
                                      r"\bbank\w*\b.*\bavstem\w*\b",
@@ -441,9 +444,9 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 fields["number"] = m.group(1)
 
     # --- Organization number ---
-    m = re.search(r"(?:org\.?(?:anisasjonsnummer|\.?\s*nr\.?)?|organization\s*number)\s*:?\s*(\d{9})", text, re.I)
+    m = re.search(r"(?:org\.?(?:anisasjonsnummer|\.?\s*nr\.?)?|organization\s*number|Organisationsnummer|nº\s*org\.?|numéro\s*d'organisation|número\s*de\s*organización)\s*:?\s*([\d\-\s]{9,})", text, re.I)
     if m:
-        fields["organization_number"] = m.group(1)
+        fields["organization_number"] = re.sub(r'[^\d]', '', m.group(1))
 
     # --- Date of birth ---
     if task_type in (TaskType.CREATE_EMPLOYEE, TaskType.UPDATE_EMPLOYEE):
@@ -923,11 +926,105 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
 
 
 # ---------------------------------------------------------------------------
+# Batch detection
+# ---------------------------------------------------------------------------
+
+_BATCH_NUM_WORDS = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "to": 2, "tre": 3, "fire": 4, "fem": 5, "seks": 6, "sju": 7, "åtte": 8, "ni": 9, "ti": 10,
+    "zwei": 2, "drei": 3, "vier": 4, "fünf": 5, "sechs": 6, "sieben": 7, "acht": 8, "neun": 9, "zehn": 10,
+    "deux": 2, "trois": 3, "quatre": 4, "cinq": 5, "six": 6, "sept": 7, "huit": 8, "neuf": 9, "dix": 10,
+    "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
+}
+
+_BATCH_SINGULAR = {
+    "avdelinger": "avdeling", "departments": "department",
+    "ansatte": "ansatt", "employees": "employee",
+    "kunder": "kunde", "customers": "customer",
+    "produkter": "produkt", "products": "product",
+    "prosjekter": "prosjekt", "projects": "project",
+    "leverandører": "leverandør", "suppliers": "supplier",
+    "kontakter": "kontakt", "contacts": "contact",
+}
+
+
+def _detect_batch(prompt: str) -> list[str] | None:
+    """Detect batch operations like 'Create three departments: X, Y, Z'.
+
+    Returns a list of individual sub-prompts, or None if not a batch.
+    """
+    # Pattern: "Create N <entities>: X, Y, Z" or "Create N <entities>: X, Y and Z"
+    # Also: "Opprett N avdelinger: X, Y og Z"
+    m = re.search(
+        r"(?:opprett|create|lag|erstellen?|créer?|crear|criar|registrer)\s+"
+        r"(\w+)\s+"
+        r"(?:avdelinger?|departments?|ansatte|employees?|kunder?|customers?|produkter?|products?|prosjekter?|projects?|leverandører?|suppliers?|kontakter?|contacts?)"
+        r"\s*:\s*(.+)",
+        prompt, re.IGNORECASE
+    )
+
+    if not m:
+        return None
+
+    num_word = m.group(1).lower()
+    expected_count = _BATCH_NUM_WORDS.get(num_word)
+    if expected_count is None:
+        try:
+            expected_count = int(num_word)
+        except ValueError:
+            return None
+
+    items_text = m.group(2).strip()
+
+    # Split by comma and/or "og"/"and"/"und"/"et"/"y"/"e"
+    # First replace " og ", " and ", etc. with comma
+    items_text = re.sub(r'\s+(?:og|and|und|et|y|e)\s+', ', ', items_text, flags=re.IGNORECASE)
+    items = [item.strip().rstrip('.,;') for item in items_text.split(',') if item.strip()]
+
+    if not items:
+        return None
+
+    # Reconstruct individual prompts
+    # Extract the entity type keyword from the original prompt
+    entity_match = re.search(
+        r"(avdelinger?|departments?|ansatte|employees?|kunder?|customers?|produkter?|products?|prosjekter?|projects?|leverandører?|suppliers?|kontakter?|contacts?)",
+        prompt, re.IGNORECASE
+    )
+    entity_word = entity_match.group(1) if entity_match else "entity"
+    singular = _BATCH_SINGULAR.get(entity_word.lower(), entity_word)
+
+    # Detect the verb used
+    verb_match = re.search(r"(opprett|create|lag|erstellen?|créer?|crear|criar|registrer)", prompt, re.IGNORECASE)
+    verb = verb_match.group(1) if verb_match else "Opprett"
+
+    sub_prompts = [f"{verb} {singular} {item}" for item in items]
+    return sub_prompts
+
+
+# ---------------------------------------------------------------------------
 # Unified classifier dispatch
 # ---------------------------------------------------------------------------
 
 async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClassification:
     """Route to the appropriate classifier based on LLM_MODE."""
+    # --- Batch detection for non-Gemini modes ---
+    # Gemini handles batches via its system prompt, but rule-based and Claude don't
+    if LLM_MODE != "gemini":
+        sub_prompts = _detect_batch(prompt)
+        if sub_prompts:
+            log("INFO", "Batch detected", count=len(sub_prompts), sub_prompts=sub_prompts)
+            from classifier import _post_process_fields, _normalize_fields
+            results = []
+            for sp in sub_prompts:
+                if LLM_MODE == "claude":
+                    r = await _classify_with_claude(sp, files)
+                else:
+                    r = await _classify_rule_based(sp, files)
+                r.fields = _post_process_fields(r.task_type, r.fields)
+                r.fields = _normalize_fields(r.task_type, r.fields)
+                results.append(r)
+            return results
+
     if LLM_MODE == "gemini":
         from classifier import classify_task
         result = await classify_task(prompt, files)  # already applies _post_process_fields
@@ -993,6 +1090,7 @@ async def health_post():
 @app.post("/solve")
 @app.post("/")
 async def solve(request: Request):
+    global _request_counter
     start = time.monotonic()
 
     # --- Optional Bearer auth ---
@@ -1079,6 +1177,21 @@ async def solve(request: Request):
         log("INFO", "Task succeeded", task_type=task_type, result=result)
     else:
         log("WARN", "Task did not succeed", task_type=task_type, result=result)
+
+    # Request summary
+    _request_counter += 1
+    api_calls = getattr(client, 'api_call_count', 0)
+    errors = getattr(client, 'error_count', 0)
+    summary_lines = [
+        f"╔══════════════════════════════════════════════════╗",
+        f"║ Request #{_request_counter:>4}                                   ║",
+        f"║ Task: {str(task_type)[:42]:<42} ║",
+        f"║ API calls: {api_calls:<3}  Errors: {errors:<3}                    ║",
+        f"║ Success: {'YES' if isinstance(result, dict) and result.get('success') else 'NO ':<3}                                       ║",
+        f"╚══════════════════════════════════════════════════╝",
+    ]
+    for line in summary_lines:
+        log("INFO", line)
 
     elapsed = time.monotonic() - start
     log("INFO", "Request complete", elapsed_seconds=round(elapsed, 2))
