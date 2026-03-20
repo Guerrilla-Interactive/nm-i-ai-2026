@@ -3,9 +3,18 @@ Generate synthetic training images from product reference images for rare classe
 
 Pastes product images onto crops from real training images to create
 realistic-looking shelf scenes with YOLO labels.
+
+Improvements over v1:
+- Class-balanced: more images for rarer classes (inverse-count weighting)
+- Shelf-like grid placement instead of random scatter
+- Per-paste color jitter (hue, saturation, brightness, contrast)
+- Multiple target instances per image for very rare classes
+- CLI with --dry-run, --threshold, --max-images flags
 """
 
+import argparse
 import json
+import math
 import os
 import random
 from collections import Counter
@@ -21,17 +30,46 @@ PRODUCT_IMAGES_DIR = DATA_DIR / "product_images"
 TRAIN_IMAGES_DIR = DATA_DIR / "images" / "train"
 ANNOTATIONS_FILE = DATA_DIR / "annotations.json"
 METADATA_FILE = PRODUCT_IMAGES_DIR / "metadata.json"
-CATEGORY_NAMES_FILE = DATA_DIR / "category_names.json"
 
 OUTPUT_IMAGES_DIR = DATA_DIR / "images" / "synthetic"
 OUTPUT_LABELS_DIR = DATA_DIR / "labels" / "synthetic"
 
-# Config
-RARE_THRESHOLD = 10  # classes with fewer than this many annotations
-IMAGES_PER_RARE_CLASS = 8  # synthetic images to generate per rare class
-CANVAS_SIZE = (1280, 1280)  # output image size
-PRODUCTS_PER_IMAGE = (3, 8)  # range of products to place per synthetic image
+# Canvas
+CANVAS_SIZE = (1280, 1280)
 SEED = 42
+
+# Shelf layout constants
+SHELF_ROWS = (2, 5)       # number of shelf rows per image
+SHELF_Y_JITTER = 10       # pixels of vertical jitter within a row
+SHELF_X_GAP = (2, 15)     # horizontal gap between products on a shelf
+PRODUCT_H_RANGE = (90, 220)  # product height range in pixels
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic shelf images for rare classes"
+    )
+    parser.add_argument(
+        "--threshold", type=int, default=10,
+        help="Classes with fewer than this many annotations are considered rare (default: 10)"
+    )
+    parser.add_argument(
+        "--max-images", type=int, default=15,
+        help="Max synthetic images per class (rarest classes get this many) (default: 15)"
+    )
+    parser.add_argument(
+        "--min-images", type=int, default=4,
+        help="Min synthetic images per class (default: 4)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print plan without generating images"
+    )
+    parser.add_argument(
+        "--seed", type=int, default=SEED,
+        help="Random seed (default: 42)"
+    )
+    return parser.parse_args()
 
 
 def load_data():
@@ -42,10 +80,7 @@ def load_data():
     with open(METADATA_FILE) as f:
         metadata = json.load(f)
 
-    # category name -> id
     cat_name_to_id = {c["name"]: c["id"] for c in annotations["categories"]}
-
-    # Count annotations per category
     ann_counts = Counter(a["category_id"] for a in annotations["annotations"])
 
     # Build product_code -> category_id mapping via name matching
@@ -55,23 +90,34 @@ def load_data():
         if name in cat_name_to_id and product["has_images"]:
             product_to_catid[product["product_code"]] = cat_name_to_id[name]
 
-    # Build category_id -> product_code reverse mapping
+    # category_id -> product_code (keep first match)
     catid_to_product = {}
     for pcode, cid in product_to_catid.items():
-        catid_to_product[cid] = pcode
+        if cid not in catid_to_product:
+            catid_to_product[cid] = pcode
 
     return annotations, ann_counts, catid_to_product, cat_name_to_id
 
 
-def get_rare_classes(ann_counts, catid_to_product, num_classes=356):
+def get_rare_classes(ann_counts, catid_to_product, threshold, num_classes=356):
     """Find rare classes that have product images available."""
     rare = []
     for cid in range(num_classes):
         count = ann_counts.get(cid, 0)
-        if count < RARE_THRESHOLD and cid in catid_to_product:
+        if count < threshold and cid in catid_to_product:
             rare.append((cid, count))
     rare.sort(key=lambda x: x[1])
     return rare
+
+
+def images_for_class(ann_count, threshold, max_images, min_images):
+    """Inverse-count weighting: fewer annotations -> more synthetic images."""
+    if ann_count == 0:
+        return max_images
+    # Linear interpolation: 0 anns -> max_images, threshold anns -> min_images
+    frac = ann_count / threshold
+    n = max_images - frac * (max_images - min_images)
+    return max(min_images, int(round(n)))
 
 
 def load_product_image(product_code, angle=None):
@@ -84,7 +130,6 @@ def load_product_image(product_code, angle=None):
     if not available:
         return None
 
-    # Prefer front/main for best visibility
     if angle and angle in available:
         chosen = angle
     else:
@@ -117,12 +162,10 @@ def get_background_crop(train_images):
         bg = Image.new("RGB", CANVAS_SIZE, color=(200, 195, 185))
         return bg
 
-    # Resize to at least canvas size, then crop
     w, h = bg.size
     scale = max(CANVAS_SIZE[0] / w, CANVAS_SIZE[1] / h) * 1.1
     bg = bg.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
 
-    # Random crop
     w, h = bg.size
     x = random.randint(0, max(0, w - CANVAS_SIZE[0]))
     y = random.randint(0, max(0, h - CANVAS_SIZE[1]))
@@ -131,36 +174,65 @@ def get_background_crop(train_images):
     return bg
 
 
-def augment_product(img):
-    """Apply random augmentations to a product image."""
-    # Random rotation (-15 to 15 degrees)
-    angle = random.uniform(-15, 15)
-    img = img.rotate(angle, expand=True, resample=Image.BICUBIC, fillcolor=(0, 0, 0, 0))
-
-    # Random scale (0.5x to 1.5x)
-    scale = random.uniform(0.5, 1.5)
-    new_w = max(20, int(img.width * scale))
-    new_h = max(20, int(img.height * scale))
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-
-    # Random brightness (0.7 to 1.3)
+def color_jitter(img):
+    """Apply per-paste color jitter: hue, saturation, brightness, contrast."""
+    alpha = img.split()[3]
     rgb = img.convert("RGB")
-    enhancer = ImageEnhance.Brightness(rgb)
-    rgb = enhancer.enhance(random.uniform(0.7, 1.3))
 
-    # Random contrast (0.8 to 1.2)
-    enhancer = ImageEnhance.Contrast(rgb)
-    rgb = enhancer.enhance(random.uniform(0.8, 1.2))
+    # Hue shift via HSV
+    hsv = np.array(rgb.convert("HSV"))
+    hue_shift = random.randint(-15, 15)
+    hsv[:, :, 0] = (hsv[:, :, 0].astype(int) + hue_shift) % 256
+    rgb = Image.fromarray(hsv, "HSV").convert("RGB")
 
-    # Random slight blur (simulates shelf distance)
-    if random.random() < 0.3:
+    # Saturation
+    rgb = ImageEnhance.Color(rgb).enhance(random.uniform(0.7, 1.4))
+
+    # Brightness
+    rgb = ImageEnhance.Brightness(rgb).enhance(random.uniform(0.65, 1.35))
+
+    # Contrast
+    rgb = ImageEnhance.Contrast(rgb).enhance(random.uniform(0.75, 1.25))
+
+    # Optional blur (shelf distance effect)
+    if random.random() < 0.25:
         rgb = rgb.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.5)))
 
-    # Recombine with alpha
     result = rgb.convert("RGBA")
-    result.putalpha(img.split()[3])  # preserve original alpha
-
+    result.putalpha(alpha)
     return result
+
+
+def augment_product(img):
+    """Apply geometric augmentations + per-paste color jitter."""
+    # Small rotation (shelf products are mostly upright)
+    angle = random.uniform(-5, 5)
+    img = img.rotate(angle, expand=True, resample=Image.BICUBIC, fillcolor=(0, 0, 0, 0))
+
+    # Per-paste color jitter
+    img = color_jitter(img)
+
+    return img
+
+
+def compute_shelf_layout(canvas_w, canvas_h):
+    """Generate a shelf-like grid: rows of products at consistent y-positions.
+
+    Returns list of (row_y, row_h) for each shelf row.
+    """
+    num_rows = random.randint(*SHELF_ROWS)
+    # Divide canvas into rows with small gaps
+    row_gap = random.randint(5, 20)
+    usable_h = canvas_h - row_gap * (num_rows + 1)
+    row_h = usable_h // num_rows
+
+    rows = []
+    y = row_gap
+    for _ in range(num_rows):
+        rows.append((y, min(row_h, random.randint(*PRODUCT_H_RANGE))))
+        y += row_h + row_gap
+
+    return rows
 
 
 def place_product_on_canvas(canvas, product_img, x, y):
@@ -176,7 +248,7 @@ def place_product_on_canvas(canvas, product_img, x, y):
         return None
 
     cropped = product_img.crop((0, 0, pw, ph))
-    canvas.paste(cropped, (x, y), cropped)  # use alpha as mask
+    canvas.paste(cropped, (x, y), cropped)
 
     return (x, y, pw, ph)
 
@@ -188,7 +260,19 @@ def bbox_to_yolo(bbox, img_w, img_h):
     cy = (y + h / 2) / img_h
     nw = w / img_w
     nh = h / img_h
+    # Clamp to [0, 1]
+    cx = max(0.0, min(1.0, cx))
+    cy = max(0.0, min(1.0, cy))
+    nw = max(0.0, min(1.0, nw))
+    nh = max(0.0, min(1.0, nh))
     return cx, cy, nw, nh
+
+
+def resize_product_to_height(img, target_h):
+    """Resize product image to target height, preserving aspect ratio."""
+    aspect = img.width / max(1, img.height)
+    target_w = max(20, int(target_h * aspect))
+    return img.resize((target_w, target_h), Image.LANCZOS)
 
 
 def generate_synthetic_image(
@@ -197,82 +281,75 @@ def generate_synthetic_image(
     catid_to_product,
     train_images,
     img_index,
+    target_instances=1,
 ):
-    """Generate one synthetic image with the target class + random other products."""
+    """Generate one synthetic image with shelf-like layout.
+
+    Places target_instances copies of the target class, fills remaining
+    shelf slots with random other products.
+    """
     bg = get_background_crop(train_images)
     canvas = bg.copy()
-
     labels = []
-    placed = []
 
-    # Target product sizes typical for shelf products (relative to 1280px canvas)
-    target_size_range = (80, 250)
-
-    # Place the target product (guaranteed)
-    product_img = load_product_image(target_product_code, angle=random.choice(["front", "main"]))
-    if product_img is None:
-        return False
-
-    product_img = augment_product(product_img)
-
-    # Scale to reasonable shelf-product size
-    target_h = random.randint(*target_size_range)
-    aspect = product_img.width / max(1, product_img.height)
-    target_w = max(20, int(target_h * aspect))
-    product_img = product_img.resize((target_w, target_h), Image.LANCZOS)
-
-    # Random position
-    x = random.randint(0, max(0, CANVAS_SIZE[0] - target_w))
-    y = random.randint(0, max(0, CANVAS_SIZE[1] - target_h))
-
-    bbox = place_product_on_canvas(canvas, product_img, x, y)
-    if bbox:
-        yolo_bbox = bbox_to_yolo(bbox, CANVAS_SIZE[0], CANVAS_SIZE[1])
-        labels.append((target_class_id, *yolo_bbox))
-        placed.append(bbox)
-
-    # Add random other products to fill the scene
-    num_others = random.randint(*PRODUCTS_PER_IMAGE)
+    # Generate shelf layout
+    shelf_rows = compute_shelf_layout(CANVAS_SIZE[0], CANVAS_SIZE[1])
     available_products = list(catid_to_product.items())
 
-    for _ in range(num_others):
-        other_cid, other_pcode = random.choice(available_products)
-        other_img = load_product_image(other_pcode, angle=random.choice(["front", "main", "left", "right"]))
-        if other_img is None:
-            continue
+    # Build a pool of (class_id, product_code) to place, ensuring target class appears
+    product_pool = []
+    for _ in range(target_instances):
+        product_pool.append((target_class_id, target_product_code))
 
-        other_img = augment_product(other_img)
+    # Fill remaining slots with random products (estimate ~4-7 per row)
+    total_slots = sum(random.randint(4, 7) for _ in shelf_rows)
+    fill_count = max(0, total_slots - target_instances)
+    for _ in range(fill_count):
+        cid, pcode = random.choice(available_products)
+        product_pool.append((cid, pcode))
 
-        other_h = random.randint(*target_size_range)
-        aspect = other_img.width / max(1, other_img.height)
-        other_w = max(20, int(other_h * aspect))
-        other_img = other_img.resize((other_w, other_h), Image.LANCZOS)
+    random.shuffle(product_pool)
 
-        # Try to find non-overlapping position (up to 5 attempts)
-        for _ in range(5):
-            ox = random.randint(0, max(0, CANVAS_SIZE[0] - other_w))
-            oy = random.randint(0, max(0, CANVAS_SIZE[1] - other_h))
+    # Place products row by row
+    pool_idx = 0
+    for row_y, row_h in shelf_rows:
+        x_cursor = random.randint(5, 30)  # left margin
 
-            overlap_ok = True
-            for px, py, pw, ph in placed:
-                ix1 = max(ox, px)
-                iy1 = max(oy, py)
-                ix2 = min(ox + other_w, px + pw)
-                iy2 = min(oy + other_h, py + ph)
-                if ix2 > ix1 and iy2 > iy1:
-                    inter = (ix2 - ix1) * (iy2 - iy1)
-                    area = other_w * other_h
-                    if inter / area > 0.3:
-                        overlap_ok = False
-                        break
+        while x_cursor < CANVAS_SIZE[0] - 40 and pool_idx < len(product_pool):
+            cid, pcode = product_pool[pool_idx]
+            pool_idx += 1
 
-            if overlap_ok:
-                bbox = place_product_on_canvas(canvas, other_img, ox, oy)
-                if bbox:
-                    yolo_bbox = bbox_to_yolo(bbox, CANVAS_SIZE[0], CANVAS_SIZE[1])
-                    labels.append((other_cid, *yolo_bbox))
-                    placed.append(bbox)
-                break
+            # Load and augment
+            angle_choice = random.choice(["front", "main", "front", "front"])
+            prod_img = load_product_image(pcode, angle=angle_choice)
+            if prod_img is None:
+                continue
+
+            prod_img = augment_product(prod_img)
+
+            # Size to fit the shelf row
+            product_h = min(row_h, random.randint(*PRODUCT_H_RANGE))
+            prod_img = resize_product_to_height(prod_img, product_h)
+
+            # Place at current cursor with small vertical jitter
+            y_jitter = random.randint(-SHELF_Y_JITTER, SHELF_Y_JITTER)
+            place_y = max(0, row_y + (row_h - product_h) // 2 + y_jitter)
+
+            bbox = place_product_on_canvas(canvas, prod_img, x_cursor, place_y)
+            if bbox:
+                yolo_bbox = bbox_to_yolo(bbox, CANVAS_SIZE[0], CANVAS_SIZE[1])
+                labels.append((cid, *yolo_bbox))
+
+            # Advance cursor
+            x_cursor += prod_img.width + random.randint(*SHELF_X_GAP)
+
+    if not labels:
+        return False
+
+    # Verify target class is in labels (it should be unless image loading failed)
+    has_target = any(l[0] == target_class_id for l in labels)
+    if not has_target:
+        return False
 
     # Save image and label
     img_name = f"synth_{target_class_id:03d}_{img_index:03d}.jpg"
@@ -288,8 +365,9 @@ def generate_synthetic_image(
 
 
 def main():
-    random.seed(SEED)
-    np.random.seed(SEED)
+    args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
 
     print("Loading data...")
     annotations, ann_counts, catid_to_product, cat_name_to_id = load_data()
@@ -297,11 +375,37 @@ def main():
     print(f"Total categories: {len(annotations['categories'])}")
     print(f"Categories with product images: {len(catid_to_product)}")
 
-    rare_classes = get_rare_classes(ann_counts, catid_to_product)
-    print(f"Rare classes (<{RARE_THRESHOLD} annotations) with product images: {len(rare_classes)}")
+    rare_classes = get_rare_classes(ann_counts, catid_to_product, args.threshold)
+    print(f"Rare classes (<{args.threshold} annotations) with product images: {len(rare_classes)}")
 
     if not rare_classes:
         print("No rare classes with product images found!")
+        return
+
+    id_to_name = {c["id"]: c["name"] for c in annotations["categories"]}
+
+    # Compute per-class image counts
+    plan = []
+    total_planned = 0
+    for class_id, ann_count in rare_classes:
+        n_images = images_for_class(ann_count, args.threshold, args.max_images, args.min_images)
+        # Very rare classes get multiple target instances per image
+        target_instances = 2 if ann_count <= 2 else 1
+        plan.append((class_id, ann_count, n_images, target_instances))
+        total_planned += n_images
+
+    # Print plan
+    print(f"\nGeneration plan ({total_planned} images total):")
+    print(f"  {'CID':>4s}  {'Ann':>4s}  {'Synth':>5s}  {'Inst/img':>8s}  Name")
+    print("-" * 80)
+    for class_id, ann_count, n_images, t_inst in plan:
+        name = id_to_name.get(class_id, f"class_{class_id}")[:50]
+        print(f"  {class_id:4d}  {ann_count:4d}  {n_images:5d}  {t_inst:8d}  {name}")
+    print("-" * 80)
+    print(f"  Total: {total_planned} images for {len(plan)} classes")
+
+    if args.dry_run:
+        print("\n[DRY RUN] No images generated.")
         return
 
     # Collect training images for backgrounds
@@ -310,33 +414,28 @@ def main():
         for f in os.listdir(TRAIN_IMAGES_DIR)
         if f.endswith((".jpg", ".jpeg", ".png"))
     ]
-    print(f"Training images for backgrounds: {len(train_images)}")
+    print(f"\nTraining images for backgrounds: {len(train_images)}")
 
-    # Create output directories
     OUTPUT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_LABELS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Build reverse mapping for category names
-    id_to_name = {c["id"]: c["name"] for c in annotations["categories"]}
 
     total_generated = 0
     classes_augmented = 0
 
-    print(f"\nGenerating {IMAGES_PER_RARE_CLASS} synthetic images per rare class...")
-    print("-" * 70)
-
-    for class_id, ann_count in rare_classes:
+    print(f"\nGenerating images...")
+    for class_id, ann_count, n_images, target_instances in plan:
         product_code = catid_to_product[class_id]
         class_name = id_to_name.get(class_id, f"class_{class_id}")
 
         generated = 0
-        for i in range(IMAGES_PER_RARE_CLASS):
+        for i in range(n_images):
             success = generate_synthetic_image(
                 class_id,
                 product_code,
                 catid_to_product,
                 train_images,
                 i,
+                target_instances=target_instances,
             )
             if success:
                 generated += 1
@@ -344,7 +443,7 @@ def main():
         if generated > 0:
             classes_augmented += 1
             total_generated += generated
-            print(f"  Class {class_id:3d} ({ann_count} ann): {class_name[:50]:50s} -> {generated} images")
+            print(f"  Class {class_id:3d} ({ann_count:2d} ann): {class_name[:50]:50s} -> {generated} images")
 
     print("-" * 70)
     print(f"\nSummary:")
