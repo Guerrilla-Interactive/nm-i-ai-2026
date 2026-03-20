@@ -27,7 +27,9 @@ Key API facts from tested sandbox (MUST handle):
 
 import json
 import logging
+import random
 import re
+import string
 from datetime import date
 from typing import Any
 
@@ -469,8 +471,18 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
         "address": _build_address(fields),
         "comments": _get(fields, "comments"),
     })
-    result = await client.create_employee(payload)
-    return {"created_id": result.get("id"), "entity": "employee"}
+    try:
+        result = await client.create_employee(payload)
+        return {"created_id": result.get("id"), "entity": "employee"}
+    except TripletexAPIError as e:
+        if e.status_code == 422 and "e-post" in (e.detail or "").lower():
+            # Duplicate email — retry with randomized email
+            suffix = ''.join(random.choices(string.digits, k=4))
+            payload["email"] = f"{payload.get('firstName', 'u').lower()}.{payload.get('lastName', 't').lower()}.{suffix}@example.com"
+            _log("WARNING", "Duplicate email, retrying with randomized email", email=payload["email"])
+            result = await client.create_employee(payload)
+            return {"created_id": result.get("id"), "entity": "employee"}
+        raise
 
 
 async def _exec_update_employee(fields: dict, client: TripletexClient) -> dict:
@@ -733,7 +745,8 @@ async def _exec_create_product(fields: dict, client: TripletexClient) -> dict:
         result = await client.create_product(payload)
         return {"created_id": result.get("id"), "entity": "product"}
     except TripletexAPIError as e:
-        if e.status_code == 422 and "er i bruk" in (e.detail or ""):
+        detail = e.detail or ""
+        if e.status_code == 422 and "er i bruk" in detail:
             # Product number collision — search for existing product
             if product_name:
                 try:
@@ -748,6 +761,12 @@ async def _exec_create_product(fields: dict, client: TripletexClient) -> dict:
             _log("WARNING", "Product number collision, retrying without number",
                  number=product_number)
             payload.pop("number", None)
+            result = await client.create_product(payload)
+            return {"created_id": result.get("id"), "entity": "product"}
+        if e.status_code == 422 and ("mva" in detail.lower() or "vat" in detail.lower()):
+            # VAT type ID invalid on this sandbox — retry without vatType
+            _log("WARNING", "Invalid VAT type, retrying without vatType")
+            payload.pop("vatType", None)
             result = await client.create_product(payload)
             return {"created_id": result.get("id"), "entity": "product"}
         raise
@@ -829,8 +848,29 @@ async def _exec_create_project(fields: dict, client: TripletexClient) -> dict:
         "projectManager": {"id": int(manager_id)},
         "department": _ref(_get(fields, "department_id")),
     })
-    result = await client.create_project(payload)
-    return {"created_id": result.get("id"), "entity": "project"}
+    try:
+        result = await client.create_project(payload)
+        return {"created_id": result.get("id"), "entity": "project"}
+    except TripletexAPIError as e:
+        if e.status_code == 422 and "prosjektleder" in (e.detail or "").lower():
+            # Project manager doesn't have PM access — try other employees
+            _log("WARNING", "Project manager lacks access, trying other employees",
+                 failed_id=manager_id)
+            employees = await client.get_employees({"count": 20})
+            for emp in employees:
+                if emp["id"] == manager_id:
+                    continue  # skip the one that already failed
+                payload["projectManager"] = {"id": emp["id"]}
+                try:
+                    result = await client.create_project(payload)
+                    return {"created_id": result.get("id"), "entity": "project"}
+                except TripletexAPIError as e2:
+                    if e2.status_code == 422 and "prosjektleder" in (e2.detail or "").lower():
+                        continue  # try next employee
+                    raise
+            # All employees failed — re-raise original
+            raise
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1121,8 +1161,19 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
                 "invoiceDateTo": "2099-12-31",
             })
             if not invoices:
-                return {"success": False, "error": f"Invoice #{invoice_number} not found"}
-            invoice_id = invoices[0]["id"]
+                # Invoice number not found — try by customer name as fallback
+                customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+                if customer_name:
+                    _log("INFO", f"Invoice #{invoice_number} not found, trying customer name",
+                         customer=customer_name)
+                    resolved = await _resolve_invoice_by_identifier(client, customer_name, fields)
+                    if resolved:
+                        invoice_id = resolved
+                        _log("INFO", "Found invoice by customer name for payment", invoice_id=invoice_id)
+                if not invoice_id:
+                    return {"success": False, "error": f"Invoice #{invoice_number} not found"}
+            else:
+                invoice_id = invoices[0]["id"]
         else:
             # Non-numeric identifier — try to resolve by customer name
             resolved = await _resolve_invoice_by_identifier(client, str(invoice_number), fields)
@@ -1215,6 +1266,16 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
                 else:
                     return {"success": False,
                             "error": f"Cannot resolve invoice identifier: {invoice_number}"}
+
+    if not invoice_id:
+        # Try to find invoice by customer name as last resort
+        customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+        if customer_name:
+            _log("INFO", "No invoice ID, trying to find by customer name", customer=customer_name)
+            resolved = await _resolve_invoice_by_identifier(client, customer_name, fields)
+            if resolved:
+                invoice_id = resolved
+                _log("INFO", "Found invoice by customer name for credit note", invoice_id=invoice_id)
 
     if not invoice_id:
         return {"success": False, "error": "No invoice specified for credit note"}
@@ -1948,13 +2009,18 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                 project_id = projects[0]["id"]
             else:
                 # Create project if not found (fresh sandbox)
-                proj = await client.create_project(_clean({
+                # Use _exec_create_project which handles PM access issues
+                proj_fields = {
                     "name": proj_name,
-                    "projectManager": {"id": int(employee_id)},
-                    "startDate": _today(),
-                }))
-                project_id = proj["id"]
-                _log("INFO", "Created project for timesheet", name=proj_name, id=project_id)
+                    "start_date": _today(),
+                }
+                try:
+                    proj_result = await _exec_create_project(proj_fields, client)
+                    project_id = proj_result.get("created_id")
+                    _log("INFO", "Created project for timesheet", name=proj_name, id=project_id)
+                except Exception as proj_err:
+                    _log("WARNING", f"Failed to create project for timesheet: {proj_err}")
+                    return {"success": False, "error": f"Cannot create project '{proj_name}': {proj_err}"}
 
     if not project_id:
         return {"success": False, "error": "No project specified for hour logging"}
