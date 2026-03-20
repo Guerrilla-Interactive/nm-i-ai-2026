@@ -57,6 +57,7 @@ class TaskType(str, Enum):
     CREATE_DIMENSION_AND_VOUCHER = "create_dimension_and_voucher"
     RUN_PAYROLL = "run_payroll"
     REGISTER_SUPPLIER_INVOICE = "register_supplier_invoice"
+    REVERSE_PAYMENT = "reverse_payment"
 
     # Fallback
     UNKNOWN = "unknown"
@@ -354,6 +355,13 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
             "additions",  # list of {description, amount}
         ],
     },
+    TaskType.REVERSE_PAYMENT: {
+        "required": ["customer_name"],
+        "optional": [
+            "organization_number", "invoice_number", "invoice_identifier",
+            "amount", "amount_excluding_vat", "reason",
+        ],
+    },
 
     # ── Fallback ───────────────────────────────────────────────────────────
     TaskType.UNKNOWN: {
@@ -410,5 +418,6 @@ TASK_TYPE_DESCRIPTIONS: dict[TaskType, str] = {
     TaskType.CREATE_DIMENSION_AND_VOUCHER: "Create a free accounting dimension (regnskapsdimensjon) with values and optionally post a voucher/journal entry using those dimensions",
     TaskType.REGISTER_SUPPLIER_INVOICE: "Register/book an incoming supplier invoice (leverandørfaktura/facture fournisseur/Eingangsrechnung) with VAT and account posting",
     TaskType.RUN_PAYROLL: "Execute/run payroll for an employee — create a salary transaction with base salary, bonuses, and deductions (lønn/paie/nómina/Gehalt)",
+    TaskType.REVERSE_PAYMENT: "Reverse a payment that was returned/bounced by the bank, reopening the invoice as outstanding",
     TaskType.UNKNOWN: "Could not determine the task type — use fallback logic",
 }

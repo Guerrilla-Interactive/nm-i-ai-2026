@@ -260,6 +260,11 @@ _KEYWORD_MAP = [
                                 r"\b(ansatt|tilsett|employee)\b.*\b(som\s+heter|named?|called)\b",
                                 r"\b(ansatt|tilsett|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b"]),
     # --- Invoice (MUST come before customer to avoid "opprett faktura for kunde" → CREATE_CUSTOMER) ---
+    # --- Payment returned / bounced / reversed → reverse_payment (before credit note and error correction) ---
+    (TaskType.REVERSE_PAYMENT, [r"\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b.*\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b",
+                                 r"\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b.*\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b",
+                                 r"\b(reverser|reverse|undo|tilbakefør)\w*\b.*\b(betaling|payment|zahlung|paiement|pago)\w*\b",
+                                 r"\b(returnert|returned|bounced)\w*\b.*\b(bank|betaling|payment)\w*\b"]),
     (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b"]),
     (TaskType.INVOICE_WITH_PAYMENT, [r"\b(faktura|invoice|factura|rechnung|facture)\b.*\b(betaling|payment|betalt|paid|pago|zahlung|paiement)\b",
                                      r"\b(facture|faktura|invoice|rechnung)\s+impayée?\b.*\b(enregistr|registr|betaling|payment|paiement)\b",
@@ -651,7 +656,7 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
 
     # --- Invoice identifier (for payment, credit note, and invoice-related tasks) ---
     _INVOICE_TASK_TYPES = (TaskType.REGISTER_PAYMENT, TaskType.CREATE_CREDIT_NOTE,
-                           TaskType.INVOICE_WITH_PAYMENT)
+                           TaskType.INVOICE_WITH_PAYMENT, TaskType.REVERSE_PAYMENT)
     if task_type in _INVOICE_TASK_TYPES:
         # "faktura 12345" / "invoice 12345" / "factura 12345" / "Rechnung 12345"
         m = re.search(
@@ -941,6 +946,7 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
         (["reiseregning", "reiserekning", "travel expense", "reisekosten", "frais de voyage"], TaskType.CREATE_TRAVEL_EXPENSE),
         (["kontaktperson", "contact", "contacto", "contato"], TaskType.CREATE_CONTACT),
         (["regnskapsdimensjon", "dimensjon", "dimension", "konteringsdimensjon"], TaskType.CREATE_DIMENSION_AND_VOUCHER),
+        (["returnert av banken", "returned by bank", "bounced", "reverser betaling", "reverse payment"], TaskType.REVERSE_PAYMENT),
         (["betaling", "payment", "innbetaling", "pago", "zahlung", "paiement"], TaskType.REGISTER_PAYMENT),
         (["kreditnota", "credit note", "gutschrift", "avoir"], TaskType.CREATE_CREDIT_NOTE),
         (["modul", "module"], TaskType.ENABLE_MODULE),
