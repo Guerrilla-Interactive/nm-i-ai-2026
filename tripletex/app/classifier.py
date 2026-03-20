@@ -140,6 +140,11 @@ Keywords: "create invoice and register payment", "unpaid invoice" with NEW custo
 "facture impayée" with full invoice line details that need to be created.
   * KEY TEST: If the prompt says the customer "has" an invoice or the invoice is "outstanding"/"utestående", \
 it means the invoice already exists → register_payment. If the prompt asks to CREATE a new invoice and pay it → invoice_with_payment.
+- "facture impayée" / "unbezahlte Rechnung" / "unpaid invoice" + customer details → invoice_with_payment
+- If the prompt gives customer details (name, org number) AND invoice details (amount, description) \
+AND mentions payment → invoice_with_payment
+- CRITICAL: "Payment returned/bounced/rejected by bank" → create_credit_note, NOT error_correction. \
+A bounced payment needs a credit note to reverse the payment registration and reopen the invoice.
 - CRITICAL: "Setting a fixed price for a project" / "Festpreis festlegen" / "fast pris" on an existing project \
 is ONLY update_project (with is_fixed_price=true and fixed_price=<amount>). It is NOT a batch with an invoice. \
 Do NOT split this into multiple tasks. The update_project task type supports is_fixed_price and fixed_price fields.
@@ -258,6 +263,22 @@ Output:
 Input: "Opprett kreditnota for faktura 10055"
 Output:
 {{"task_type": "create_credit_note", "confidence": 0.97, "fields": {{"invoice_identifier": "10055"}}}}
+
+### Example 16b — Credit note for bounced payment (Bokmål)
+Input: "Betalingen fra Havbris AS for fakturaen Programvarelisens ble returnert av banken. Reverser betalingen slik at fakturaen igjen viser utestående beløp."
+Output:
+{{"task_type": "create_credit_note", "confidence": 0.97, "fields": {{"invoice_identifier": "Havbris AS", "comment": "Betaling returnert av banken"}}}}
+NOTE: Bounced/returned bank payment → create_credit_note, NOT error_correction. The payment was registered but the bank rejected it — reverse it with a credit note.
+
+### Example 16c — Credit note for bounced payment (Portuguese)
+Input: "O pagamento de Empresa Verde Lda para a fatura de Serviços de Consultoria foi devolvido pelo banco. Reverter o pagamento."
+Output:
+{{"task_type": "create_credit_note", "confidence": 0.96, "fields": {{"invoice_identifier": "Empresa Verde Lda", "comment": "Pagamento devolvido pelo banco"}}}}
+
+### Example 16d — Credit note for bounced payment (English)
+Input: "The payment from Acme Corp for invoice Software License was returned by the bank. Reverse the payment so the invoice shows outstanding amount again."
+Output:
+{{"task_type": "create_credit_note", "confidence": 0.97, "fields": {{"invoice_identifier": "Acme Corp", "comment": "Payment returned by bank"}}}}
 
 ### Example 17 — Project with customer (Bokmål)
 Input: "Opprett prosjekt 'Nettside' for kunde Digitalbyrå AS, start 01.04.2026, fast pris 50000 kr"
@@ -1000,6 +1021,12 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "kreditnota", "kreditere faktura", "credit note", "kreditere",
             "gutschrift", "avoir", "créer avoir",
             "nota de crédito", "nota de credito",
+            # Bounced/returned payment → credit note (NOT error correction)
+            "returnert av banken", "returned by bank", "returned by the bank",
+            "bounced payment", "betaling returnert", "payment returned",
+            "rückerstattet", "devolvido", "devuelto",
+            "betaling avvist", "payment rejected", "payment bounced",
+            "paiement retourné", "paiement rejeté",
         ],
     },
     TaskType.REGISTER_PAYMENT: {
@@ -1695,7 +1722,9 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
     # Order matters — more specific matches first
     _LAST_RESORT = [
         # Credit note before invoice
-        (["kreditnota", "credit note", "gutschrift", "avoir", "nota de crédito"], TaskType.CREATE_CREDIT_NOTE),
+        (["kreditnota", "credit note", "gutschrift", "avoir", "nota de crédito",
+          "returnert av banken", "returned by bank", "bounced", "payment returned",
+          "betaling returnert", "rückerstattet", "devolvido"], TaskType.CREATE_CREDIT_NOTE),
         # Invoice+payment before plain invoice
         (["betaling", "payment", "pago", "zahlung", "paiement", "betalt", "paid", "innbetaling"], TaskType.INVOICE_WITH_PAYMENT),
         # Travel before employee
