@@ -2765,10 +2765,12 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     # Step 1: Check existing dimensions
     dim_id = None
     dim_number = None
+    existing_dims = []
     try:
         existing_dims = await client.get_dimension_names({"fields": "*"})
         for d in existing_dims:
-            if (d.get("name") or "").lower() == dim_name.lower():
+            d_name = d.get("displayName") or d.get("name") or ""
+            if d_name.lower() == dim_name.lower():
                 dim_id = d.get("id")
                 dim_number = d.get("dimensionNumber") or d.get("number")
                 _log("INFO", "Dimension already exists", dim_id=dim_id, dim_number=dim_number)
@@ -2858,32 +2860,44 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     # Step 3: Create dimension values
     created_values = []
     linked_value_id = None
+    dim_name_ref = {"id": dim_id} if dim_id else None
     for val_name in dim_values:
-        try:
-            val_payload = _clean({
-                "name": val_name,
-                "dimensionName": {"id": dim_id} if dim_id else None,
-            })
-            val_result = await client.create_dimension_value(val_payload)
-            val_id = val_result.get("id")
-            created_values.append({"name": val_name, "id": val_id})
-            if linked_dim_value and val_name.lower() == linked_dim_value.lower():
-                linked_value_id = val_id
-            _log("INFO", "Created dimension value", name=val_name, id=val_id)
-        except TripletexAPIError as e:
-            _log("WARNING", "Failed to create dimension value", name=val_name, error=str(e))
-            # May already exist — try to look it up
+        val_id = None
+        # Try multiple payload formats
+        val_payloads = [
+            _clean({"displayName": val_name, "dimensionName": dim_name_ref, "number": dim_number}),
+            _clean({"name": val_name, "dimensionName": dim_name_ref, "number": dim_number}),
+            _clean({"displayName": val_name, "dimensionName": dim_name_ref}),
+            _clean({"name": val_name, "dimensionName": dim_name_ref}),
+        ]
+        for val_payload in val_payloads:
+            try:
+                val_result = await client.create_dimension_value(val_payload)
+                val_id = val_result.get("id")
+                _log("INFO", "Created dimension value", name=val_name, id=val_id,
+                     payload_keys=list(val_payload.keys()))
+                break
+            except TripletexAPIError as e:
+                if e.status_code != 422:
+                    break
+                continue
+
+        if val_id is None:
+            _log("WARNING", "Failed to create dimension value, looking up existing", name=val_name)
             try:
                 existing_vals = await client.get_dimension_values({"fields": "*"})
                 for ev in existing_vals:
-                    if (ev.get("name") or "").lower() == val_name.lower():
+                    ev_name = ev.get("displayName") or ev.get("name") or ""
+                    if ev_name.lower() == val_name.lower():
                         val_id = ev.get("id")
-                        created_values.append({"name": val_name, "id": val_id})
-                        if linked_dim_value and val_name.lower() == linked_dim_value.lower():
-                            linked_value_id = val_id
                         break
             except TripletexAPIError:
                 pass
+
+        if val_id:
+            created_values.append({"name": val_name, "id": val_id})
+            if linked_dim_value and val_name.lower() == linked_dim_value.lower():
+                linked_value_id = val_id
 
     # If no amount, return dimension-only result
     if amount is None or amount == 0:
