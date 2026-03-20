@@ -141,8 +141,8 @@ when the prompt implies the customer already exists in the system.
 - "inngående faktura", "mottatt faktura", "leverandørfaktura", "Eingangsrechnung", "facture fournisseur" → create_supplier_invoice
 - CRITICAL: "Registrieren Sie den Lieferanten" / "registrer leverandør" / "register supplier" → create_supplier (NOT create_customer)
 - CRITICAL: "Exécutez la paie" / "kjør lønn" / "run payroll" / "Gehaltsabrechnung" / "ejecutar nómina" → run_payroll
-- CRITICAL: "payment returned/bounced/devolvido/rückerstattet" by bank → create_credit_note (NOT error_correction). \
-The goal is to reverse the payment and reopen the invoice.
+- CRITICAL: "reverser betaling" / "payment returned/bounced by bank" / "Zahlung rückerstattet" → reverse_payment (NOT create_credit_note or error_correction). \
+The goal is to reverse the payment voucher so the invoice is outstanding again.
 - paie/salaire/lønn/Gehalt/nómina + employee name + amount → run_payroll (salary payment)
 - Lieferant/leverandør/supplier WITHOUT faktura/invoice keywords → create_supplier (register the supplier entity)
 - When a prompt mentions both creating a project AND linking it to a customer → project_with_customer
@@ -326,7 +326,12 @@ Output:
 ### Example 25 — Payment returned / bounced (Portuguese)
 Input: "O pagamento de Cascata Lda (org. nº 844279892) referente à fatura 'Horas de consultoria' (41350 NOK sem IVA) foi devolvido pelo banco. Reverta o pagamento para reabrir a fatura."
 Output:
-{{"task_type": "create_credit_note", "confidence": 0.95, "fields": {{"invoice_identifier": "Cascata Lda", "customer_name": "Cascata Lda", "organization_number": "844279892", "comment": "Payment returned by bank - reversing invoice"}}}}
+{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Cascata Lda", "organization_number": "844279892"}}}}
+
+### Example 25b — Reverse payment (Norwegian)
+Input: "Betalingen fra Tindra AS ble returnert av banken. Reverser betalingen slik at fakturaen igjen vises som utestående."
+Output:
+{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Tindra AS"}}}}
 
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),

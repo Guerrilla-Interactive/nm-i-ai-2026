@@ -166,9 +166,13 @@ Output: {{"task_type":"create_supplier","confidence":0.97,"fields":{{"name":"Nor
 
 CRITICAL: Lieferant/leverandør/supplier = create_supplier (NOT create_customer). These are different entities in Tripletex.
 CRITICAL: paie/lønn/payroll/Gehalt/salaire = run_payroll. Extract base_salary and bonus as separate numeric fields.
+CRITICAL: "reverser betaling" / "payment returned/bounced by bank" / "Zahlung rückerstattet" → reverse_payment (NOT create_credit_note or error_correction). The goal is to reverse the payment voucher so the invoice is outstanding again.
 
 Input: "Exécutez la paie de Jules Leroy (jules.leroy@example.org) pour ce mois. Le salaire de base est de 56950 NOK. Ajoutez une prime unique de 9350 NOK."
 Output: {{"task_type":"run_payroll","confidence":0.97,"fields":{{"employee_identifier":"Jules Leroy","first_name":"Jules","last_name":"Leroy","email":"jules.leroy@example.org","base_salary":56950.0,"bonus":9350.0}}}}
+
+Input: "Betalingen fra Tindra AS ble returnert av banken. Reverser betalingen slik at fakturaen igjen vises som utestående."
+Output: {{"task_type":"reverse_payment","confidence":0.97,"fields":{{"customer_name":"Tindra AS"}}}}
 
 If unsure, use "unknown" with confidence 0.0.
 Respond with ONLY a JSON object, no markdown."""
@@ -231,9 +235,11 @@ _KEYWORD_MAP = [
                                      r"\bbank\w*\b.*\bavstem\w*\b",
                                      r"\bavstem\w*\b.*\bbank\w*\b",
                                      r"\b(reconcil|abgleich|rapprochement)\w*\b"]),
-    # --- Payment returned / bounced → credit note (before error correction) ---
-    (TaskType.CREATE_CREDIT_NOTE, [r"\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b.*\b(pagamento|payment|betaling|zahlung|paiement|pago)\b",
-                                    r"\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b.*\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b"]),
+    # --- Payment returned / bounced / reversed → reverse_payment (before error correction) ---
+    (TaskType.REVERSE_PAYMENT, [r"\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b.*\b(pagamento|payment|betaling|zahlung|paiement|pago)\b",
+                                 r"\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b.*\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b",
+                                 r"\b(reverser|reverse|undo|tilbakefør)\w*\b.*\b(betaling|payment|zahlung|paiement|pago)\b",
+                                 r"\b(returnert|returned|bounced)\w*\b.*\b(bank|betaling|payment)\b"]),
     (TaskType.ERROR_CORRECTION, [r"\b(korriger|correct|fiks|fix)\w*\b.*\b(feil|error|bilag|voucher|postering)\b",
                                    r"\b(feil|error)\w*\b.*\b(korriger|correct|rett)\b",
                                    r"\b(reverser|reverse|tilbakefør)\w*\b.*\b(bilag|voucher|postering)\b"]),

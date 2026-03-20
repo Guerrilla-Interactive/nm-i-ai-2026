@@ -1500,6 +1500,9 @@ async def _exec_project_with_customer(fields: dict, client: TripletexClient) -> 
         _log("INFO", "Created customer for project", name=cust_name, id=cust.get("id"))
 
     fields["customer_id"] = cust["id"]
+    # Ensure project_name is used as the project name (not customer name)
+    if _get(fields, "project_name"):
+        fields["name"] = fields["project_name"]
     return await _exec_create_project(fields, client)
 
 
@@ -2806,15 +2809,15 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     try:
         existing_dims = await client.get_dimension_names({"fields": "*"})
         for d in existing_dims:
-            d_name = d.get("displayName") or d.get("name") or ""
+            d_name = d.get("dimensionName") or d.get("displayName") or d.get("name") or ""
             if d_name.lower() == dim_name.lower():
                 dim_id = d.get("id")
-                dim_number = d.get("dimensionNumber") or d.get("number")
+                dim_number = d.get("dimensionIndex") or d.get("dimensionNumber") or d.get("number")
                 _log("INFO", "Dimension already exists", dim_id=dim_id, dim_number=dim_number)
                 break
         if dim_id is None:
             # Pick first free slot (1-3)
-            used_slots = {d.get("dimensionNumber") or d.get("number") for d in existing_dims}
+            used_slots = {d.get("dimensionIndex") or d.get("dimensionNumber") or d.get("number") for d in existing_dims}
             for slot in (1, 2, 3):
                 if slot not in used_slots:
                     dim_number = slot
@@ -2829,10 +2832,8 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     if dim_id is None:
         # Try multiple payload formats — API field names are uncertain
         payloads_to_try = [
-            {"displayName": dim_name, "number": dim_number},
-            {"displayName": dim_name, "dimensionNumber": dim_number},
-            {"name": dim_name, "number": dim_number},
-            {"name": dim_name, "dimensionNumber": dim_number},
+            {"dimensionName": dim_name, "dimensionIndex": dim_number},
+            {"dimensionName": dim_name, "dimensionIndex": dim_number, "active": True},
         ]
 
         # First try POST with different field names
@@ -2840,7 +2841,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             try:
                 dim_result = await client.create_dimension_name(payload)
                 dim_id = dim_result.get("id")
-                dim_number = dim_result.get("dimensionNumber") or dim_result.get("number") or dim_number
+                dim_number = dim_result.get("dimensionIndex") or dim_result.get("dimensionNumber") or dim_result.get("number") or dim_number
                 _log("INFO", "Created dimension via POST", dim_id=dim_id, payload_keys=list(payload.keys()))
                 break
             except TripletexAPIError as e:
@@ -2853,8 +2854,8 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             # Find a slot to rename — prefer empty-named or pick first available
             target_dim = None
             for d in existing_dims:
-                d_name = d.get("displayName") or d.get("name") or ""
-                d_num = d.get("dimensionNumber") or d.get("number")
+                d_name = d.get("dimensionName") or d.get("displayName") or d.get("name") or ""
+                d_num = d.get("dimensionIndex") or d.get("dimensionNumber") or d.get("number")
                 if not d_name or d_name.lower() in ("", "dimension 1", "dimension 2", "dimension 3",
                                                       "dimensjon 1", "dimensjon 2", "dimensjon 3"):
                     target_dim = d
@@ -2865,11 +2866,10 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             if target_dim:
                 target_id = target_dim.get("id")
                 version = target_dim.get("version", 0)
-                dim_number = target_dim.get("dimensionNumber") or target_dim.get("number") or dim_number
+                dim_number = target_dim.get("dimensionIndex") or target_dim.get("dimensionNumber") or target_dim.get("number") or dim_number
                 put_payloads = [
-                    {"id": target_id, "version": version, "displayName": dim_name},
-                    {"id": target_id, "version": version, "name": dim_name},
-                    {"id": target_id, "version": version, "displayName": dim_name, "number": dim_number},
+                    {"id": target_id, "version": version, "dimensionName": dim_name, "dimensionIndex": dim_number},
+                    {"id": target_id, "version": version, "dimensionName": dim_name},
                 ]
                 for payload in put_payloads:
                     try:
@@ -2887,7 +2887,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             # Last resort: use the first existing dimension slot without renaming
             if existing_dims:
                 dim_id = existing_dims[0].get("id")
-                dim_number = existing_dims[0].get("dimensionNumber") or existing_dims[0].get("number") or 1
+                dim_number = existing_dims[0].get("dimensionIndex") or existing_dims[0].get("dimensionNumber") or existing_dims[0].get("number") or 1
                 _log("WARNING", "Could not create/rename dimension, using existing slot", dim_id=dim_id)
             else:
                 _log("ERROR", "No dimensions available and creation failed")
@@ -2897,15 +2897,12 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     # Step 3: Create dimension values
     created_values = []
     linked_value_id = None
-    dim_name_ref = {"id": dim_id} if dim_id else None
-    for val_name in dim_values:
+    for idx, val_name in enumerate(dim_values):
         val_id = None
-        # Try multiple payload formats
+        # OpenAPI: displayName + dimensionIndex, optionally number as string
         val_payloads = [
-            _clean({"displayName": val_name, "dimensionName": dim_name_ref, "number": dim_number}),
-            _clean({"name": val_name, "dimensionName": dim_name_ref, "number": dim_number}),
-            _clean({"displayName": val_name, "dimensionName": dim_name_ref}),
-            _clean({"name": val_name, "dimensionName": dim_name_ref}),
+            {"displayName": val_name, "dimensionIndex": dim_number, "number": str(idx + 1)},
+            {"displayName": val_name, "dimensionIndex": dim_number},
         ]
         for val_payload in val_payloads:
             try:
@@ -3033,6 +3030,120 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     }
 
 
+async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
+    """Reverse a payment that was returned/bounced by the bank.
+
+    1. Find the invoice by customer name
+    2. Get invoice details with voucher reference
+    3. Find the payment voucher and reverse it
+    4. Fallback: create a credit note
+    """
+    customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+    invoice_id = _get(fields, "invoice_id")
+    invoice_number = _get(fields, "invoice_number") or _get(fields, "invoice_identifier")
+
+    # Step 1: Find the invoice
+    if not invoice_id:
+        if invoice_number and str(invoice_number).isdigit():
+            invoices = await client.get_invoices({
+                "invoiceNumber": str(invoice_number),
+                "invoiceDateFrom": "2000-01-01",
+                "invoiceDateTo": "2099-12-31",
+            })
+            if invoices:
+                invoice_id = invoices[0]["id"]
+        if not invoice_id and customer_name:
+            invoices = await client.get_invoices({
+                "customerName": customer_name,
+                "invoiceDateFrom": "2000-01-01",
+                "invoiceDateTo": "2099-12-31",
+            })
+            if invoices:
+                # Get the most recent invoice
+                invoice_id = max(invoices, key=lambda inv: inv.get("id", 0))["id"]
+
+    if not invoice_id:
+        return {"success": False, "error": f"Could not find invoice for customer: {customer_name}"}
+
+    # Step 2: Get invoice details with voucher reference
+    try:
+        invoice_data = await client.get_invoice(int(invoice_id))
+    except TripletexAPIError as e:
+        return {"success": False, "error": f"Failed to get invoice {invoice_id}: {e}"}
+
+    # Step 3: Find payment voucher(s) via postings on the invoice's voucher
+    voucher_ref = invoice_data.get("voucher")
+    payment_voucher_id = None
+
+    # Search for payment-related vouchers by looking at postings for this invoice
+    try:
+        # Look for vouchers linked to this invoice via postings on account 1500 (customer receivable)
+        postings = await client.get_postings({
+            "invoiceId": str(invoice_id),
+            "fields": "*",
+        })
+        # Find payment postings (credit on receivable account = payment received)
+        for p in postings:
+            voucher = p.get("voucher")
+            if voucher and voucher.get("id"):
+                v_id = voucher["id"]
+                # Skip the original invoice voucher itself
+                if voucher_ref and v_id == voucher_ref.get("id"):
+                    continue
+                payment_voucher_id = v_id
+                break
+    except TripletexAPIError:
+        pass
+
+    # If no payment voucher found via postings, try searching vouchers directly
+    if not payment_voucher_id:
+        try:
+            vouchers = await client.get_vouchers({
+                "dateFrom": "2000-01-01",
+                "dateTo": "2099-12-31",
+            })
+            # Find the most recent non-invoice voucher (likely the payment)
+            invoice_voucher_id = voucher_ref.get("id") if voucher_ref else None
+            for v in sorted(vouchers, key=lambda x: x.get("id", 0), reverse=True):
+                if v.get("id") != invoice_voucher_id:
+                    payment_voucher_id = v["id"]
+                    break
+        except TripletexAPIError:
+            pass
+
+    # Step 4: Reverse the payment voucher
+    if payment_voucher_id:
+        try:
+            result = await client.reverse_voucher(int(payment_voucher_id), {"date": _today()})
+            _log("INFO", "Reversed payment voucher", voucher_id=payment_voucher_id, invoice_id=invoice_id)
+            return {
+                "entity": "reverse_payment",
+                "invoice_id": invoice_id,
+                "reversed_voucher_id": payment_voucher_id,
+                "reversal_voucher_id": result.get("id"),
+            }
+        except TripletexAPIError as e:
+            _log("WARNING", "Voucher reversal failed, falling back to credit note", error=str(e))
+
+    # Fallback: create a credit note
+    _log("INFO", "Falling back to credit note for payment reversal", invoice_id=invoice_id)
+    try:
+        credit_params = _clean({
+            "date": _today(),
+            "comment": _get(fields, "reason") or "Payment returned by bank",
+            "sendToCustomer": "false",
+        })
+        result = await client.create_credit_note(int(invoice_id), credit_params)
+        return {
+            "entity": "credit_note",
+            "invoice_id": invoice_id,
+            "credit_note_id": result.get("id"),
+            "fallback": True,
+        }
+    except TripletexAPIError as e:
+        return {"success": False, "error": f"Both voucher reversal and credit note failed: {e}"}
+
+
 async def _exec_unknown(fields: dict, client: TripletexClient) -> dict:
     _log("WARNING", "Unknown task type", fields_preview=str(fields)[:200])
     return {"success": False, "error": "Could not determine task type"}
@@ -3074,6 +3185,7 @@ _EXECUTORS: dict[TaskType, Any] = {
     TaskType.CREATE_SUPPLIER_INVOICE: _exec_create_supplier_invoice,
     TaskType.CREATE_SUPPLIER: _exec_create_supplier,
     TaskType.RUN_PAYROLL: _exec_run_payroll,
+    TaskType.REVERSE_PAYMENT: _exec_reverse_payment,
     # Tier 3
     TaskType.BANK_RECONCILIATION: _exec_bank_reconciliation,
     TaskType.ERROR_CORRECTION: _exec_error_correction,

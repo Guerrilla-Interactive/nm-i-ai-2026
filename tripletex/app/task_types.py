@@ -42,6 +42,7 @@ class TaskType(str, Enum):
     CREATE_SUPPLIER_INVOICE = "create_supplier_invoice"
     CREATE_SUPPLIER = "create_supplier"
     RUN_PAYROLL = "run_payroll"
+    REVERSE_PAYMENT = "reverse_payment"
 
     # Tier 3 — Complex scenarios (×3 multiplier)
     BANK_RECONCILIATION = "bank_reconciliation"
@@ -292,6 +293,13 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
             "deductions", "description",
         ],
     },
+    TaskType.REVERSE_PAYMENT: {
+        "required": ["customer_name"],
+        "optional": [
+            "organization_number", "invoice_number", "invoice_identifier",
+            "amount", "amount_excluding_vat", "reason",
+        ],
+    },
 
     # ── Tier 3 ─────────────────────────────────────────────────────────────
     TaskType.BANK_RECONCILIATION: {
@@ -363,6 +371,7 @@ TASK_TYPE_DESCRIPTIONS: dict[TaskType, str] = {
     TaskType.CREATE_SUPPLIER_INVOICE: "Register an incoming supplier invoice (leverandørfaktura / inngående faktura)",
     TaskType.CREATE_SUPPLIER: "Register/create a new supplier (leverandør / Lieferant / fournisseur)",
     TaskType.RUN_PAYROLL: "Run payroll / create salary payment for an employee (lønn / paie / Gehalt / nómina)",
+    TaskType.REVERSE_PAYMENT: "Reverse a payment that was returned/bounced by the bank, reopening the invoice as outstanding",
     TaskType.BANK_RECONCILIATION: "Reconcile bank transactions (often from a CSV file)",
     TaskType.ERROR_CORRECTION: "Correct an error in the ledger (reverse or adjust a voucher)",
     TaskType.YEAR_END_CLOSING: "Perform year-end closing procedures",
