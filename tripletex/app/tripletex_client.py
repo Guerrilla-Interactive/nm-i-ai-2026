@@ -598,6 +598,10 @@ class TripletexClient:
         resp = await self._request("GET", "/activity", params=params)
         return self._extract_values(resp)
 
+    async def create_activity(self, data: dict) -> dict:
+        resp = await self._request("POST", "/activity", json=data)
+        return self._extract_value(resp)
+
     async def create_timesheet_entry(self, data: dict) -> dict:
         resp = await self._request("POST", "/timesheet/entry", json=data)
         return self._extract_value(resp)

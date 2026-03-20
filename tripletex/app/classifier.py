@@ -992,7 +992,8 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "opprett tilsett", "opprett ein tilsett", "ny tilsett",
             "legg til tilsett",
         ],
-        "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change", "rolle", "role", "tilgang"],
+        "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change", "rolle", "role", "tilgang",
+                          "lønn", "lønns", "salary", "payroll", "paie", "nómina", "gehalt", "grunnlønn", "fastlønn", "base salary"],
     },
     TaskType.UPDATE_CUSTOMER: {
         "keywords": [
@@ -1193,6 +1194,107 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "slett kunde", "fjern kunde", "delete customer", "remove customer",
             "supprimer client", "eliminar cliente", "löschen kunde",
             "excluir cliente", "remover cliente",
+        ],
+    },
+    TaskType.UPDATE_PRODUCT: {
+        "keywords": [
+            "oppdater produkt", "endre produkt", "update product", "modify product",
+            "change product", "edit product", "rediger produkt",
+            "actualizar producto", "modifier produit", "ändern produkt",
+            "atualizar produto",
+        ],
+    },
+    TaskType.DELETE_PRODUCT: {
+        "keywords": [
+            "slett produkt", "fjern produkt", "delete product", "remove product",
+            "eliminar producto", "supprimer produit", "löschen produkt",
+            "excluir produto", "remover produto",
+        ],
+    },
+    TaskType.CREATE_SUPPLIER: {
+        "keywords": [
+            "opprett leverandør", "opprett en leverandør", "ny leverandør",
+            "create supplier", "create a supplier", "new supplier",
+            "legg til leverandør", "registrer leverandør", "register supplier",
+            "crear proveedor", "erstellen lieferant", "créer fournisseur",
+            "criar fornecedor",
+        ],
+        "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change", "finn", "find", "søk", "search"],
+    },
+    TaskType.UPDATE_SUPPLIER: {
+        "keywords": [
+            "oppdater leverandør", "endre leverandør", "update supplier", "modify supplier",
+            "change supplier", "edit supplier", "rediger leverandør",
+            "actualizar proveedor", "modifier fournisseur", "ändern lieferant",
+            "atualizar fornecedor",
+        ],
+    },
+    TaskType.DELETE_SUPPLIER: {
+        "keywords": [
+            "slett leverandør", "fjern leverandør", "delete supplier", "remove supplier",
+            "eliminar proveedor", "supprimer fournisseur", "löschen lieferant",
+            "excluir fornecedor", "remover fornecedor",
+        ],
+    },
+    TaskType.FIND_SUPPLIER: {
+        "keywords": [
+            "finn leverandør", "søk leverandør", "søk etter leverandør",
+            "find supplier", "search supplier", "look up supplier",
+            "buscar proveedor", "chercher fournisseur", "suche lieferant",
+            "lieferant finden",
+        ],
+    },
+    TaskType.DELETE_DEPARTMENT: {
+        "keywords": [
+            "slett avdeling", "fjern avdeling", "delete department", "remove department",
+            "eliminar departamento", "supprimer département", "löschen abteilung",
+            "excluir departamento", "remover departamento",
+        ],
+    },
+    TaskType.UPDATE_TRAVEL_EXPENSE: {
+        "keywords": [
+            "oppdater reiseregning", "endre reiseregning", "update travel expense",
+            "modify travel expense", "change travel expense", "edit travel expense",
+            "oppdater reiserekning", "endre reiserekning",
+            "modifier note de frais", "actualizar gasto de viaje",
+            "ändern reisekostenabrechnung", "atualizar despesa de viagem",
+        ],
+    },
+    TaskType.DELETE_CONTACT: {
+        "keywords": [
+            "slett kontakt", "fjern kontakt", "delete contact", "remove contact",
+            "slett kontaktperson", "fjern kontaktperson",
+            "eliminar contacto", "supprimer contact", "löschen kontakt",
+            "excluir contato", "remover contato",
+        ],
+    },
+    TaskType.CREATE_DIMENSION_AND_VOUCHER: {
+        "keywords": [
+            "regnskapsdimensjon", "accounting dimension", "free dimension",
+            "fri dimensjon", "frie dimensjoner", "konteringsdimensjon",
+            "dimensjon og bilag", "dimension and voucher",
+            "opprett dimensjon", "create dimension",
+        ],
+    },
+    TaskType.RUN_PAYROLL: {
+        "keywords": [
+            "kjør lønn", "kjøre lønn", "lønnskjøring", "lønnsutbetaling",
+            "run payroll", "execute payroll", "process payroll",
+            "grunnlønn", "fastlønn", "base salary", "salaire de base",
+            "exécuter la paie", "exécutez la paie",
+            "ejecutar nómina", "gehalt auszahlen", "gehaltslauf",
+            "lønn for ansatt", "payroll for employee",
+            "lønnsslipp", "payslip",
+        ],
+    },
+    TaskType.REGISTER_SUPPLIER_INVOICE: {
+        "keywords": [
+            "leverandørfaktura", "supplier invoice", "incoming invoice",
+            "inngående faktura", "inngåande faktura",
+            "registrer leverandørfaktura", "register supplier invoice",
+            "book supplier invoice", "bokfør leverandørfaktura",
+            "eingangsrechnung", "facture fournisseur", "factura proveedor",
+            "mottatt faktura fra leverandør", "received invoice from supplier",
         ],
     },
     TaskType.UPDATE_DEPARTMENT: {
