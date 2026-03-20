@@ -272,8 +272,8 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
         "required": ["supplier_name"],
         "optional": [
             "organization_number", "invoice_number", "amount_including_vat",
-            "amount_excluding_vat", "vat_amount", "invoice_date", "due_date",
-            "description", "account_number",
+            "amount_excluding_vat", "vat_amount", "vat_percentage",
+            "invoice_date", "due_date", "description", "account_number",
         ],
     },
     TaskType.CREATE_SUPPLIER: {
