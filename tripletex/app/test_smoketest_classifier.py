@@ -320,6 +320,126 @@ RULE_BASED_CASES: list = [
     ("Activer le module Frais de voyage", TaskType.ENABLE_MODULE),
     ("Enable module for payroll", TaskType.ENABLE_MODULE),
     ("Aktiver modul for prosjekt", TaskType.ENABLE_MODULE),
+
+    # ── CREATE_SUPPLIER ───────────────────────────────────────────────────
+    ("Opprett en leverandør med navn Bygg AS", TaskType.CREATE_SUPPLIER),
+    ("Create a supplier named Hardware Inc", TaskType.CREATE_SUPPLIER),
+    ("Erstellen Sie einen Lieferant namens Müller", TaskType.CREATE_SUPPLIER),
+    ("Créer un fournisseur appelé Dupont", TaskType.CREATE_SUPPLIER),
+    ("Crear un proveedor llamado García", TaskType.CREATE_SUPPLIER),
+    ("Criar um fornecedor chamado Silva", TaskType.CREATE_SUPPLIER),
+    ("Registrer leverandør Nordic Parts", TaskType.CREATE_SUPPLIER),
+
+    # ── UPDATE_SUPPLIER ───────────────────────────────────────────────────
+    ("Oppdater leverandør Bygg AS med ny adresse", TaskType.UPDATE_SUPPLIER),
+    ("Endre leverandør Nordic Parts sin e-post", TaskType.UPDATE_SUPPLIER),
+    ("Update supplier Hardware Inc phone number", TaskType.UPDATE_SUPPLIER),
+    ("Modifier le fournisseur Dupont", TaskType.UPDATE_SUPPLIER),
+    ("Actualizar el proveedor García", TaskType.UPDATE_SUPPLIER),
+    ("Ändern Sie den Lieferant Müller", TaskType.UPDATE_SUPPLIER),
+    ("Atualizar o fornecedor Silva", TaskType.UPDATE_SUPPLIER),
+
+    # ── DELETE_SUPPLIER ───────────────────────────────────────────────────
+    ("Slett leverandør Bygg AS", TaskType.DELETE_SUPPLIER),
+    ("Fjern leverandør Nordic Parts", TaskType.DELETE_SUPPLIER),
+    ("Delete supplier Hardware Inc", TaskType.DELETE_SUPPLIER),
+    ("Löschen Sie den Lieferant Müller", TaskType.DELETE_SUPPLIER),
+    ("Supprimer le fournisseur Dupont", TaskType.DELETE_SUPPLIER),
+    ("Eliminar el proveedor García", TaskType.DELETE_SUPPLIER),
+    ("Remove supplier old vendor", TaskType.DELETE_SUPPLIER),
+
+    # ── FIND_SUPPLIER ─────────────────────────────────────────────────────
+    ("Finn leverandør Bygg AS", TaskType.FIND_SUPPLIER),
+    ("Søk etter leverandør Nordic Parts", TaskType.FIND_SUPPLIER),
+    ("Find supplier named Hardware Inc", TaskType.FIND_SUPPLIER),
+    ("Suchen Sie den Lieferant Müller", TaskType.FIND_SUPPLIER),
+    ("Chercher le fournisseur Dupont", TaskType.FIND_SUPPLIER),
+    ("Buscar el proveedor García", TaskType.FIND_SUPPLIER),
+    ("Finn leverandør med navn Silva", TaskType.FIND_SUPPLIER),
+
+    # ── DELETE_CONTACT ────────────────────────────────────────────────────
+    ("Slett kontaktperson Ola Nordmann", TaskType.DELETE_CONTACT),
+    ("Fjern kontaktperson for kunde Acme", TaskType.DELETE_CONTACT),
+    ("Delete contact person John Smith", TaskType.DELETE_CONTACT),
+    ("Löschen Sie den contact Hans", TaskType.DELETE_CONTACT),
+    ("Supprimer le contact Pierre", TaskType.DELETE_CONTACT),
+    ("Eliminar el contacto Juan", TaskType.DELETE_CONTACT),
+    ("Remove contact for customer Acme Corp", TaskType.DELETE_CONTACT),
+
+    # ── DELETE_DEPARTMENT ─────────────────────────────────────────────────
+    ("Slett avdeling Salg", TaskType.DELETE_DEPARTMENT),
+    ("Fjern avdeling Økonomi", TaskType.DELETE_DEPARTMENT),
+    ("Delete department Sales", TaskType.DELETE_DEPARTMENT),
+    ("Löschen Sie die Abteilung Vertrieb", TaskType.DELETE_DEPARTMENT),
+    ("Supprimer le département Ventes", TaskType.DELETE_DEPARTMENT),
+    ("Eliminar el departamento Ventas", TaskType.DELETE_DEPARTMENT),
+    ("Remove department HR permanently", TaskType.DELETE_DEPARTMENT),
+
+    # ── DELETE_PRODUCT ────────────────────────────────────────────────────
+    ("Slett produkt Widget", TaskType.DELETE_PRODUCT),
+    ("Fjern produkt Gadget fra systemet", TaskType.DELETE_PRODUCT),
+    ("Delete product Widget Pro", TaskType.DELETE_PRODUCT),
+    ("Löschen Sie das Produkt Widget", TaskType.DELETE_PRODUCT),
+    ("Supprimer le produit Gadget", TaskType.DELETE_PRODUCT),
+    ("Eliminar el producto Widget", TaskType.DELETE_PRODUCT),
+    ("Remove product old item", TaskType.DELETE_PRODUCT),
+
+    # ── UPDATE_PRODUCT ────────────────────────────────────────────────────
+    ("Oppdater produkt Widget med ny pris", TaskType.UPDATE_PRODUCT),
+    ("Endre produkt Gadget sin beskrivelse", TaskType.UPDATE_PRODUCT),
+    ("Update product Widget Pro price", TaskType.UPDATE_PRODUCT),
+    ("Ändern Sie das Produkt Widget", TaskType.UPDATE_PRODUCT),
+    ("Modifier le produit Gadget", TaskType.UPDATE_PRODUCT),
+    ("Actualizar el producto Widget", TaskType.UPDATE_PRODUCT),
+    ("Atualizar o produto Gadget", TaskType.UPDATE_PRODUCT),
+
+    # ── REGISTER_SUPPLIER_INVOICE ─────────────────────────────────────────
+    ("Registrer leverandørfaktura fra Bygg AS", TaskType.REGISTER_SUPPLIER_INVOICE),
+    ("Bokfør inngående faktura fra Nordic Parts", TaskType.REGISTER_SUPPLIER_INVOICE),
+    ("Register supplier invoice from Hardware Inc", TaskType.REGISTER_SUPPLIER_INVOICE),
+    ("Book incoming invoice from vendor", TaskType.REGISTER_SUPPLIER_INVOICE),
+    ("Enregistrer la facture fournisseur de Dupont", TaskType.REGISTER_SUPPLIER_INVOICE),
+    ("Registrer leverandørfaktura nummer 42", TaskType.REGISTER_SUPPLIER_INVOICE),
+    ("Eingangsrechnung von Müller GmbH", TaskType.REGISTER_SUPPLIER_INVOICE),
+
+    # ── REVERSE_PAYMENT ───────────────────────────────────────────────────
+    # NOTE: ERROR_CORRECTION regex also catches "reverse/reverser.*betaling/payment"
+    # and "returnert/returned.*bank/betaling/payment", so use terms only in REVERSE_PAYMENT:
+    # "bounced", "undo", "tilbakefør", "devolvido", "rückerstattet"
+    ("Bounced payment for faktura 1234", TaskType.REVERSE_PAYMENT),
+    ("Tilbakefør betaling for faktura 5678", TaskType.REVERSE_PAYMENT),
+    ("Undo payment on invoice 1234", TaskType.REVERSE_PAYMENT),
+    ("Bounced betaling på faktura 42", TaskType.REVERSE_PAYMENT),
+    ("Rückerstattet zahlung für Rechnung 99", TaskType.REVERSE_PAYMENT),
+    ("Pago devuelto para factura 55", TaskType.REVERSE_PAYMENT),
+    ("Undo betaling på faktura 77", TaskType.REVERSE_PAYMENT),
+
+    # ── RUN_PAYROLL ───────────────────────────────────────────────────────
+    ("Kjør lønnskjøring for mars 2026", TaskType.RUN_PAYROLL),
+    ("Utfør lønn for alle ansatte", TaskType.RUN_PAYROLL),
+    ("Run payroll for March 2026", TaskType.RUN_PAYROLL),
+    ("Execute payroll for all employees", TaskType.RUN_PAYROLL),
+    ("Exécuter la paie pour mars", TaskType.RUN_PAYROLL),
+    ("Lønnsutbetaling for mars", TaskType.RUN_PAYROLL),
+    ("Kjør lønn for mars måned", TaskType.RUN_PAYROLL),
+
+    # ── UPDATE_TRAVEL_EXPENSE ─────────────────────────────────────────────
+    ("Oppdater reiseregning nummer 42", TaskType.UPDATE_TRAVEL_EXPENSE),
+    ("Endre reiseregning for Ola Nordmann", TaskType.UPDATE_TRAVEL_EXPENSE),
+    ("Update travel expense report 42", TaskType.UPDATE_TRAVEL_EXPENSE),
+    ("Modify travel expense for John Smith", TaskType.UPDATE_TRAVEL_EXPENSE),
+    ("Oppdater reiserekning for Kari", TaskType.UPDATE_TRAVEL_EXPENSE),
+    ("Endre reiseregning 55 med nytt beløp", TaskType.UPDATE_TRAVEL_EXPENSE),
+    ("Actualizar los gastos de viaje para Juan", TaskType.UPDATE_TRAVEL_EXPENSE),
+
+    # ── CREATE_DIMENSION_AND_VOUCHER ──────────────────────────────────────
+    ("Opprett regnskapsdimensjon for prosjekt Alpha", TaskType.CREATE_DIMENSION_AND_VOUCHER),
+    ("Lag fri dimensjon med verdier", TaskType.CREATE_DIMENSION_AND_VOUCHER),
+    ("Create accounting dimension and voucher", TaskType.CREATE_DIMENSION_AND_VOUCHER),
+    ("Opprett dimensjon med verdiene A og B og bokfør bilag", TaskType.CREATE_DIMENSION_AND_VOUCHER),
+    ("Konteringsdimensjon for avdeling Salg", TaskType.CREATE_DIMENSION_AND_VOUCHER),
+    ("Free dimension with values X and Y", TaskType.CREATE_DIMENSION_AND_VOUCHER),
+    ("Registrer regnskapsdimensjon og bilag", TaskType.CREATE_DIMENSION_AND_VOUCHER),
 ]
 
 # ---------------------------------------------------------------------------
