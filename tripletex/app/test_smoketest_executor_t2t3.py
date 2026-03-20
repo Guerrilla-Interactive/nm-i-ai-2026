@@ -385,25 +385,27 @@ async def test_invoice_with_payment_auto_amount():
     result = await _exec_invoice_with_payment(fields, client)
     assert client.create_order.called
     assert client.invoice_order.called
-    # Worktree uses 2-step: invoice first, then register_payment separately
-    assert client.register_payment.called, "Should register payment separately"
+    # Executor uses combined invoice+payment in single invoice_order call
+    inv_params = client.invoice_order.call_args[0][1]
+    assert "paymentTypeId" in inv_params, "Combined call should include paymentTypeId"
+    assert "paidAmount" in inv_params, "Combined call should include paidAmount"
+    assert result.get("payment_registered") is True
     record("T2-12: INVOICE_WITH_PAYMENT (auto amount)", True)
 
 
 async def test_invoice_with_payment_explicit_amount():
     client = make_mock_client()
-    # invoice_order returns no amountOutstanding so explicit_paid is used
-    client.invoice_order = AsyncMock(return_value={"id": 200, "amount": None, "amountOutstanding": None})
     fields = {
         "customer_name": "Acme AS",
         "lines": [{"description": "X", "quantity": 1, "unit_price": 500}],
         "paid_amount": 625,
     }
     result = await _exec_invoice_with_payment(fields, client)
-    # Worktree uses register_payment with the explicit amount as fallback
-    assert client.register_payment.called
-    payment_params = client.register_payment.call_args[0][1]
-    assert payment_params.get("paidAmount") == 625.0
+    # Executor uses combined invoice+payment: explicit paid_amount passed to invoice_order
+    assert client.invoice_order.called
+    inv_params = client.invoice_order.call_args[0][1]
+    assert inv_params.get("paidAmount") == 625.0, "Explicit amount should be passed to combined call"
+    assert result.get("payment_registered") is True
     record("T2-13: INVOICE_WITH_PAYMENT (explicit amount)", True)
 
 
@@ -423,7 +425,18 @@ async def test_invoice_with_payment_creates_customer():
 async def test_invoice_with_payment_payment_fails_gracefully():
     """Payment registration fails but invoice is still created."""
     client = make_mock_client()
-    client.register_payment = AsyncMock(side_effect=TripletexAPIError(422, "ugyldig beløp"))
+    # Make combined call fail with 422 "ugyldig" to trigger 2-step fallback
+    call_count = {"n": 0}
+    async def _invoice_order_side_effect(order_id, params):
+        call_count["n"] += 1
+        if "paymentTypeId" in params:
+            # Combined call fails
+            raise TripletexAPIError(422, "ugyldig beløp")
+        # Plain invoice call succeeds
+        return {"id": 200, "amount": 2500, "amountOutstanding": 2500}
+    client.invoice_order = AsyncMock(side_effect=_invoice_order_side_effect)
+    # 2-step fallback: register_payment also fails
+    client.register_payment = AsyncMock(side_effect=Exception("payment failed"))
     fields = {
         "customer_name": "Acme AS",
         "lines": [{"description": "X", "quantity": 2, "unit_price": 1000}],
