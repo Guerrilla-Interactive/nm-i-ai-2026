@@ -979,6 +979,34 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
             else:
                 return {"success": False, "error": f"Cannot resolve invoice identifier: {invoice_number}"}
 
+    # Fallback: if no invoice ID yet, try to find by customer
+    if not invoice_id:
+        customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+        org_number = _get(fields, "organization_number")
+        if customer_name or org_number:
+            try:
+                search_params = {"fields": "*"}
+                if customer_name:
+                    search_params["customerName"] = customer_name
+                if org_number:
+                    search_params["organizationNumber"] = org_number
+                customers = await client.get_customers(search_params)
+                if customers:
+                    cust_id = customers[0]["id"]
+                    invoices = await client.get_invoices({
+                        "customerId": str(cust_id),
+                        "invoiceDateFrom": "2000-01-01",
+                        "invoiceDateTo": "2099-12-31",
+                    })
+                    unpaid = [inv for inv in invoices
+                              if float(inv.get("amountOutstanding") or inv.get("amount") or 0) > 0]
+                    if unpaid:
+                        best = max(unpaid, key=lambda inv: inv.get("id", 0))
+                        invoice_id = best["id"]
+                        _log("INFO", "Found invoice via customer lookup", invoice_id=invoice_id)
+            except TripletexAPIError as e:
+                _log("WARNING", "Customer-based invoice lookup failed", error=str(e)[:200])
+
     if not invoice_id:
         return {"success": False, "error": "No invoice specified for payment"}
 
@@ -1083,8 +1111,8 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
 async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> dict:
     """Create invoice AND register payment — optimized flow.
 
-    Uses PUT /order/:invoice with paymentTypeId + paidAmount to combine
-    invoice creation and payment into fewer API calls.
+    First checks for an existing unpaid invoice for the customer.
+    If found, registers payment on it. Otherwise creates a new invoice + payment.
     """
     customer_id = _get(fields, "customer_id")
     if not customer_id:
@@ -1107,12 +1135,66 @@ async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> d
     if not customer_id:
         return {"success": False, "error": "No customer specified"}
 
+    invoice_date = _get(fields, "invoice_date") or _today()
+    explicit_paid = _get(fields, "paid_amount") or _get(fields, "payment_amount") or _get(fields, "amount")
+
+    # --- Check for existing unpaid invoices first ---
+    try:
+        existing_invoices = await client.get_invoices({
+            "customerId": str(customer_id),
+            "invoiceDateFrom": "2000-01-01",
+            "invoiceDateTo": "2099-12-31",
+        })
+        # Find unpaid invoice (amountOutstanding > 0)
+        unpaid = [inv for inv in existing_invoices
+                  if float(inv.get("amountOutstanding") or inv.get("amount") or 0) > 0]
+        if unpaid:
+            # Use the most recent unpaid invoice
+            existing_inv = max(unpaid, key=lambda inv: inv.get("id", 0))
+            existing_inv_id = existing_inv["id"]
+            api_amount = float(existing_inv.get("amountOutstanding") or existing_inv.get("amount") or 0)
+            _log("INFO", "Found existing unpaid invoice, registering payment",
+                 invoice_id=existing_inv_id, amount=api_amount)
+
+            # Look up payment type
+            payment_type_id = _get(fields, "payment_type_id")
+            if not payment_type_id:
+                cid = id(client)
+                payment_types = _cached_payment_types.get(cid)
+                if payment_types is None:
+                    payment_types = await client.get_invoice_payment_types()
+                    _cached_payment_types[cid] = payment_types
+                if payment_types:
+                    payment_type_id = payment_types[0]["id"]
+
+            paid_amount = api_amount if api_amount else (float(explicit_paid) if explicit_paid else 0)
+            payment_registered = False
+            if paid_amount and payment_type_id:
+                try:
+                    payment_params = _clean({
+                        "paymentDate": invoice_date,
+                        "paymentTypeId": int(payment_type_id),
+                        "paidAmount": float(paid_amount),
+                    })
+                    await client.register_payment(int(existing_inv_id), payment_params)
+                    payment_registered = True
+                except Exception as e:
+                    _log("WARNING", "Payment on existing invoice failed", error=str(e)[:200])
+
+            return {
+                "invoice_id": existing_inv_id,
+                "entity": "invoice_with_payment",
+                "payment_registered": payment_registered,
+                "amount": paid_amount,
+                "used_existing_invoice": True,
+            }
+    except TripletexAPIError as e:
+        _log("DEBUG", "No existing invoices found, creating new", error=str(e)[:200])
+
+    # --- No existing invoice found — create new one ---
     order_lines = _build_order_lines(fields)
     if not order_lines:
         return {"success": False, "error": "No invoice lines specified"}
-
-    invoice_date = _get(fields, "invoice_date") or _today()
-    explicit_paid = _get(fields, "paid_amount") or _get(fields, "payment_amount") or _get(fields, "amount")
 
     # Create products for lines that have product numbers
     order_lines = await _create_products_for_lines(client, order_lines)
@@ -2704,22 +2786,74 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
         _log("WARNING", "GET dimension names failed, trying to create anyway", error=str(e))
         dim_number = 1
 
-    # Step 2: Create dimension name if needed
+    # Step 2: Create or rename dimension
     if dim_id is None:
-        try:
-            dim_payload = _clean({
-                "name": dim_name,
-                "dimensionNumber": dim_number,
-                "number": dim_number,
-            })
-            dim_result = await client.create_dimension_name(dim_payload)
-            dim_id = dim_result.get("id")
-            dim_number = dim_result.get("dimensionNumber") or dim_result.get("number") or dim_number
-            _log("INFO", "Created dimension", dim_id=dim_id, dim_number=dim_number)
-        except TripletexAPIError as e:
-            _log("ERROR", "Failed to create dimension name", error=str(e))
-            return {"success": False, "error": f"Failed to create dimension: {e}",
-                    "dimension_name": dim_name}
+        # Try multiple payload formats — API field names are uncertain
+        payloads_to_try = [
+            {"displayName": dim_name, "number": dim_number},
+            {"displayName": dim_name, "dimensionNumber": dim_number},
+            {"name": dim_name, "number": dim_number},
+            {"name": dim_name, "dimensionNumber": dim_number},
+        ]
+
+        # First try POST with different field names
+        for payload in payloads_to_try:
+            try:
+                dim_result = await client.create_dimension_name(payload)
+                dim_id = dim_result.get("id")
+                dim_number = dim_result.get("dimensionNumber") or dim_result.get("number") or dim_number
+                _log("INFO", "Created dimension via POST", dim_id=dim_id, payload_keys=list(payload.keys()))
+                break
+            except TripletexAPIError as e:
+                if e.status_code != 422:
+                    break  # Non-validation error, stop trying
+                continue
+
+        # If POST failed, try PUT on an existing slot (dimensions may be pre-created)
+        if dim_id is None and existing_dims:
+            # Find a slot to rename — prefer empty-named or pick first available
+            target_dim = None
+            for d in existing_dims:
+                d_name = d.get("displayName") or d.get("name") or ""
+                d_num = d.get("dimensionNumber") or d.get("number")
+                if not d_name or d_name.lower() in ("", "dimension 1", "dimension 2", "dimension 3",
+                                                      "dimensjon 1", "dimensjon 2", "dimensjon 3"):
+                    target_dim = d
+                    break
+            if not target_dim and existing_dims:
+                target_dim = existing_dims[0]
+
+            if target_dim:
+                target_id = target_dim.get("id")
+                version = target_dim.get("version", 0)
+                dim_number = target_dim.get("dimensionNumber") or target_dim.get("number") or dim_number
+                put_payloads = [
+                    {"id": target_id, "version": version, "displayName": dim_name},
+                    {"id": target_id, "version": version, "name": dim_name},
+                    {"id": target_id, "version": version, "displayName": dim_name, "number": dim_number},
+                ]
+                for payload in put_payloads:
+                    try:
+                        dim_result = await client.put(f"/ledger/accountingDimensionName/{target_id}", data=payload)
+                        dim_result = dim_result.get("value", dim_result)
+                        dim_id = dim_result.get("id") or target_id
+                        _log("INFO", "Renamed dimension via PUT", dim_id=dim_id, payload_keys=list(payload.keys()))
+                        break
+                    except TripletexAPIError as e:
+                        if e.status_code != 422:
+                            break
+                        continue
+
+        if dim_id is None:
+            # Last resort: use the first existing dimension slot without renaming
+            if existing_dims:
+                dim_id = existing_dims[0].get("id")
+                dim_number = existing_dims[0].get("dimensionNumber") or existing_dims[0].get("number") or 1
+                _log("WARNING", "Could not create/rename dimension, using existing slot", dim_id=dim_id)
+            else:
+                _log("ERROR", "No dimensions available and creation failed")
+                return {"success": False, "error": "Failed to create dimension — API rejected all attempts",
+                        "dimension_name": dim_name}
 
     # Step 3: Create dimension values
     created_values = []
