@@ -3006,7 +3006,8 @@ async def _exec_create_dimension_and_voucher(fields: dict, client: TripletexClie
             _log("INFO", "Dimension name already exists, looking it up")
             existing = await client.get_dimension_names()
             for d in existing:
-                if d.get("dimensionName", "").lower() == dimension_name.lower():
+                d_name = d.get("dimensionName") or d.get("displayName") or d.get("name") or ""
+                if d_name.lower() == dimension_name.lower():
                     dim_result = d
                     dim_index = d.get("dimensionIndex", dim_index)
                     break
@@ -3164,6 +3165,113 @@ async def _exec_create_dimension_and_voucher(fields: dict, client: TripletexClie
         "value_ids": value_ids,
         "voucher_id": voucher_id,
     }
+
+
+async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
+    """Reverse a payment that was returned/bounced by the bank.
+
+    1. Find the invoice by customer name
+    2. Get invoice details with voucher reference
+    3. Find the payment voucher and reverse it
+    4. Fallback: create a credit note
+    """
+    customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+    invoice_id = _get(fields, "invoice_id")
+    invoice_number = _get(fields, "invoice_number") or _get(fields, "invoice_identifier")
+
+    # Step 1: Find the invoice
+    if not invoice_id:
+        if invoice_number and str(invoice_number).isdigit():
+            invoices = await client.get_invoices({
+                "invoiceNumber": str(invoice_number),
+                "invoiceDateFrom": "2000-01-01",
+                "invoiceDateTo": "2099-12-31",
+            })
+            if invoices:
+                invoice_id = invoices[0]["id"]
+        if not invoice_id and customer_name:
+            invoices = await client.get_invoices({
+                "customerName": customer_name,
+                "invoiceDateFrom": "2000-01-01",
+                "invoiceDateTo": "2099-12-31",
+            })
+            if invoices:
+                invoice_id = max(invoices, key=lambda inv: inv.get("id", 0))["id"]
+
+    if not invoice_id:
+        return {"success": False, "error": f"Could not find invoice for customer: {customer_name}"}
+
+    # Step 2: Get invoice details with voucher reference
+    try:
+        invoice_data = await client.get_invoice(int(invoice_id))
+    except TripletexAPIError as e:
+        return {"success": False, "error": f"Failed to get invoice {invoice_id}: {e}"}
+
+    # Step 3: Find payment voucher(s)
+    voucher_ref = invoice_data.get("voucher")
+    payment_voucher_id = None
+
+    try:
+        postings = await client.get_postings({
+            "invoiceId": str(invoice_id),
+            "fields": "*",
+        })
+        for p in postings:
+            voucher = p.get("voucher")
+            if voucher and voucher.get("id"):
+                v_id = voucher["id"]
+                if voucher_ref and v_id == voucher_ref.get("id"):
+                    continue
+                payment_voucher_id = v_id
+                break
+    except TripletexAPIError:
+        pass
+
+    if not payment_voucher_id:
+        try:
+            vouchers = await client.get_vouchers({
+                "dateFrom": "2000-01-01",
+                "dateTo": "2099-12-31",
+            })
+            invoice_voucher_id = voucher_ref.get("id") if voucher_ref else None
+            for v in sorted(vouchers, key=lambda x: x.get("id", 0), reverse=True):
+                if v.get("id") != invoice_voucher_id:
+                    payment_voucher_id = v["id"]
+                    break
+        except TripletexAPIError:
+            pass
+
+    # Step 4: Reverse the payment voucher
+    if payment_voucher_id:
+        try:
+            result = await client.reverse_voucher(int(payment_voucher_id), {"date": _today()})
+            _log("INFO", "Reversed payment voucher", voucher_id=payment_voucher_id, invoice_id=invoice_id)
+            return {
+                "entity": "reverse_payment",
+                "invoice_id": invoice_id,
+                "reversed_voucher_id": payment_voucher_id,
+                "reversal_voucher_id": result.get("id"),
+            }
+        except TripletexAPIError as e:
+            _log("WARNING", "Voucher reversal failed, falling back to credit note", error=str(e))
+
+    # Fallback: create a credit note
+    _log("INFO", "Falling back to credit note for payment reversal", invoice_id=invoice_id)
+    try:
+        credit_params = _clean({
+            "date": _today(),
+            "comment": _get(fields, "reason") or "Payment returned by bank",
+            "sendToCustomer": "false",
+        })
+        result = await client.create_credit_note(int(invoice_id), credit_params)
+        return {
+            "entity": "credit_note",
+            "invoice_id": invoice_id,
+            "credit_note_id": result.get("id"),
+            "fallback": True,
+        }
+    except TripletexAPIError as e:
+        return {"success": False, "error": f"Both voucher reversal and credit note failed: {e}"}
 
 
 async def _exec_unknown(fields: dict, client: TripletexClient) -> dict:
@@ -3685,6 +3793,7 @@ _EXECUTORS: dict[TaskType, Any] = {
     TaskType.CREATE_DIMENSION_AND_VOUCHER: _exec_create_dimension_and_voucher,
     TaskType.RUN_PAYROLL: _exec_run_payroll,
     TaskType.REGISTER_SUPPLIER_INVOICE: _exec_register_supplier_invoice,
+    TaskType.REVERSE_PAYMENT: _exec_reverse_payment,
     # Fallback
     TaskType.UNKNOWN: _exec_unknown,
 }
