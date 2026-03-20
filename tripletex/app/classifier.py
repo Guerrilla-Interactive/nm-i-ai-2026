@@ -22,6 +22,8 @@ from task_types import (
 
 logger = logging.getLogger("tripletex-agent.classifier")
 
+_claude_available = True
+
 # ---------------------------------------------------------------------------
 # SDK import — try new unified SDK first, fall back to older one
 # ---------------------------------------------------------------------------
@@ -129,12 +131,23 @@ when the prompt implies the customer already exists in the system.
 - Travel expense keywords: "reiseregning", "reise", "diett", "kjøregodtgjørelse", "utlegg"
 - When a prompt mentions both creating a project AND linking it to a customer → project_with_customer
 - "Legg til rolle" / "set role" / "set access" → set_employee_roles
-- CRITICAL: If the prompt describes a customer with an unpaid invoice and asks to register payment, \
-this is invoice_with_payment (create customer + invoice + payment in one flow), NOT register_payment. \
-register_payment is ONLY for registering payment on an ALREADY EXISTING invoice in the system.
+- CRITICAL distinction between register_payment and invoice_with_payment:
+  * register_payment: The invoice ALREADY EXISTS in the system. Keywords: "outstanding invoice", \
+"existing invoice", "has an invoice", "utestående faktura", "betale fakturaen", "register payment ON this invoice". \
+The prompt refers to an invoice that was previously created and needs payment registered.
+  * invoice_with_payment: The invoice does NOT exist yet — create it AND register payment in one go. \
+Keywords: "create invoice and register payment", "unpaid invoice" with NEW customer/product details, \
+"facture impayée" with full invoice line details that need to be created.
+  * KEY TEST: If the prompt says the customer "has" an invoice or the invoice is "outstanding"/"utestående", \
+it means the invoice already exists → register_payment. If the prompt asks to CREATE a new invoice and pay it → invoice_with_payment.
 - "facture impayée" / "unbezahlte Rechnung" / "unpaid invoice" + customer details → invoice_with_payment
 - If the prompt gives customer details (name, org number) AND invoice details (amount, description) \
 AND mentions payment → invoice_with_payment
+- CRITICAL: "reverser betaling" / "payment returned/bounced by bank" / "Zahlung rückerstattet" → reverse_payment (NOT create_credit_note or error_correction). \
+The goal is to reverse the payment voucher so the invoice is outstanding again.
+- CRITICAL: "Setting a fixed price for a project" / "Festpreis festlegen" / "fast pris" on an existing project \
+is ONLY update_project (with is_fixed_price=true and fixed_price=<amount>). It is NOT a batch with an invoice. \
+Do NOT split this into multiple tasks. The update_project task type supports is_fixed_price and fixed_price fields.
 
 ## FEW-SHOT EXAMPLES
 
@@ -213,6 +226,19 @@ Input: "Registrer innbetaling på faktura 10042 med beløp 15000 kr, dato 15.03.
 Output:
 {{"task_type": "register_payment", "confidence": 0.97, "fields": {{"invoice_identifier": "10042", "amount": 15000.0, "payment_date": "2026-03-15"}}}}
 
+### Example 11b — Register payment on outstanding invoice (English)
+Input: "The customer Windmill Ltd (org no. 830362894) has an outstanding invoice for 32200 NOK excluding VAT for System Development. Register full payment on this invoice."
+Output:
+{{"task_type": "register_payment", "confidence": 0.99, "fields": {{"invoice_identifier": "Windmill Ltd", "amount": 32200.0}}}}
+NOTE: This is register_payment because the invoice ALREADY EXISTS ("has an outstanding invoice"). \
+Do NOT use invoice_with_payment here — that would create a duplicate invoice.
+
+### Example 11c — Error correction / payment reversal (Bokmål)
+Input: "Betalingen fra Havbris AS for fakturaen Programvarelisens ble returnert av banken. Reverser betalingen slik at fakturaen igjen viser utestående beløp."
+Output:
+{{"task_type": "error_correction", "confidence": 0.97, "fields": {{"voucher_identifier": "Betaling for Programvarelisens fra Havbris AS", "correction_description": "Betalingen ble returnert av banken. Reverser betalingen."}}}}
+NOTE: Payment reversal = error_correction, NOT register_payment. The payment was already registered; now reverse it.
+
 ### Example 12 — Create travel expense (Bokmål)
 Input: "Opprett reiseregning for ansatt Per Hansen, dagsreise fra Bergen til Oslo 19. mars 2026, formål: kundemøte"
 Output:
@@ -237,6 +263,27 @@ Output:
 Input: "Opprett kreditnota for faktura 10055"
 Output:
 {{"task_type": "create_credit_note", "confidence": 0.97, "fields": {{"invoice_identifier": "10055"}}}}
+
+### Example 16b — Credit note for bounced payment (Bokmål)
+Input: "Betalingen fra Havbris AS for fakturaen Programvarelisens ble returnert av banken. Reverser betalingen slik at fakturaen igjen viser utestående beløp."
+Output:
+{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Havbris AS"}}}}
+NOTE: Bounced/returned bank payment → reverse_payment, NOT create_credit_note or error_correction. The goal is to reverse the payment voucher so the invoice is outstanding again.
+
+### Example 16c — Reverse payment for bounced payment (Portuguese)
+Input: "O pagamento de Empresa Verde Lda para a fatura de Serviços de Consultoria foi devolvido pelo banco. Reverter o pagamento."
+Output:
+{{"task_type": "reverse_payment", "confidence": 0.96, "fields": {{"customer_name": "Empresa Verde Lda"}}}}
+
+### Example 16d — Reverse payment for bounced payment (English)
+Input: "The payment from Acme Corp for invoice Software License was returned by the bank. Reverse the payment so the invoice shows outstanding amount again."
+Output:
+{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Acme Corp"}}}}
+
+### Example 25b — Reverse payment (Norwegian)
+Input: "Betalingen fra Tindra AS ble returnert av banken. Reverser betalingen slik at fakturaen igjen vises som utestående."
+Output:
+{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Tindra AS"}}}}
 
 ### Example 17 — Project with customer (Bokmål)
 Input: "Opprett prosjekt 'Nettside' for kunde Digitalbyrå AS, start 01.04.2026, fast pris 50000 kr"
@@ -268,15 +315,54 @@ Input: "Set employee John Doe as a standard user with no access"
 Output:
 {{"task_type": "set_employee_roles", "confidence": 0.94, "fields": {{"employee_identifier": "John Doe", "user_type": "NO_ACCESS"}}}}
 
+### Example 20b — Set fixed price on existing project (German)
+Input: "Legen Sie einen Festpreis von 473250 NOK für das Projekt 'Datensicherheit' für Windkraft GmbH fest"
+Output:
+{{"task_type": "update_project", "confidence": 0.97, "fields": {{"project_identifier": "Datensicherheit", "is_fixed_price": true, "fixed_price": 473250.0}}}}
+
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
 return a JSON object with a "batch" array containing one classification per entity:
 {{"batch": [{{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "X"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Y"}}}}, ...]}}
 
+CRITICAL: Only use batch mode when the prompt EXPLICITLY asks to create MULTIPLE separate entities. \
+Do NOT split a single task into multiple tasks. For example, "set a fixed price for a project" is ONE \
+update_project task, NOT a batch of update_project + invoice_existing_customer.
+
 ### Example 21 — Batch departments
 Input: "Create three departments in Tripletex: Utvikling, Innkjøp, and Salg."
 Output:
 {{"batch": [{{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Utvikling"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Innkjøp"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Salg"}}}}]}}
+
+### Example 22 — Create supplier (Norwegian)
+Input: "Opprett leverandør Renhald AS med org.nr 912345678, e-post faktura@renhald.no"
+Output:
+{{"task_type": "create_supplier", "confidence": 0.97, "fields": {{"name": "Renhald AS", "organization_number": "912345678", "email": "faktura@renhald.no"}}}}
+
+### Example 22b — Create supplier (Nynorsk)
+Input: "Registrer ny leverandør Elektro Vest AS"
+Output:
+{{"task_type": "create_supplier", "confidence": 0.96, "fields": {{"name": "Elektro Vest AS"}}}}
+
+### Example 23 — Register supplier invoice (Norwegian)
+Input: "Registrer leverandørfaktura frå Elektro AS på 15000 kr eks. mva for Elektrisk arbeid"
+Output:
+{{"task_type": "register_supplier_invoice", "confidence": 0.97, "fields": {{"supplier_identifier": "Elektro AS", "amount_excl_vat": 15000.0, "description": "Elektrisk arbeid"}}}}
+
+### Example 23b — Register supplier invoice (German)
+Input: "Eingangsrechnung von Müller Elektrik GmbH über 8500 NOK für Wartungsarbeiten buchen"
+Output:
+{{"task_type": "register_supplier_invoice", "confidence": 0.96, "fields": {{"supplier_identifier": "Müller Elektrik GmbH", "amount_excl_vat": 8500.0, "description": "Wartungsarbeiten"}}}}
+
+### Example 24 — Run payroll (Norwegian)
+Input: "Kjør lønn for ansatt Erik Berg med grunnlønn 45000 kr og bonus 5000 kr for mars 2026"
+Output:
+{{"task_type": "run_payroll", "confidence": 0.97, "fields": {{"employee_identifier": "Erik Berg", "base_salary": 45000.0, "bonus": 5000.0, "month": 3, "year": 2026}}}}
+
+### Example 24b — Run payroll (French)
+Input: "Exécuter la paie pour l'employé Jean Dupont avec un salaire de base de 38000 NOK"
+Output:
+{{"task_type": "run_payroll", "confidence": 0.96, "fields": {{"employee_identifier": "Jean Dupont", "base_salary": 38000.0}}}}
 
 ## EMPLOYEE USER TYPE / ROLE
 When the prompt mentions administrator, admin, kontoadministrator → set user_type to "ADMINISTRATOR"
@@ -293,6 +379,12 @@ Respond with ONLY a JSON object (no markdown, no explanation) with exactly these
 For batch operations, use the batch format described above.
 
 If you cannot determine the task type, use "unknown" with confidence 0.0 and empty fields.
+
+## CRITICAL RULES
+- NEVER fabricate or invent information not present in the prompt.
+- If the prompt does not mention an email address, phone number, or website, do NOT include them in fields.
+- Only extract information that is EXPLICITLY stated in the input text.
+- Do NOT guess or infer contact details — only extract what is literally written.
 """
 
 
@@ -441,6 +533,7 @@ async def classify_task(
     """
     def _post_process_result(r):
         r.fields = _post_process_fields(r.task_type, r.fields)
+        r.fields = _strip_hallucinated_fields(r.raw_prompt, r.fields)
         return r
 
     def _post_process_any(r):
@@ -462,14 +555,16 @@ async def classify_task(
             logger.warning("Gemini classification failed: %s — trying next fallback", e)
 
     # --- Try Claude second ---
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    global _claude_available
+    if _claude_available and os.environ.get("ANTHROPIC_API_KEY"):
         try:
             result = await _classify_with_claude(prompt, files)
             if result.task_type != TaskType.UNKNOWN or result.confidence > 0.5:
                 return _post_process_result(result)
             logger.info("Claude returned UNKNOWN, trying keyword fallback")
         except Exception as e:
-            logger.warning("Claude classification failed: %s — using keyword fallback", e)
+            logger.warning("Claude classification failed: %s — disabling for this session", e)
+            _claude_available = False
 
     # --- Keyword fallback (always available) ---
     result = _classify_with_keywords(prompt, files)
@@ -581,6 +676,36 @@ async def _call_gemini(client: Any, user_message: str | list) -> str:
 # ---------------------------------------------------------------------------
 # Response parsing
 # ---------------------------------------------------------------------------
+
+
+def _strip_hallucinated_fields(raw_prompt: str, fields: dict) -> dict:
+    """Remove field values that were fabricated by the LLM and don't appear in the original prompt.
+
+    LLMs sometimes hallucinate email addresses, phone numbers, and websites
+    that aren't present in the input text. This safety net catches those.
+    """
+    _CHECKABLE_FIELDS = ["email", "phone", "website", "invoice_email", "phone_mobile"]
+    prompt_lower = raw_prompt.lower()
+
+    for field_name in _CHECKABLE_FIELDS:
+        value = fields.get(field_name)
+        if not value or not isinstance(value, str):
+            continue
+        # Check if the value (or a significant portion) appears in the original prompt
+        value_lower = value.lower().strip()
+        if value_lower not in prompt_lower:
+            # For email, also check just the local part (before @)
+            if "@" in value_lower:
+                local_part = value_lower.split("@")[0]
+                domain = value_lower.split("@")[1] if "@" in value_lower else ""
+                if local_part not in prompt_lower and domain not in prompt_lower:
+                    logger.warning("Stripped hallucinated %s: %s (not found in prompt)", field_name, value)
+                    del fields[field_name]
+            else:
+                logger.warning("Stripped hallucinated %s: %s (not found in prompt)", field_name, value)
+                del fields[field_name]
+
+    return fields
 
 
 def _post_process_fields(task_type: TaskType, fields: dict) -> dict:
@@ -894,6 +1019,18 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "finn kunde", "søk kunde", "søk etter kunde", "find customer",
             "search customer", "look up customer", "buscar cliente",
             "chercher client", "suche kunde", "kunde suchen", "kunde finden",
+        ],
+    },
+    TaskType.REVERSE_PAYMENT: {
+        "keywords": [
+            # Bounced/returned payment → reverse payment (NOT error correction or credit note)
+            "returnert av banken", "returned by bank", "returned by the bank",
+            "bounced payment", "betaling returnert", "payment returned",
+            "rückerstattet", "devolvido", "devuelto",
+            "betaling avvist", "payment rejected", "payment bounced",
+            "paiement retourné", "paiement rejeté",
+            "reverser betaling", "reverse payment", "undo payment",
+            "tilbakefør betaling",
         ],
     },
     TaskType.CREATE_CREDIT_NOTE: {
@@ -1595,7 +1732,11 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
     p = prompt.lower()
     # Order matters — more specific matches first
     _LAST_RESORT = [
-        # Credit note before invoice
+        # Reverse payment (bounced) before credit note
+        (["returnert av banken", "returned by bank", "bounced", "payment returned",
+          "betaling returnert", "rückerstattet", "devolvido", "reverser betaling",
+          "reverse payment", "tilbakefør betaling"], TaskType.REVERSE_PAYMENT),
+        # Credit note
         (["kreditnota", "credit note", "gutschrift", "avoir", "nota de crédito"], TaskType.CREATE_CREDIT_NOTE),
         # Invoice+payment before plain invoice
         (["betaling", "payment", "pago", "zahlung", "paiement", "betalt", "paid", "innbetaling"], TaskType.INVOICE_WITH_PAYMENT),
