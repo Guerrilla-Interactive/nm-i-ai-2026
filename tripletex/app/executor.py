@@ -81,6 +81,44 @@ def _clean(payload: dict) -> dict:
     return {k: v for k, v in payload.items() if v is not None}
 
 
+def _clean_org_number(org_nr: str | None) -> str | None:
+    """Strip dashes, spaces, and non-digit characters from organization numbers.
+
+    Tripletex API requires clean 9-digit org numbers. Users often write them as:
+    - "922 976 457" (spaces)
+    - "922-976-457" (dashes)
+    - "922.976.457" (dots)
+    Must become: "922976457"
+    """
+    if not org_nr:
+        return org_nr
+    cleaned = re.sub(r'[^\d]', '', str(org_nr))
+    return cleaned if cleaned else org_nr
+
+
+async def _get_payment_type_id(client: TripletexClient) -> int | None:
+    """Get the default payment type ID, with caching."""
+    cache = getattr(client, '_payment_type_cache', None)
+    if cache is not None:
+        return cache
+
+    try:
+        payment_types = await client.get_invoice_payment_types()
+        if payment_types:
+            # Prefer "Innbetaling" or first available
+            for pt in payment_types:
+                if "innbetaling" in pt.get("description", "").lower():
+                    client._payment_type_cache = pt["id"]
+                    return pt["id"]
+            # Fallback to first payment type
+            client._payment_type_cache = payment_types[0]["id"]
+            return payment_types[0]["id"]
+    except Exception as e:
+        _log("WARNING", "Failed to fetch payment types", error=str(e))
+
+    return None
+
+
 async def _get_voucher_type_id(client: TripletexClient, preferred_keywords: list[str] | None = None) -> int | None:
     """Get a voucher type ID, with per-request caching.
 
@@ -207,7 +245,7 @@ async def _find_customer(client: TripletexClient, fields: dict, name_key: str = 
     if name:
         params = {"customerName": name}
         if org_number:
-            params["organizationNumber"] = org_number
+            params["organizationNumber"] = _clean_org_number(org_number)
         customers = await client.get_customers(params)
         if customers:
             client._customer_search_cache = getattr(client, '_customer_search_cache', {})
@@ -222,7 +260,7 @@ async def _find_customer(client: TripletexClient, fields: dict, name_key: str = 
                 return customers[0]
 
     if not name and org_number:
-        customers = await client.get_customers({"organizationNumber": org_number})
+        customers = await client.get_customers({"organizationNumber": _clean_org_number(org_number)})
         if customers:
             client._customer_search_cache = getattr(client, '_customer_search_cache', {})
             client._customer_search_cache[cache_key] = customers[0]
@@ -556,7 +594,7 @@ async def _exec_create_customer(fields: dict, client: TripletexClient) -> dict:
     """POST /customer — 1 API call. Only 'name' is required."""
     payload = _clean({
         "name": _get(fields, "name") or _get(fields, "customer_name"),
-        "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+        "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
         "customerNumber": _get(fields, "customer_number"),
         "email": _get(fields, "email"),
         "invoiceEmail": _get(fields, "invoice_email"),
@@ -590,7 +628,7 @@ async def _exec_update_customer(fields: dict, client: TripletexClient) -> dict:
         "email": _get(fields, "new_email") or _get(fields, "email") or cust.get("email"),
         "invoiceEmail": _get(fields, "new_invoice_email") or _get(fields, "invoice_email"),
         "phoneNumber": _get(fields, "new_phone") or _get(fields, "phone"),
-        "organizationNumber": _get(fields, "new_org_number") or _get(fields, "org_number"),
+        "organizationNumber": _clean_org_number(_get(fields, "new_org_number") or _get(fields, "org_number")),
         "isPrivateIndividual": _get(fields, "is_private_individual"),
         "postalAddress": _build_address(fields, "new_") or _build_address(fields) or cust.get("postalAddress"),
         "description": _get(fields, "new_description") or _get(fields, "description"),
@@ -604,7 +642,7 @@ async def _exec_create_supplier(fields: dict, client: TripletexClient) -> dict:
     """POST /supplier — create a new supplier. 1 API call."""
     payload = _clean({
         "name": _get(fields, "name") or _get(fields, "supplier_name"),
-        "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+        "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
         "supplierNumber": _get(fields, "supplier_number"),
         "email": _get(fields, "email"),
         "invoiceEmail": _get(fields, "invoice_email"),
@@ -631,12 +669,12 @@ async def _exec_update_supplier(fields: dict, client: TripletexClient) -> dict:
     if name:
         suppliers = await client.get_suppliers({"supplierName": name})
         if not suppliers and org_number:
-            suppliers = await client.get_suppliers({"organizationNumber": org_number})
+            suppliers = await client.get_suppliers({"organizationNumber": _clean_org_number(org_number)})
         if suppliers:
             supplier = suppliers[0]
 
     if not supplier and org_number:
-        suppliers = await client.get_suppliers({"organizationNumber": org_number})
+        suppliers = await client.get_suppliers({"organizationNumber": _clean_org_number(org_number)})
         if suppliers:
             supplier = suppliers[0]
 
@@ -650,7 +688,7 @@ async def _exec_update_supplier(fields: dict, client: TripletexClient) -> dict:
         "email": _get(fields, "new_email") or _get(fields, "email") or supplier.get("email"),
         "invoiceEmail": _get(fields, "new_invoice_email") or _get(fields, "invoice_email"),
         "phoneNumber": _get(fields, "new_phone") or _get(fields, "phone"),
-        "organizationNumber": _get(fields, "new_org_number") or supplier.get("organizationNumber"),
+        "organizationNumber": _clean_org_number(_get(fields, "new_org_number")) or supplier.get("organizationNumber"),
         "bankAccountNumber": _get(fields, "new_bank_account_number") or _get(fields, "bank_account_number"),
         "description": _get(fields, "new_description") or _get(fields, "description"),
         "postalAddress": _build_address(fields, "new_") or _build_address(fields) or supplier.get("postalAddress"),
@@ -961,7 +999,7 @@ async def _exec_create_invoice(fields: dict, client: TripletexClient) -> dict:
                 cust_payload = _clean({
                     "name": customer_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
                     "email": _get(fields, "email") or _get(fields, "customer_email"),
                     "postalAddress": _build_address(fields),
                 })
@@ -995,7 +1033,7 @@ async def _exec_invoice_existing_customer(fields: dict, client: TripletexClient)
         cust_payload = _clean({
             "name": customer_name,
             "isCustomer": True,
-            "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+            "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
         })
         cust = await client.create_customer(cust_payload)
         _log("INFO", "Created customer for invoice", name=customer_name, id=cust.get("id"))
@@ -1117,15 +1155,10 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
     if amount is None:
         return {"success": False, "error": "No payment amount specified"}
 
-    # Look up payment type if not provided
+    # Look up payment type if not provided (cached)
     payment_type_id = _get(fields, "payment_type_id")
     if not payment_type_id:
-        payment_types = getattr(client, '_payment_type_cache', None)
-        if payment_types is None:
-            payment_types = await client.get_invoice_payment_types()
-            client._payment_type_cache = payment_types
-        if payment_types:
-            payment_type_id = payment_types[0]["id"]
+        payment_type_id = await _get_payment_type_id(client)
 
     payment_params = _clean({
         "paymentDate": payment_date,
@@ -1225,7 +1258,7 @@ async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> d
                 cust_payload = _clean({
                     "name": customer_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number")),
                     "email": _get(fields, "email"),
                     "postalAddress": _build_address(fields),
                 })
@@ -1251,12 +1284,7 @@ async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> d
     # Look up payment type
     payment_type_id = _get(fields, "payment_type_id")
     if not payment_type_id:
-        payment_types = getattr(client, '_payment_type_cache', None)
-        if payment_types is None:
-            payment_types = await client.get_invoice_payment_types()
-            client._payment_type_cache = payment_types
-        if payment_types:
-            payment_type_id = payment_types[0]["id"]
+        payment_type_id = await _get_payment_type_id(client)
 
     # Create order
     order_payload = _clean({
@@ -1616,7 +1644,7 @@ async def _exec_create_contact(fields: dict, client: TripletexClient) -> dict:
                 cust_payload = _clean({
                     "name": cust_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
                 })
                 new_cust = await client.create_customer(cust_payload)
                 customer_id = new_cust["id"]
@@ -1650,7 +1678,7 @@ async def _exec_project_with_customer(fields: dict, client: TripletexClient) -> 
         cust_payload = _clean({
             "name": cust_name,
             "isCustomer": True,
-            "organizationNumber": _get(fields, "organization_number"),
+            "organizationNumber": _clean_org_number(_get(fields, "organization_number")),
             "email": _get(fields, "customer_email"),
         })
         cust = await client.create_customer(cust_payload)
@@ -1670,7 +1698,7 @@ async def _exec_find_customer(fields: dict, client: TripletexClient) -> dict:
     if _get(fields, "email"):
         params["email"] = fields["email"]
     if _get(fields, "org_number") or _get(fields, "organization_number"):
-        params["organizationNumber"] = _get(fields, "org_number") or _get(fields, "organization_number")
+        params["organizationNumber"] = _clean_org_number(_get(fields, "org_number") or _get(fields, "organization_number"))
 
     results = await client.get_customers(params)
     return {"entity": "customer", "count": len(results), "results": results}
@@ -2212,7 +2240,7 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
             # Find the customer
             search_params = {}
             if org_number:
-                search_params["organizationNumber"] = org_number
+                search_params["organizationNumber"] = _clean_org_number(org_number)
             elif customer_name:
                 search_params["name"] = customer_name
 
@@ -2754,7 +2782,7 @@ async def _exec_delete_supplier(fields: dict, client: TripletexClient) -> dict:
         if suppliers:
             supplier = suppliers[0]
     if not supplier and org:
-        suppliers = await client.get_suppliers({"organizationNumber": org})
+        suppliers = await client.get_suppliers({"organizationNumber": _clean_org_number(org)})
         if suppliers:
             supplier = suppliers[0]
     if not supplier:
@@ -2894,7 +2922,7 @@ async def _exec_find_supplier(fields: dict, client: TripletexClient) -> dict:
         params["supplierName"] = query
     org = _get(fields, "org_number") or _get(fields, "organization_number")
     if org:
-        params["organizationNumber"] = org
+        params["organizationNumber"] = _clean_org_number(org)
     results = await client.get_suppliers(params)
     return {"entity": "supplier", "count": len(results), "results": results}
 
@@ -3094,26 +3122,38 @@ async def _exec_create_dimension_and_voucher(fields: dict, client: TripletexClie
                 }))
 
         if posting_list:
+            dim_voucher_type_id = await _get_voucher_type_id(client, ["memorial", "bilag"])
             voucher_data = _clean({
                 "date": _get(fields, "voucher_date") or _today(),
                 "description": _get(fields, "voucher_description") or f"Bilag med dimensjon {dimension_name}",
                 "postings": posting_list,
             })
+            if dim_voucher_type_id:
+                voucher_data["voucherType"] = {"id": dim_voucher_type_id}
 
             try:
                 voucher_result = await client.create_voucher(voucher_data, send_to_ledger=True)
                 voucher_id = voucher_result.get("id")
                 _log("INFO", "Voucher posted", voucher_id=voucher_id)
             except TripletexAPIError as e:
-                _log("WARNING", "Voucher posting failed, trying without sendToLedger",
+                _log("WARNING", "Voucher posting failed, trying without dimension linkage",
                      detail=(e.detail or "")[:200])
+                # Retry without dimension linkage — still creates the dimension/values
+                for p in posting_list:
+                    dim_field = f"freeAccountingDimension{dim_index}"
+                    p.pop(dim_field, None)
                 try:
-                    voucher_result = await client.create_voucher(voucher_data, send_to_ledger=False)
+                    voucher_result = await client.create_voucher(voucher_data, send_to_ledger=True)
                     voucher_id = voucher_result.get("id")
-                    _log("INFO", "Voucher posted (no sendToLedger)", voucher_id=voucher_id)
+                    _log("INFO", "Voucher posted (no dimension linkage)", voucher_id=voucher_id)
                 except TripletexAPIError as e2:
-                    _log("WARNING", "Voucher posting failed entirely",
-                         detail=(e2.detail or "")[:200])
+                    try:
+                        voucher_result = await client.create_voucher(voucher_data, send_to_ledger=False)
+                        voucher_id = voucher_result.get("id")
+                        _log("INFO", "Voucher posted (no sendToLedger)", voucher_id=voucher_id)
+                    except TripletexAPIError as e3:
+                        _log("WARNING", "Voucher posting failed entirely",
+                             detail=(e3.detail or "")[:200])
 
     return {
         "entity": "dimension_and_voucher",
@@ -3223,7 +3263,7 @@ async def _exec_register_supplier_invoice(fields: dict, client: TripletexClient)
 
     supplier_id = None
     if org_number:
-        suppliers = await client.get_suppliers({"organizationNumber": str(org_number)})
+        suppliers = await client.get_suppliers({"organizationNumber": _clean_org_number(str(org_number))})
         if suppliers:
             supplier_id = suppliers[0]["id"]
     if not supplier_id and supplier_name:
@@ -3235,7 +3275,7 @@ async def _exec_register_supplier_invoice(fields: dict, client: TripletexClient)
         # Create the supplier
         sup_data = _clean({
             "name": supplier_name or "Leverandør",
-            "organizationNumber": org_number,
+            "organizationNumber": _clean_org_number(org_number),
         })
         new_sup = await client.create_supplier(sup_data)
         supplier_id = new_sup["id"]
@@ -3524,28 +3564,51 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
         bonus = _get(fields, "bonus") or 0
         total = float(base_salary) + float(bonus)
 
-        # Create as journal voucher: debit salary expense (5000), credit salary payable (2900)
+        # Create as journal voucher: debit salary expense (5000) + bonus (5020), credit salary payable (2780)
         accounts_5000 = await client.get_ledger_accounts({"number": "5000"})
-        accounts_2900 = await client.get_ledger_accounts({"number": "2900"})
+        accounts_5020 = await client.get_ledger_accounts({"number": "5020"})
+        accounts_2780 = await client.get_ledger_accounts({"number": "2780"})
 
         acc_5000_id = accounts_5000[0]["id"] if accounts_5000 else None
-        acc_2900_id = accounts_2900[0]["id"] if accounts_2900 else None
+        acc_5020_id = accounts_5020[0]["id"] if accounts_5020 else None
+        acc_2780_id = accounts_2780[0]["id"] if accounts_2780 else None
 
-        if acc_5000_id and acc_2900_id and total > 0:
-            postings = [
-                {"account": {"id": acc_5000_id}, "amountGross": total,
-                 "amountGrossCurrency": total, "description": f"Lønn {month}/{year}",
-                 "date": txn_date},
-                {"account": {"id": acc_2900_id}, "amountGross": -total,
+        # Get proper voucher type for payroll
+        payroll_voucher_type_id = await _get_voucher_type_id(client, ["lønn", "salary", "payroll", "memorial"])
+
+        if acc_5000_id and acc_2780_id and total > 0:
+            base_amt = float(base_salary) if base_salary else total
+            bonus_amt = float(bonus) if bonus else 0
+
+            postings = []
+            # Debit salary expense (5000) for base salary
+            postings.append({"account": {"id": acc_5000_id}, "amountGross": base_amt if bonus_amt else total,
+                 "amountGrossCurrency": base_amt if bonus_amt else total, "description": f"Lønn {month}/{year}",
+                 "date": txn_date})
+            # Debit bonus (5020) if applicable and account exists
+            if bonus_amt and acc_5020_id:
+                postings.append({"account": {"id": acc_5020_id}, "amountGross": bonus_amt,
+                     "amountGrossCurrency": bonus_amt, "description": f"Bonus {month}/{year}",
+                     "date": txn_date})
+            elif bonus_amt:
+                # If no 5020 account, add bonus to 5000
+                postings[0]["amountGross"] = total
+                postings[0]["amountGrossCurrency"] = total
+            # Credit salary payable (2780)
+            postings.append({"account": {"id": acc_2780_id}, "amountGross": -total,
                  "amountGrossCurrency": -total, "description": f"Lønn {month}/{year}",
-                 "date": txn_date},
-            ]
-            try:
-                voucher = await client.create_voucher({
+                 "date": txn_date})
+
+            voucher_data = {
                     "date": txn_date,
                     "description": f"Lønnskjøring {month}/{year}",
                     "postings": postings,
-                }, send_to_ledger=True)
+                }
+            if payroll_voucher_type_id:
+                voucher_data["voucherType"] = {"id": payroll_voucher_type_id}
+
+            try:
+                voucher = await client.create_voucher(voucher_data, send_to_ledger=True)
                 return {
                     "entity": "salary_voucher",
                     "voucher_id": voucher.get("id"),
