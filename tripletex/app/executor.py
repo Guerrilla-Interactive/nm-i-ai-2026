@@ -2684,13 +2684,30 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
         return {"success": False, "error": "Could not find required ledger accounts (4000/2400)",
                 "supplier_id": supplier_id}
 
+    # Step 3b: Get voucher type (required to avoid "system-generated" 422 error)
+    voucher_types = await client.get_voucher_types()
+    voucher_type_id = None
+    for vt in voucher_types:
+        vt_name = (vt.get("name") or "").lower()
+        if any(kw in vt_name for kw in [
+            "leverandør", "inngående", "supplier", "incoming",
+            "memorial", "memorialnota",
+        ]):
+            voucher_type_id = vt["id"]
+            break
+    if not voucher_type_id and voucher_types:
+        voucher_type_id = voucher_types[0]["id"]
+
     # Step 4: Create voucher with postings
+    invoice_number = _get(fields, "invoice_number")
     voucher_date = _get(fields, "invoice_date") or _today()
+    due_date = _get(fields, "due_date")
     description = _get(fields, "description") or f"Supplier invoice from {supplier_name}"
 
     voucher_payload = {
         "date": voucher_date,
         "description": description,
+        "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
         "postings": [
             {
                 "date": voucher_date,
@@ -2708,15 +2725,46 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
             },
         ],
     }
-    voucher = await client.create_voucher(voucher_payload)
-    voucher_id = voucher.get("id")
 
-    return {
-        "entity": "supplier_invoice",
-        "supplier_id": supplier_id,
-        "voucher_id": voucher_id,
+    try:
+        voucher = await client.create_voucher(voucher_payload)
+        voucher_id = voucher.get("id")
+        return {
+            "entity": "supplier_invoice",
+            "supplier_id": supplier_id,
+            "voucher_id": voucher_id,
+            "amount": amount,
+        }
+    except TripletexAPIError as e:
+        _log("WARNING", "Voucher approach failed, trying /supplierInvoice", error=str(e))
+
+    # Fallback 1: try dedicated /supplierInvoice endpoint
+    si_payload = _clean({
+        "invoiceNumber": invoice_number,
+        "invoiceDate": voucher_date,
+        "dueDate": due_date or voucher_date,
+        "supplier": {"id": supplier_id},
         "amount": amount,
-    }
+        "amountCurrency": amount,
+        "currency": {"id": 1},  # NOK
+    })
+    try:
+        result = await client._request("POST", "/supplierInvoice", json=si_payload)
+        result = client._extract_value(result)
+        return {"entity": "supplier_invoice", "supplier_id": supplier_id,
+                "created_id": result.get("id"), "amount": amount}
+    except TripletexAPIError:
+        pass
+
+    # Fallback 2: try /incomingInvoice endpoint
+    try:
+        result = await client._request("POST", "/incomingInvoice", json=si_payload)
+        result = client._extract_value(result)
+        return {"entity": "supplier_invoice", "supplier_id": supplier_id,
+                "created_id": result.get("id"), "amount": amount}
+    except TripletexAPIError as e2:
+        return {"success": False, "error": f"All approaches failed: {e2}",
+                "supplier_id": supplier_id}
 
 
 async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) -> dict:
