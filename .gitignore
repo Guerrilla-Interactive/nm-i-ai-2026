@@ -1,0 +1,59 @@
+# Environment & secrets
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Training artifacts (too large for git)
+*.pt
+*.onnx
+*.pth
+*.weights
+*.tar.gz
+*.zip
+checkpoints_backup/
+yolox_local/
+runs/
+
+# Data files (too large)
+norgesgruppen/data/NM_NGD_coco_dataset.zip
+norgesgruppen/data/NM_NGD_product_images.zip
+norgesgruppen/data/images/
+norgesgruppen/data/labels/
+norgesgruppen/data/product_images/
+norgesgruppen/data/synthetic/
+norgesgruppen/data/train/
+norgesgruppen/backups/
+
+# Astar data
+astar-island/data/*.json
+!astar-island/data/group_priors_r2.json
+!astar-island/data/group_priors_r3.json
+!astar-island/data/model_r2.json
+!astar-island/data/model_r3.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# Tripletex app artifacts
+tripletex/app/__pycache__/

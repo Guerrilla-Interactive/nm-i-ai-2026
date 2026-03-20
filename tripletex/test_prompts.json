@@ -1,0 +1,752 @@
+{
+  "test_cases": [
+    {
+      "id": "create_employee_nb_1",
+      "task_type": "create_employee",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Opprett en ansatt med navn Ola Nordmann, e-post ola@example.com og telefon 99887766",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Ola", "lastName": "Nordmann", "email": "ola@example.com", "phoneNumberMobile": "99887766"}
+    },
+    {
+      "id": "create_employee_nb_2",
+      "task_type": "create_employee",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Legg til en ny ansatt: Kari Ødegård, epost kari.odegaard@firma.no, mobil 41234567, adresse Storgata 12, 0182 Oslo",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Kari", "lastName": "Ødegård", "email": "kari.odegaard@firma.no", "phoneNumberMobile": "41234567"}
+    },
+    {
+      "id": "create_employee_nb_3",
+      "task_type": "create_employee",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Registrer ansatt Bjørn Ås med e-postadresse bjorn.aas@bedrift.no og telefonnummer 90112233",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Bjørn", "lastName": "Ås", "email": "bjorn.aas@bedrift.no", "phoneNumberMobile": "90112233"}
+    },
+    {
+      "id": "create_employee_en_1",
+      "task_type": "create_employee",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Create an employee named John Smith with email john.smith@company.com and phone number 98765432",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "John", "lastName": "Smith", "email": "john.smith@company.com", "phoneNumberMobile": "98765432"}
+    },
+    {
+      "id": "create_employee_en_2",
+      "task_type": "create_employee",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Add a new employee: Jane O'Brien, email jane.obrien@example.org, mobile 45678901, address 15 Baker Street, London",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Jane", "lastName": "O'Brien", "email": "jane.obrien@example.org", "phoneNumberMobile": "45678901"}
+    },
+    {
+      "id": "create_employee_de_1",
+      "task_type": "create_employee",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Erstellen Sie einen Mitarbeiter mit dem Namen Hans Müller, E-Mail hans.mueller@firma.de und Telefon 017612345678",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Hans", "lastName": "Müller", "email": "hans.mueller@firma.de", "phoneNumberMobile": "017612345678"}
+    },
+    {
+      "id": "create_employee_es_1",
+      "task_type": "create_employee",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Crea un empleado llamado María García Hernández, correo maria.garcia@empresa.es y teléfono 612345678",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "María", "lastName": "García Hernández", "email": "maria.garcia@empresa.es", "phoneNumberMobile": "612345678"}
+    },
+    {
+      "id": "create_employee_fr_1",
+      "task_type": "create_employee",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Créez un employé nommé Pierre Lefèvre, email pierre.lefevre@societe.fr et téléphone 0612345678",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Pierre", "lastName": "Lefèvre", "email": "pierre.lefevre@societe.fr", "phoneNumberMobile": "0612345678"}
+    },
+    {
+      "id": "create_employee_nn_1",
+      "task_type": "create_employee",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Legg til ein tilsett med namn Astrid Haugen, epost astrid.haugen@bedrift.no og telefon 47112233",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Astrid", "lastName": "Haugen", "email": "astrid.haugen@bedrift.no", "phoneNumberMobile": "47112233"}
+    },
+    {
+      "id": "create_employee_pt_1",
+      "task_type": "create_employee",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Crie um funcionário chamado João da Silva, email joao.silva@empresa.pt e telefone 912345678",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "João", "lastName": "da Silva", "email": "joao.silva@empresa.pt", "phoneNumberMobile": "912345678"}
+    },
+
+    {
+      "id": "update_employee_nb_1",
+      "task_type": "update_employee",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Oppdater e-posten til Ola Nordmann til ola.ny@example.com",
+      "expected_actions": ["GET /employee", "PUT /employee/{id}"],
+      "expected_fields": {"email": "ola.ny@example.com"},
+      "prerequisites": ["create_employee_nb_1"]
+    },
+    {
+      "id": "update_employee_nb_2",
+      "task_type": "update_employee",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Endre telefonnummeret til Kari Ødegård til 99001122",
+      "expected_actions": ["GET /employee", "PUT /employee/{id}"],
+      "expected_fields": {"phoneNumberMobile": "99001122"},
+      "prerequisites": ["create_employee_nb_2"]
+    },
+    {
+      "id": "update_employee_en_1",
+      "task_type": "update_employee",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Update John Smith's email address to john.smith.new@company.com",
+      "expected_actions": ["GET /employee", "PUT /employee/{id}"],
+      "expected_fields": {"email": "john.smith.new@company.com"},
+      "prerequisites": ["create_employee_en_1"]
+    },
+    {
+      "id": "update_employee_de_1",
+      "task_type": "update_employee",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Aktualisieren Sie die Telefonnummer von Hans Müller auf 017699887766",
+      "expected_actions": ["GET /employee", "PUT /employee/{id}"],
+      "expected_fields": {"phoneNumberMobile": "017699887766"},
+      "prerequisites": ["create_employee_de_1"]
+    },
+    {
+      "id": "update_employee_es_1",
+      "task_type": "update_employee",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Actualiza el correo de María García Hernández a maria.nueva@empresa.es",
+      "expected_actions": ["GET /employee", "PUT /employee/{id}"],
+      "expected_fields": {"email": "maria.nueva@empresa.es"},
+      "prerequisites": ["create_employee_es_1"]
+    },
+    {
+      "id": "update_employee_fr_1",
+      "task_type": "update_employee",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Mettez à jour le numéro de téléphone de Pierre Lefèvre à 0698765432",
+      "expected_actions": ["GET /employee", "PUT /employee/{id}"],
+      "expected_fields": {"phoneNumberMobile": "0698765432"},
+      "prerequisites": ["create_employee_fr_1"]
+    },
+    {
+      "id": "update_employee_nn_1",
+      "task_type": "update_employee",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Endre epostadressa til Astrid Haugen til astrid.ny@bedrift.no",
+      "expected_actions": ["GET /employee", "PUT /employee/{id}"],
+      "expected_fields": {"email": "astrid.ny@bedrift.no"},
+      "prerequisites": ["create_employee_nn_1"]
+    },
+    {
+      "id": "update_employee_pt_1",
+      "task_type": "update_employee",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Atualize o email de João da Silva para joao.novo@empresa.pt",
+      "expected_actions": ["GET /employee", "PUT /employee/{id}"],
+      "expected_fields": {"email": "joao.novo@empresa.pt"},
+      "prerequisites": ["create_employee_pt_1"]
+    },
+
+    {
+      "id": "delete_employee_nb_1",
+      "task_type": "delete_employee",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Slett den ansatte Ola Nordmann",
+      "expected_actions": ["GET /employee", "DELETE /employee/{id}"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_nb_1"]
+    },
+    {
+      "id": "delete_employee_en_1",
+      "task_type": "delete_employee",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Delete the employee John Smith",
+      "expected_actions": ["GET /employee", "DELETE /employee/{id}"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_en_1"]
+    },
+    {
+      "id": "delete_employee_de_1",
+      "task_type": "delete_employee",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Löschen Sie den Mitarbeiter Hans Müller",
+      "expected_actions": ["GET /employee", "DELETE /employee/{id}"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_de_1"]
+    },
+    {
+      "id": "delete_employee_es_1",
+      "task_type": "delete_employee",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Elimina al empleado María García Hernández",
+      "expected_actions": ["GET /employee", "DELETE /employee/{id}"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_es_1"]
+    },
+    {
+      "id": "delete_employee_fr_1",
+      "task_type": "delete_employee",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Supprimez l'employé Pierre Lefèvre",
+      "expected_actions": ["GET /employee", "DELETE /employee/{id}"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_fr_1"]
+    },
+    {
+      "id": "delete_employee_nn_1",
+      "task_type": "delete_employee",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Slett den tilsette Astrid Haugen",
+      "expected_actions": ["GET /employee", "DELETE /employee/{id}"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_nn_1"]
+    },
+    {
+      "id": "delete_employee_pt_1",
+      "task_type": "delete_employee",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Exclua o funcionário João da Silva",
+      "expected_actions": ["GET /employee", "DELETE /employee/{id}"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_pt_1"]
+    },
+
+    {
+      "id": "create_customer_nb_1",
+      "task_type": "create_customer",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Opprett en kunde med navn Byggmester AS, organisasjonsnummer 912345678 og adresse Industriveien 5, 0579 Oslo",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Byggmester AS", "organizationNumber": "912345678"}
+    },
+    {
+      "id": "create_customer_nb_2",
+      "task_type": "create_customer",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Registrer ny kunde: Sjømat Tromsø AS, org.nr 987654321, Sjøgata 22, 9008 Tromsø",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Sjømat Tromsø AS", "organizationNumber": "987654321"}
+    },
+    {
+      "id": "create_customer_en_1",
+      "task_type": "create_customer",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Create a customer named Nordic Solutions Ltd with organization number 123456789 and address Kongens gate 10, 0153 Oslo",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Nordic Solutions Ltd", "organizationNumber": "123456789"}
+    },
+    {
+      "id": "create_customer_de_1",
+      "task_type": "create_customer",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Erstellen Sie einen Kunden namens Schöne Möbel GmbH mit Organisationsnummer 234567890 und Adresse Hauptstraße 42, Berlin",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Schöne Möbel GmbH", "organizationNumber": "234567890"}
+    },
+    {
+      "id": "create_customer_es_1",
+      "task_type": "create_customer",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Crea un cliente llamado Soluciones Ibérica S.L. con número de organización 345678901 y dirección Calle Mayor 15, Madrid",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Soluciones Ibérica S.L.", "organizationNumber": "345678901"}
+    },
+    {
+      "id": "create_customer_fr_1",
+      "task_type": "create_customer",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Créez un client nommé Boulangerie Française SARL avec numéro d'organisation 456789012 et adresse 8 Rue de la Paix, Paris",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Boulangerie Française SARL", "organizationNumber": "456789012"}
+    },
+    {
+      "id": "create_customer_nn_1",
+      "task_type": "create_customer",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Opprett ein kunde med namn Fjordbygg AS, organisasjonsnummer 567890123 og adresse Fjordvegen 3, 6800 Førde",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Fjordbygg AS", "organizationNumber": "567890123"}
+    },
+    {
+      "id": "create_customer_pt_1",
+      "task_type": "create_customer",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Crie um cliente chamado Construções Lisboa Lda com número de organização 678901234 e endereço Rua Augusta 100, Lisboa",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Construções Lisboa Lda", "organizationNumber": "678901234"}
+    },
+
+    {
+      "id": "create_product_nb_1",
+      "task_type": "create_product",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Opprett et produkt med navn Konsulenttjeneste, pris 1500 kr eks. mva og MVA-sats 25%",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "Konsulenttjeneste", "priceExcludingVatCurrency": 1500.0}
+    },
+    {
+      "id": "create_product_nb_2",
+      "task_type": "create_product",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Legg til nytt produkt: Programvarelisens, pris 4990 NOK uten mva, 25% MVA",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "Programvarelisens", "priceExcludingVatCurrency": 4990.0}
+    },
+    {
+      "id": "create_product_en_1",
+      "task_type": "create_product",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Create a product called Web Development Service priced at 2000 NOK excluding VAT with 25% VAT rate",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "Web Development Service", "priceExcludingVatCurrency": 2000.0}
+    },
+    {
+      "id": "create_product_de_1",
+      "task_type": "create_product",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Erstellen Sie ein Produkt namens IT-Beratung mit einem Preis von 3000 NOK ohne MwSt und einem MwSt-Satz von 25%",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "IT-Beratung", "priceExcludingVatCurrency": 3000.0}
+    },
+    {
+      "id": "create_product_es_1",
+      "task_type": "create_product",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Crea un producto llamado Servicio de Diseño con precio 1800 NOK sin IVA y tasa de IVA del 25%",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "Servicio de Diseño", "priceExcludingVatCurrency": 1800.0}
+    },
+    {
+      "id": "create_product_fr_1",
+      "task_type": "create_product",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Créez un produit appelé Service Marketing au prix de 2500 NOK hors TVA avec un taux de TVA de 25%",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "Service Marketing", "priceExcludingVatCurrency": 2500.0}
+    },
+    {
+      "id": "create_product_nn_1",
+      "task_type": "create_product",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Opprett eit produkt med namn Rekneskapsteneste, pris 1200 NOK utan mva og 25% MVA",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "Rekneskapsteneste", "priceExcludingVatCurrency": 1200.0}
+    },
+    {
+      "id": "create_product_pt_1",
+      "task_type": "create_product",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Crie um produto chamado Consultoria Técnica com preço de 2200 NOK sem IVA e taxa de IVA de 25%",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "Consultoria Técnica", "priceExcludingVatCurrency": 2200.0}
+    },
+
+    {
+      "id": "create_department_nb_1",
+      "task_type": "create_department",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Opprett en avdeling med navn Salg",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Salg"}
+    },
+    {
+      "id": "create_department_nb_2",
+      "task_type": "create_department",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Lag ny avdeling: Økonomi og regnskap",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Økonomi og regnskap"}
+    },
+    {
+      "id": "create_department_en_1",
+      "task_type": "create_department",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Create a department called Engineering",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Engineering"}
+    },
+    {
+      "id": "create_department_de_1",
+      "task_type": "create_department",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Erstellen Sie eine Abteilung namens Personalwesen",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Personalwesen"}
+    },
+    {
+      "id": "create_department_es_1",
+      "task_type": "create_department",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Crea un departamento llamado Recursos Humanos",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Recursos Humanos"}
+    },
+    {
+      "id": "create_department_fr_1",
+      "task_type": "create_department",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Créez un département appelé Recherche et Développement",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Recherche et Développement"}
+    },
+    {
+      "id": "create_department_nn_1",
+      "task_type": "create_department",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Opprett ei avdeling med namn Marknadsføring",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Marknadsføring"}
+    },
+    {
+      "id": "create_department_pt_1",
+      "task_type": "create_department",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Crie um departamento chamado Tecnologia da Informação",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Tecnologia da Informação"}
+    },
+
+    {
+      "id": "create_project_nb_1",
+      "task_type": "create_project",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Opprett et prosjekt med navn Nettside-redesign",
+      "expected_actions": ["POST /project"],
+      "expected_fields": {"name": "Nettside-redesign"}
+    },
+    {
+      "id": "create_project_nb_2",
+      "task_type": "create_project",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Lag nytt prosjekt: Årsrapport 2026",
+      "expected_actions": ["POST /project"],
+      "expected_fields": {"name": "Årsrapport 2026"}
+    },
+    {
+      "id": "create_project_en_1",
+      "task_type": "create_project",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Create a project named Cloud Migration",
+      "expected_actions": ["POST /project"],
+      "expected_fields": {"name": "Cloud Migration"}
+    },
+    {
+      "id": "create_project_de_1",
+      "task_type": "create_project",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Erstellen Sie ein Projekt namens Büroumzug",
+      "expected_actions": ["POST /project"],
+      "expected_fields": {"name": "Büroumzug"}
+    },
+    {
+      "id": "create_project_es_1",
+      "task_type": "create_project",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Crea un proyecto llamado Expansión Internacional",
+      "expected_actions": ["POST /project"],
+      "expected_fields": {"name": "Expansión Internacional"}
+    },
+    {
+      "id": "create_project_fr_1",
+      "task_type": "create_project",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Créez un projet appelé Transformation Numérique",
+      "expected_actions": ["POST /project"],
+      "expected_fields": {"name": "Transformation Numérique"}
+    },
+    {
+      "id": "create_project_nn_1",
+      "task_type": "create_project",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Opprett eit prosjekt med namn Systemoppgradering",
+      "expected_actions": ["POST /project"],
+      "expected_fields": {"name": "Systemoppgradering"}
+    },
+    {
+      "id": "create_project_pt_1",
+      "task_type": "create_project",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Crie um projeto chamado Automação de Processos",
+      "expected_actions": ["POST /project"],
+      "expected_fields": {"name": "Automação de Processos"}
+    },
+
+    {
+      "id": "create_invoice_nb_1",
+      "task_type": "create_invoice",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Opprett en faktura til kunde Byggmester AS for produktet Konsulenttjeneste, 10 timer à 1500 kr",
+      "expected_actions": ["POST /order", "PUT /order/{id}/:invoice"],
+      "expected_fields": {},
+      "prerequisites": ["create_customer_nb_1", "create_product_nb_1"],
+      "notes": "Requires customer and product to exist first"
+    },
+    {
+      "id": "create_invoice_nb_2",
+      "task_type": "create_invoice",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Lag en faktura til Sjømat Tromsø AS med 5 stk Programvarelisens til 4990 kr per stk",
+      "expected_actions": ["POST /order", "PUT /order/{id}/:invoice"],
+      "expected_fields": {},
+      "prerequisites": ["create_customer_nb_2", "create_product_nb_2"]
+    },
+    {
+      "id": "create_invoice_en_1",
+      "task_type": "create_invoice",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Create an invoice for customer Nordic Solutions Ltd for 20 hours of Web Development Service at 2000 NOK each",
+      "expected_actions": ["POST /order", "PUT /order/{id}/:invoice"],
+      "expected_fields": {},
+      "prerequisites": ["create_customer_en_1", "create_product_en_1"]
+    },
+    {
+      "id": "create_invoice_de_1",
+      "task_type": "create_invoice",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Erstellen Sie eine Rechnung für den Kunden Schöne Möbel GmbH für 8 Stunden IT-Beratung zu je 3000 NOK",
+      "expected_actions": ["POST /order", "PUT /order/{id}/:invoice"],
+      "expected_fields": {},
+      "prerequisites": ["create_customer_de_1", "create_product_de_1"]
+    },
+    {
+      "id": "create_invoice_es_1",
+      "task_type": "create_invoice",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Crea una factura para el cliente Soluciones Ibérica S.L. por 15 unidades de Servicio de Diseño a 1800 NOK cada una",
+      "expected_actions": ["POST /order", "PUT /order/{id}/:invoice"],
+      "expected_fields": {},
+      "prerequisites": ["create_customer_es_1", "create_product_es_1"]
+    },
+    {
+      "id": "create_invoice_fr_1",
+      "task_type": "create_invoice",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Créez une facture pour le client Boulangerie Française SARL pour 12 heures de Service Marketing à 2500 NOK chacune",
+      "expected_actions": ["POST /order", "PUT /order/{id}/:invoice"],
+      "expected_fields": {},
+      "prerequisites": ["create_customer_fr_1", "create_product_fr_1"]
+    },
+    {
+      "id": "create_invoice_nn_1",
+      "task_type": "create_invoice",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Opprett ein faktura til kunde Fjordbygg AS for 6 timar Rekneskapsteneste til 1200 NOK per time",
+      "expected_actions": ["POST /order", "PUT /order/{id}/:invoice"],
+      "expected_fields": {},
+      "prerequisites": ["create_customer_nn_1", "create_product_nn_1"]
+    },
+    {
+      "id": "create_invoice_pt_1",
+      "task_type": "create_invoice",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Crie uma fatura para o cliente Construções Lisboa Lda por 10 horas de Consultoria Técnica a 2200 NOK cada",
+      "expected_actions": ["POST /order", "PUT /order/{id}/:invoice"],
+      "expected_fields": {},
+      "prerequisites": ["create_customer_pt_1", "create_product_pt_1"]
+    },
+
+    {
+      "id": "create_travel_expense_nb_1",
+      "task_type": "create_travel_expense",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Registrer en reiseregning for ansatt Ola Nordmann, reise fra Oslo til Bergen 15. mars 2026, formål: kundemøte",
+      "expected_actions": ["POST /travelExpense"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_nb_1"]
+    },
+    {
+      "id": "create_travel_expense_en_1",
+      "task_type": "create_travel_expense",
+      "language": "english",
+      "tier": 1,
+      "prompt": "Create a travel expense for employee John Smith, traveling from Oslo to Trondheim on March 20, 2026, purpose: conference attendance",
+      "expected_actions": ["POST /travelExpense"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_en_1"]
+    },
+    {
+      "id": "create_travel_expense_de_1",
+      "task_type": "create_travel_expense",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Erstellen Sie eine Reisekostenabrechnung für Mitarbeiter Hans Müller, Reise von Oslo nach Stavanger am 18. März 2026, Zweck: Schulung",
+      "expected_actions": ["POST /travelExpense"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_de_1"]
+    },
+    {
+      "id": "create_travel_expense_es_1",
+      "task_type": "create_travel_expense",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Crea un gasto de viaje para la empleada María García Hernández, viaje de Oslo a Tromsø el 19 de marzo de 2026, propósito: reunión con cliente",
+      "expected_actions": ["POST /travelExpense"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_es_1"]
+    },
+    {
+      "id": "create_travel_expense_fr_1",
+      "task_type": "create_travel_expense",
+      "language": "french",
+      "tier": 1,
+      "prompt": "Créez une note de frais de déplacement pour l'employé Pierre Lefèvre, voyage d'Oslo à Kristiansand le 21 mars 2026, objet: visite client",
+      "expected_actions": ["POST /travelExpense"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_fr_1"]
+    },
+    {
+      "id": "create_travel_expense_nn_1",
+      "task_type": "create_travel_expense",
+      "language": "nynorsk",
+      "tier": 1,
+      "prompt": "Registrer ei reiserekning for tilsett Astrid Haugen, reise frå Oslo til Ålesund 17. mars 2026, formål: fagsamling",
+      "expected_actions": ["POST /travelExpense"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_nn_1"]
+    },
+    {
+      "id": "create_travel_expense_pt_1",
+      "task_type": "create_travel_expense",
+      "language": "portuguese",
+      "tier": 1,
+      "prompt": "Crie uma despesa de viagem para o funcionário João da Silva, viagem de Oslo para Bodø em 22 de março de 2026, finalidade: treinamento",
+      "expected_actions": ["POST /travelExpense"],
+      "expected_fields": {},
+      "prerequisites": ["create_employee_pt_1"]
+    },
+
+    {
+      "id": "edge_special_chars_nb",
+      "task_type": "create_employee",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Opprett ansatt Ærlig Østby-Ås med e-post aerlig@bedrift.no og telefon 40001122",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Ærlig", "lastName": "Østby-Ås", "email": "aerlig@bedrift.no"},
+      "notes": "Edge case: Norwegian special chars æ, ø, å in name"
+    },
+    {
+      "id": "edge_special_chars_de",
+      "task_type": "create_customer",
+      "language": "german",
+      "tier": 1,
+      "prompt": "Erstellen Sie einen Kunden namens Größe & Stärke Über GmbH mit Organisationsnummer 111222333",
+      "expected_actions": ["POST /customer"],
+      "expected_fields": {"name": "Größe & Stärke Über GmbH", "organizationNumber": "111222333"},
+      "notes": "Edge case: German umlauts ö, ä, ü and ampersand"
+    },
+    {
+      "id": "edge_special_chars_es",
+      "task_type": "create_employee",
+      "language": "spanish",
+      "tier": 1,
+      "prompt": "Crea un empleado llamado José Muñoz Peña, correo jose.munoz@empresa.es, teléfono 634567890",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "José", "lastName": "Muñoz Peña", "email": "jose.munoz@empresa.es"},
+      "notes": "Edge case: Spanish special chars ñ, accent marks"
+    },
+    {
+      "id": "edge_verbose_nb",
+      "task_type": "create_employee",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Hei, jeg trenger at du registrerer en ny person i systemet. Vedkommende heter Lars Erik Hansen og jobber hos oss fra i dag. E-postadressen hans er lars.hansen@firma.no og han kan nås på mobilnummer 47998877. Adressen er Parkveien 33, leilighet 4B, 0258 Oslo.",
+      "expected_actions": ["POST /employee"],
+      "expected_fields": {"firstName": "Lars Erik", "lastName": "Hansen", "email": "lars.hansen@firma.no", "phoneNumberMobile": "47998877"},
+      "notes": "Edge case: verbose/conversational prompt with extra context"
+    },
+    {
+      "id": "edge_minimal_en",
+      "task_type": "create_department",
+      "language": "english",
+      "tier": 1,
+      "prompt": "New department: Finance",
+      "expected_actions": ["POST /department"],
+      "expected_fields": {"name": "Finance"},
+      "notes": "Edge case: very minimal prompt"
+    },
+    {
+      "id": "edge_mixed_language",
+      "task_type": "create_product",
+      "language": "norwegian",
+      "tier": 1,
+      "prompt": "Opprett produkt 'Cloud Hosting Premium', pris 899 kr ekskl. mva, 25% MVA",
+      "expected_actions": ["POST /product"],
+      "expected_fields": {"name": "Cloud Hosting Premium", "priceExcludingVatCurrency": 899.0},
+      "notes": "Edge case: English product name in Norwegian prompt"
+    }
+  ]
+}
