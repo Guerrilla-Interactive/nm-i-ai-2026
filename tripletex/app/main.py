@@ -211,15 +211,39 @@ _KEYWORD_MAP = [
                                      r"\bbank\w*\b.*\bavstem\w*\b",
                                      r"\bavstem\w*\b.*\bbank\w*\b",
                                      r"\b(reconcil|abgleich|rapprochement)\w*\b"]),
+    (TaskType.REGISTER_SUPPLIER_INVOICE, [
+        r"\b(leverandørfaktura|leverandør\w*faktura|supplier\s*invoice|incoming\s*invoice|inngående\s*faktura)\b",
+        r"\b(registrer|register|book|bokfør)\w*\b.*\b(leverandør|supplier|innkommende|incoming)\b.*\b(faktura|invoice)\b",
+        r"\b(facture\s+fournisseur|eingangsrechnung|factura\s+proveedor)\b",
+        r"\b(motteke|mottatt|received)\b.*\bfaktura\b.*\b(leverandør|supplier|fra)\b",
+    ]),
+    (TaskType.RUN_PAYROLL, [r"\b(lønn|lønns|salary|payroll|paie|nómina|gehalt)\w*\b.*\b(kjør|utfør|run|execute|exécute|ejecut)\w*\b",
+                            r"\b(kjør|utfør|run|execute|exécute|ejecut)\w*\b.*\b(lønn|lønns|salary|payroll|paie|nómina|gehalt)\w*\b",
+                            r"\b(lønnskjøring|lønnsutbetaling|payslip|lønnsslipp)\b",
+                            r"\bexécute[rz]?\s+(la\s+)?paie\b",
+                            r"\b(base\s+salary|grunnlønn|fastlønn|salaire\s+de\s+base)\b"]),
     (TaskType.ERROR_CORRECTION, [r"\b(korriger|correct|fiks|fix)\w*\b.*\b(feil|error|bilag|voucher|postering)\b",
-                                   r"\b(feil|error)\w*\b.*\b(korriger|correct|rett)\b"]),
+                                   r"\b(feil|error)\w*\b.*\b(korriger|correct|rett)\b",
+                                   r"\b(reverser|reverse)\w*\b.*\b(betaling|payment|innbetaling)\w*\b",
+                                   r"\b(returnert|returned)\b.*\b(bank|betaling|payment)\b"]),
     (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\bårsoppgjør\w*\b",
                                    r"\byear.?end\b", r"\bjahresabschluss\w*\b", r"\bclôture\b",
                                    r"\b(avslutt|close|lukk)\w*\b.*\b(år|year|regnskapsår)\w*\b"]),
+    # --- T3: Accounting Dimension + Voucher (before travel/employee) ---
+    (TaskType.CREATE_DIMENSION_AND_VOUCHER, [
+        r"\bregnskapsdimensjon\w*\b",
+        r"\b(accounting|free)\s+dimension\b",
+        r"\b(fri|frie)\s+dimensjon\w*\b",
+        r"\b(opprett|create|lag)\b.*\bdimensjon\w*\b.*\b(bokfør|bilag|voucher|journal)\b",
+        r"\bdimensjon\w*\b.*\b(verdi|value|verdiene)\b",
+        r"\bKonteringsdimensjon\w*\b",
+    ]),
     # --- Travel (after enable_module — "reiseregning" alone should match travel) ---
     # NOTE: "reise" without trailing \b so it matches "reiseregning" as substring
     (TaskType.DELETE_TRAVEL_EXPENSE, [r"\b(slett|delete|remove|fjern|löschen|eliminar|supprimer)\b.*\b(reise|travel|viaje|voyage|reisekostenabrechnung)",
                                        r"\b(slett|delete|remove|fjern)\b.*\b(?:reiseregning|reiserekning)\b"]),
+    (TaskType.UPDATE_TRAVEL_EXPENSE, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(reise|travel|viaje|voyage|reisekostenabrechnung)",
+                                       r"\b(oppdater|endre|update|modify)\b.*\b(?:reiseregning|reiserekning)\b"]),
     (TaskType.CREATE_TRAVEL_EXPENSE, [r"\breiseregning\b", r"\breiserekning\b",
                                        r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar)\b.*\b(reise|travel|viaje|voyage|reisekostenabrechnung)\b"]),
     # --- Employee ---
@@ -245,6 +269,7 @@ _KEYWORD_MAP = [
     (TaskType.CREATE_INVOICE, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar)\b.*\b(faktura|invoice|factura|rechnung|facture|fatura)\b",
                                 r"\b(faktura|invoice|factura|rechnung|facture|fatura)\b"]),
     # --- Contact (use "kontaktperson" not bare "kontakt" to avoid matching email addresses like kontakt@...) ---
+    (TaskType.DELETE_CONTACT, [r"\b(slett|fjern|delete|remove|löschen|eliminar|supprimer)\b.*\b(kontaktperson|contact(?!@)|contacto|contato)\b"]),
     (TaskType.UPDATE_CONTACT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(kontaktperson|contact(?!@)|contacto|contato)\b"]),
     (TaskType.CREATE_CONTACT, [r"\bkontaktperson\b", r"\b(opprett|create|add|erstellen|créer|crear|criar)\b.*\b(contactperson|contact(?!@)|contacto|contato)\b"]),
     # --- Project (before customer — "prosjekt for kunde" should match project, not customer) ---
@@ -260,6 +285,12 @@ _KEYWORD_MAP = [
                                 r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add|set\s+up)\b.*\b(project|proyecto|projekt|projet)\b",
                                 r"\bny\w?\b.*\bprosjekt\w*\b",
                                 r"\bny\w?\b.*\b(project|proyecto|projekt|projet)\b"]),
+    # --- Supplier (before customer — "leverandør" must not match "kunde") ---
+    (TaskType.DELETE_SUPPLIER, [r"\b(slett|fjern|delete|remove|löschen|eliminar|supprimer)\b.*\b(leverandør|supplier|fournisseur|proveedor|lieferant|fornitore|fornecedor|leverancier)\b"]),
+    (TaskType.FIND_SUPPLIER, [r"\b(finn|find|søk|search|chercher|buscar|suchen)\b.*\b(leverandør|supplier|fournisseur|proveedor|lieferant|fornitore|fornecedor|leverancier)\b"]),
+    (TaskType.UPDATE_SUPPLIER, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(leverandør|supplier|fournisseur|proveedor|lieferant|fornitore|fornecedor|leverancier)\b"]),
+    (TaskType.CREATE_SUPPLIER, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|enregistr\w*|legg\s+til|add)\b.*\b(leverandør|supplier|fournisseur|proveedor|lieferant|fornitore|fornecedor|leverancier)\b",
+                                 r"\b(leverandør|supplier|fournisseur|proveedor|lieferant|fornitore|fornecedor|leverancier)\b"]),
     # --- Customer (after invoice and project to avoid false matches) ---
     (TaskType.DELETE_CUSTOMER, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(kund(?:e|en)|customer|client|cliente)\b"]),
     (TaskType.UPDATE_CUSTOMER, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(kund(?:e|en)|customer|client|cliente)\b"]),
@@ -268,8 +299,11 @@ _KEYWORD_MAP = [
                                 r"\bny\w?\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
                                 r"\b(kund(?:e|en)|customer|client|cliente)\b.*\b(opprett|create|lag)\b"]),
     # --- Product / Department ---
+    (TaskType.DELETE_PRODUCT, [r"\b(slett|fjern|delete|remove|löschen|eliminar|supprimer)\b.*\b(produkt|product|producto|produit|produto)\b"]),
+    (TaskType.UPDATE_PRODUCT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(produkt|product|producto|produit|produto)\b"]),
     (TaskType.CREATE_PRODUCT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(produkt|product|producto|produit|produto)\b",
                                 r"\bny\w?\b.*\b(produkt|product|producto|produit|produto)\b"]),
+    (TaskType.DELETE_DEPARTMENT, [r"\b(slett|fjern|delete|remove|löschen|eliminar|supprimer)\b.*\b(avdeling|department|departamento|abteilung|département)\b"]),
     (TaskType.UPDATE_DEPARTMENT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(avdeling|department|departamento|abteilung|département)\b"]),
     (TaskType.CREATE_DEPARTMENT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(avdeling|department|departamento|abteilung|département)\b",
                                    r"\bny\w?\b.*\b(avdeling|department|departamento|abteilung|département)\b",
@@ -895,6 +929,7 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
     _LAST_RESORT_WORDS = [
         (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
         (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário"], TaskType.CREATE_EMPLOYEE),
+        (["leverandør", "supplier", "fournisseur", "proveedor", "lieferant", "fornitore", "fornecedor", "leverancier"], TaskType.CREATE_SUPPLIER),
         (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
         (["avdeling", "department", "abteilung", "département", "departamento"], TaskType.CREATE_DEPARTMENT),
         (["prosjekt", "project", "projekt", "projet", "proyecto"], TaskType.CREATE_PROJECT),
@@ -902,12 +937,15 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
         (["timer", "hours", "timesheet", "timeliste", "stunden", "heures"], TaskType.LOG_HOURS),
         (["reiseregning", "reiserekning", "travel expense", "reisekosten", "frais de voyage"], TaskType.CREATE_TRAVEL_EXPENSE),
         (["kontaktperson", "contact", "contacto", "contato"], TaskType.CREATE_CONTACT),
+        (["regnskapsdimensjon", "dimensjon", "dimension", "konteringsdimensjon"], TaskType.CREATE_DIMENSION_AND_VOUCHER),
         (["betaling", "payment", "innbetaling", "pago", "zahlung", "paiement"], TaskType.REGISTER_PAYMENT),
         (["kreditnota", "credit note", "gutschrift", "avoir"], TaskType.CREATE_CREDIT_NOTE),
         (["modul", "module"], TaskType.ENABLE_MODULE),
         (["bankavsteming", "reconcil", "avstem"], TaskType.BANK_RECONCILIATION),
         (["årsavslut", "årsoppgjør", "year-end"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct error", "feilrett"], TaskType.ERROR_CORRECTION),
+        (["lønn", "salary", "payroll", "paie", "nómina", "gehalt", "lønnskjøring"], TaskType.RUN_PAYROLL),
+        (["leverandørfaktura", "supplier invoice", "incoming invoice", "inngående faktura", "eingangsrechnung"], TaskType.REGISTER_SUPPLIER_INVOICE),
     ]
     for words, fallback_type in _LAST_RESORT_WORDS:
         if any(w in text for w in words):
@@ -957,6 +995,80 @@ async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClass
     if result.task_type == TaskType.UNKNOWN:
         log("ERROR", "ALL classifiers returned UNKNOWN — this will score 0",
             prompt_preview=prompt[:200])
+
+    # ----- POST-CLASSIFICATION CORRECTIONS -----
+    # Fix common Gemini misclassifications based on prompt keywords
+    prompt_lower = prompt.lower()
+
+    # INVOICE_WITH_PAYMENT → REGISTER_PAYMENT if invoice already exists
+    if result.task_type == TaskType.INVOICE_WITH_PAYMENT:
+        existing_invoice_signals = [
+            "outstanding invoice", "utestående faktura", "has an invoice",
+            "has an outstanding", "har en faktura", "har en utestående",
+            "existing invoice", "register payment on this invoice",
+            "registrer betaling på denne fakturaen",
+        ]
+        # Only override if there's a clear "invoice exists" signal AND no "create" signal
+        create_signals = [
+            "opprett", "create", "lag ", "erstellen", "créer", "crear", "criar",
+        ]
+        has_existing_signal = any(sig in prompt_lower for sig in existing_invoice_signals)
+        has_create_signal = any(sig in prompt_lower for sig in create_signals)
+
+        if has_existing_signal and not has_create_signal:
+            log("INFO", "Post-classification fix: INVOICE_WITH_PAYMENT → REGISTER_PAYMENT",
+                reason="Prompt indicates existing invoice")
+            result.task_type = TaskType.REGISTER_PAYMENT
+            if not result.fields.get("invoice_identifier"):
+                result.fields["invoice_identifier"] = (
+                    result.fields.get("customer_name")
+                    or result.fields.get("customer_identifier")
+                    or ""
+                )
+            if not result.fields.get("amount"):
+                result.fields["amount"] = result.fields.get("paid_amount")
+
+    # REGISTER_PAYMENT → ERROR_CORRECTION if it's a payment reversal
+    if result.task_type == TaskType.REGISTER_PAYMENT:
+        reversal_signals = [
+            "reverser", "reverse", "returnert", "returned by bank",
+            "returnert av banken", "tilbakeført", "annuller betaling",
+            "storno", "annuler", "annulieren",
+        ]
+        if any(sig in prompt_lower for sig in reversal_signals):
+            log("INFO", "Post-classification fix: REGISTER_PAYMENT → ERROR_CORRECTION",
+                reason="Prompt indicates payment reversal")
+            result.task_type = TaskType.ERROR_CORRECTION
+            if not result.fields.get("voucher_identifier"):
+                result.fields["voucher_identifier"] = (
+                    result.fields.get("invoice_identifier")
+                    or result.fields.get("invoice_number")
+                    or ""
+                )
+            if not result.fields.get("correction_description"):
+                result.fields["correction_description"] = prompt[:300]
+
+    # CREATE_INVOICE / INVOICE_EXISTING_CUSTOMER → REGISTER_SUPPLIER_INVOICE if it's a supplier invoice
+    if result.task_type in (TaskType.CREATE_INVOICE, TaskType.INVOICE_EXISTING_CUSTOMER,
+                            TaskType.UNKNOWN):
+        supplier_invoice_signals = [
+            "leverandørfaktura", "leverandør", "supplier invoice", "incoming invoice",
+            "inngående faktura", "inngåande", "inngående mva",
+            "eingangsrechnung", "facture fournisseur", "factura proveedor",
+            "motteke faktura", "mottatt faktura", "received invoice",
+            "frå leverandøren", "fra leverandøren", "from supplier",
+        ]
+        if any(sig in prompt_lower for sig in supplier_invoice_signals):
+            log("INFO", "Post-classification fix → REGISTER_SUPPLIER_INVOICE",
+                original_type=str(result.task_type))
+            result.task_type = TaskType.REGISTER_SUPPLIER_INVOICE
+            # Map fields
+            if not result.fields.get("supplier_identifier"):
+                result.fields["supplier_identifier"] = (
+                    result.fields.get("customer_name")
+                    or result.fields.get("name")
+                    or ""
+                )
 
     return result
 
@@ -1015,7 +1127,7 @@ async def solve(request: Request):
     base_url = creds.get("base_url", "") or body.get("tripletex_base_url", "")
     session_token = creds.get("session_token", "") or body.get("tripletex_session_token", "")
 
-    log("INFO", "Received task", prompt_preview=prompt[:120], file_count=len(files))
+    log("INFO", "Received task", prompt_preview=prompt[:500], file_count=len(files))
     log("INFO", "Credential check",
         base_url=base_url,
         token_length=len(session_token) if session_token else 0,
