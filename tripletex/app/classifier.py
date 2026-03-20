@@ -323,6 +323,11 @@ Input: "Kjør lønn for ansatt Kari Hansen (kari@example.no) for mars 2026. Grun
 Output:
 {{"task_type": "run_payroll", "confidence": 0.96, "fields": {{"employee_identifier": "Kari Hansen", "first_name": "Kari", "last_name": "Hansen", "email": "kari@example.no", "base_salary": 45000.0, "month": "03", "year": "2026"}}}}
 
+### Example 25 — Payment returned / bounced (Portuguese)
+Input: "O pagamento de Cascata Lda (org. nº 844279892) referente à fatura 'Horas de consultoria' (41350 NOK sem IVA) foi devolvido pelo banco. Reverta o pagamento para reabrir a fatura."
+Output:
+{{"task_type": "create_credit_note", "confidence": 0.95, "fields": {{"invoice_identifier": "Cascata Lda", "customer_name": "Cascata Lda", "organization_number": "844279892", "comment": "Payment returned by bank - reversing invoice"}}}}
+
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
 return a JSON object with a "batch" array containing one classification per entity:
