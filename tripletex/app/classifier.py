@@ -22,6 +22,8 @@ from task_types import (
 
 logger = logging.getLogger("tripletex-agent.classifier")
 
+_claude_available = True
+
 # ---------------------------------------------------------------------------
 # SDK import — try new unified SDK first, fall back to older one
 # ---------------------------------------------------------------------------
@@ -306,6 +308,36 @@ Input: "Create three departments in Tripletex: Utvikling, Innkjøp, and Salg."
 Output:
 {{"batch": [{{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Utvikling"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Innkjøp"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Salg"}}}}]}}
 
+### Example 22 — Create supplier (Norwegian)
+Input: "Opprett leverandør Renhald AS med org.nr 912345678, e-post faktura@renhald.no"
+Output:
+{{"task_type": "create_supplier", "confidence": 0.97, "fields": {{"name": "Renhald AS", "organization_number": "912345678", "email": "faktura@renhald.no"}}}}
+
+### Example 22b — Create supplier (Nynorsk)
+Input: "Registrer ny leverandør Elektro Vest AS"
+Output:
+{{"task_type": "create_supplier", "confidence": 0.96, "fields": {{"name": "Elektro Vest AS"}}}}
+
+### Example 23 — Register supplier invoice (Norwegian)
+Input: "Registrer leverandørfaktura frå Elektro AS på 15000 kr eks. mva for Elektrisk arbeid"
+Output:
+{{"task_type": "register_supplier_invoice", "confidence": 0.97, "fields": {{"supplier_identifier": "Elektro AS", "amount_excl_vat": 15000.0, "description": "Elektrisk arbeid"}}}}
+
+### Example 23b — Register supplier invoice (German)
+Input: "Eingangsrechnung von Müller Elektrik GmbH über 8500 NOK für Wartungsarbeiten buchen"
+Output:
+{{"task_type": "register_supplier_invoice", "confidence": 0.96, "fields": {{"supplier_identifier": "Müller Elektrik GmbH", "amount_excl_vat": 8500.0, "description": "Wartungsarbeiten"}}}}
+
+### Example 24 — Run payroll (Norwegian)
+Input: "Kjør lønn for ansatt Erik Berg med grunnlønn 45000 kr og bonus 5000 kr for mars 2026"
+Output:
+{{"task_type": "run_payroll", "confidence": 0.97, "fields": {{"employee_identifier": "Erik Berg", "base_salary": 45000.0, "bonus": 5000.0, "month": 3, "year": 2026}}}}
+
+### Example 24b — Run payroll (French)
+Input: "Exécuter la paie pour l'employé Jean Dupont avec un salaire de base de 38000 NOK"
+Output:
+{{"task_type": "run_payroll", "confidence": 0.96, "fields": {{"employee_identifier": "Jean Dupont", "base_salary": 38000.0}}}}
+
 ## EMPLOYEE USER TYPE / ROLE
 When the prompt mentions administrator, admin, kontoadministrator → set user_type to "ADMINISTRATOR"
 When the prompt mentions standard → set user_type to "STANDARD"
@@ -321,6 +353,12 @@ Respond with ONLY a JSON object (no markdown, no explanation) with exactly these
 For batch operations, use the batch format described above.
 
 If you cannot determine the task type, use "unknown" with confidence 0.0 and empty fields.
+
+## CRITICAL RULES
+- NEVER fabricate or invent information not present in the prompt.
+- If the prompt does not mention an email address, phone number, or website, do NOT include them in fields.
+- Only extract information that is EXPLICITLY stated in the input text.
+- Do NOT guess or infer contact details — only extract what is literally written.
 """
 
 
@@ -469,6 +507,7 @@ async def classify_task(
     """
     def _post_process_result(r):
         r.fields = _post_process_fields(r.task_type, r.fields)
+        r.fields = _strip_hallucinated_fields(r.raw_prompt, r.fields)
         return r
 
     def _post_process_any(r):
@@ -490,14 +529,16 @@ async def classify_task(
             logger.warning("Gemini classification failed: %s — trying next fallback", e)
 
     # --- Try Claude second ---
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    global _claude_available
+    if _claude_available and os.environ.get("ANTHROPIC_API_KEY"):
         try:
             result = await _classify_with_claude(prompt, files)
             if result.task_type != TaskType.UNKNOWN or result.confidence > 0.5:
                 return _post_process_result(result)
             logger.info("Claude returned UNKNOWN, trying keyword fallback")
         except Exception as e:
-            logger.warning("Claude classification failed: %s — using keyword fallback", e)
+            logger.warning("Claude classification failed: %s — disabling for this session", e)
+            _claude_available = False
 
     # --- Keyword fallback (always available) ---
     result = _classify_with_keywords(prompt, files)
@@ -609,6 +650,36 @@ async def _call_gemini(client: Any, user_message: str | list) -> str:
 # ---------------------------------------------------------------------------
 # Response parsing
 # ---------------------------------------------------------------------------
+
+
+def _strip_hallucinated_fields(raw_prompt: str, fields: dict) -> dict:
+    """Remove field values that were fabricated by the LLM and don't appear in the original prompt.
+
+    LLMs sometimes hallucinate email addresses, phone numbers, and websites
+    that aren't present in the input text. This safety net catches those.
+    """
+    _CHECKABLE_FIELDS = ["email", "phone", "website", "invoice_email", "phone_mobile"]
+    prompt_lower = raw_prompt.lower()
+
+    for field_name in _CHECKABLE_FIELDS:
+        value = fields.get(field_name)
+        if not value or not isinstance(value, str):
+            continue
+        # Check if the value (or a significant portion) appears in the original prompt
+        value_lower = value.lower().strip()
+        if value_lower not in prompt_lower:
+            # For email, also check just the local part (before @)
+            if "@" in value_lower:
+                local_part = value_lower.split("@")[0]
+                domain = value_lower.split("@")[1] if "@" in value_lower else ""
+                if local_part not in prompt_lower and domain not in prompt_lower:
+                    logger.warning("Stripped hallucinated %s: %s (not found in prompt)", field_name, value)
+                    del fields[field_name]
+            else:
+                logger.warning("Stripped hallucinated %s: %s (not found in prompt)", field_name, value)
+                del fields[field_name]
+
+    return fields
 
 
 def _post_process_fields(task_type: TaskType, fields: dict) -> dict:
