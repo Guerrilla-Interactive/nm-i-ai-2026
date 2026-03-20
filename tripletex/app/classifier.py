@@ -545,14 +545,20 @@ async def _call_gemini(client: Any, user_message: str | list) -> str:
     if _USE_NEW_SDK:
 
         def _sync():
+            config_kwargs = dict(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=TEMPERATURE,
+                response_mime_type="application/json",
+            )
+            # gemini-2.5-pro requires thinking mode — use generous budget for best accuracy
+            if "2.5-pro" in MODEL_NAME:
+                config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                    thinking_budget=8192,
+                )
             resp = client.models.generate_content(
                 model=MODEL_NAME,
                 contents=user_message,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=TEMPERATURE,
-                    response_mime_type="application/json",
-                ),
+                config=genai_types.GenerateContentConfig(**config_kwargs),
             )
             return resp.text
 
