@@ -46,7 +46,7 @@ except ImportError:
 
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 TEMPERATURE = 0.0
-MAX_RETRIES = 1
+MAX_RETRIES = 3
 
 # ---------------------------------------------------------------------------
 # System prompt — comprehensive, multilingual, with few-shot examples
@@ -472,6 +472,15 @@ async def classify_task(
 
     # --- Keyword fallback (always available) ---
     result = _classify_with_keywords(prompt, files)
+    if result.task_type != TaskType.UNKNOWN:
+        return _post_process_result(result)
+
+    # --- Last-resort single-word heuristic — NEVER return UNKNOWN if any signal exists ---
+    result = _last_resort_classify(prompt)
+    if result.task_type != TaskType.UNKNOWN:
+        logger.warning("Last-resort heuristic matched: %s for prompt: %s", result.task_type.value, prompt[:100])
+    else:
+        logger.error("ALL classifiers returned UNKNOWN — prompt: %s", prompt[:200])
     return _post_process_result(result)
 
 
@@ -507,11 +516,18 @@ async def _classify_with_gemini(
     for attempt in range(1 + MAX_RETRIES):
         try:
             raw_text = await _call_gemini(client, content_parts)
-            return _parse_response(raw_text, prompt)
+            result = _parse_response(raw_text, prompt)
+            # If Gemini returned UNKNOWN on first try, retry before giving up
+            if result.task_type == TaskType.UNKNOWN and attempt < MAX_RETRIES:
+                logger.warning("Gemini returned UNKNOWN (attempt %d), retrying...", attempt + 1)
+                await asyncio.sleep(0.5 * (2 ** attempt))
+                continue
+            return result
         except Exception as e:
             logger.warning("Gemini attempt %d failed: %s", attempt + 1, e)
             if attempt >= MAX_RETRIES:
                 raise
+            await asyncio.sleep(0.5 * (2 ** attempt))
 
     raise RuntimeError("Gemini classification exhausted retries")
 
@@ -779,7 +795,11 @@ def _parse_response(raw_text: str, original_prompt: str) -> TaskClassification |
             lines = lines[:-1]
         text = "\n".join(lines)
 
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse LLM JSON response: %s — raw text: %s", e, text[:500])
+        raise ValueError(f"Malformed JSON from LLM: {e}") from e
 
     # Handle batch response: {"batch": [{...}, {...}, ...]}
     if isinstance(data, dict) and "batch" in data and isinstance(data["batch"], list):
@@ -1014,6 +1034,37 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
         "keywords": [
             "aktiver modul", "enable module", "slå på modul", "activate module",
             "activar módulo", "activer module",
+        ],
+    },
+    TaskType.UPDATE_CONTACT: {
+        "keywords": [
+            "oppdater kontakt", "endre kontakt", "update contact", "modify contact",
+            "change contact", "edit contact", "rediger kontakt",
+            "modifier contact", "actualizar contacto", "ändern kontakt",
+            "atualizar contato", "oppdater kontaktperson", "endre kontaktperson",
+        ],
+    },
+    TaskType.DELETE_CUSTOMER: {
+        "keywords": [
+            "slett kunde", "fjern kunde", "delete customer", "remove customer",
+            "supprimer client", "eliminar cliente", "löschen kunde",
+            "excluir cliente", "remover cliente",
+        ],
+    },
+    TaskType.UPDATE_DEPARTMENT: {
+        "keywords": [
+            "oppdater avdeling", "endre avdeling", "update department", "modify department",
+            "change department", "edit department", "rediger avdeling",
+            "modifier département", "actualizar departamento", "ändern abteilung",
+            "atualizar departamento",
+        ],
+    },
+    TaskType.LOG_HOURS: {
+        "keywords": [
+            "logg timer", "log hours", "registrer timer", "timesheet", "timeliste",
+            "timeføring", "registrer tid", "register hours", "record hours",
+            "registrar horas", "enregistrer heures", "stunden erfassen",
+            "loggfør timer", "føre timer",
         ],
     },
 }
@@ -1532,6 +1583,62 @@ def _extract_invoice_lines(text: str) -> list[dict]:
     return lines
 
 
+def _last_resort_classify(prompt: str) -> TaskClassification:
+    """Ultra-simple single-word heuristic. NEVER return UNKNOWN if any signal exists."""
+    p = prompt.lower()
+    # Order matters — more specific matches first
+    _LAST_RESORT = [
+        # Credit note before invoice
+        (["kreditnota", "credit note", "gutschrift", "avoir", "nota de crédito"], TaskType.CREATE_CREDIT_NOTE),
+        # Invoice+payment before plain invoice
+        (["betaling", "payment", "pago", "zahlung", "paiement", "betalt", "paid", "innbetaling"], TaskType.INVOICE_WITH_PAYMENT),
+        # Travel before employee
+        (["reiseregning", "reiserekning", "travel expense", "reisekostenabrechnung", "note de frais", "gasto de viaje"], TaskType.CREATE_TRAVEL_EXPENSE),
+        # Hours/timesheet
+        (["timer", "hours", "stunden", "heures", "horas", "timesheet", "timeliste", "timefør", "logg"], TaskType.LOG_HOURS),
+        # Bank/year-end/error
+        (["bankavstem", "reconcil", "abgleich", "rapprochement"], TaskType.BANK_RECONCILIATION),
+        (["årsavslut", "årsoppgjør", "year-end", "year end", "jahresabschluss", "clôture"], TaskType.YEAR_END_CLOSING),
+        (["korriger", "correct", "feil", "error correction"], TaskType.ERROR_CORRECTION),
+        (["aktiver modul", "enable module", "slå på"], TaskType.ENABLE_MODULE),
+        # Delete patterns (check before create)
+        (["slett kunde", "delete customer", "fjern kunde"], TaskType.DELETE_CUSTOMER),
+        (["slett ansatt", "delete employee", "fjern ansatt"], TaskType.DELETE_EMPLOYEE),
+        (["slett prosjekt", "delete project", "fjern prosjekt"], TaskType.DELETE_PROJECT),
+        (["slett reise", "delete travel", "fjern reise"], TaskType.DELETE_TRAVEL_EXPENSE),
+        # Update patterns
+        (["oppdater ansatt", "update employee", "endre ansatt"], TaskType.UPDATE_EMPLOYEE),
+        (["oppdater kunde", "update customer", "endre kunde"], TaskType.UPDATE_CUSTOMER),
+        (["oppdater prosjekt", "update project", "endre prosjekt"], TaskType.UPDATE_PROJECT),
+        (["oppdater kontakt", "update contact", "endre kontakt"], TaskType.UPDATE_CONTACT),
+        (["oppdater avdeling", "update department", "endre avdeling"], TaskType.UPDATE_DEPARTMENT),
+        # Find
+        (["finn kunde", "find customer", "søk kunde", "search customer"], TaskType.FIND_CUSTOMER),
+        # Set roles
+        (["rolle", "role", "tilgang", "access", "user type"], TaskType.SET_EMPLOYEE_ROLES),
+        # Contact
+        (["kontaktperson", "contact person", "kontakt"], TaskType.CREATE_CONTACT),
+        # Create patterns — broad matches last
+        (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
+        (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé"], TaskType.CREATE_EMPLOYEE),
+        (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
+        (["prosjekt", "project", "proyecto", "projekt", "projet"], TaskType.CREATE_PROJECT),
+        (["produkt", "product", "producto", "produit", "produto"], TaskType.CREATE_PRODUCT),
+        (["avdeling", "department", "departamento", "abteilung", "département"], TaskType.CREATE_DEPARTMENT),
+    ]
+    for keywords, task_type in _LAST_RESORT:
+        if any(kw in p for kw in keywords):
+            fields = _extract_fields_generic(prompt, task_type)
+            fields = _normalize_fields(task_type, fields)
+            return TaskClassification(
+                task_type=task_type,
+                confidence=0.35,
+                fields=fields,
+                raw_prompt=prompt,
+            )
+    return TaskClassification(task_type=TaskType.UNKNOWN, confidence=0.0, fields={}, raw_prompt=prompt)
+
+
 def _classify_with_keywords(
     prompt: str,
     files: Optional[list[dict]] = None,
@@ -1590,6 +1697,25 @@ def _classify_with_keywords(
     # explicit "new customer" / "opprett kunde", treat as invoice_existing_customer
     # (The Gemini prompt handles this, but for keywords we default to create_invoice
     # which is safe — the executor will search for or create the customer.)
+
+    # Last resort: single-word heuristic — NEVER return UNKNOWN if there's any signal
+    if best_type == TaskType.UNKNOWN:
+        _LAST_RESORT = [
+            (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
+            (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário", "empregado"], TaskType.CREATE_EMPLOYEE),
+            (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
+            (["avdeling", "department", "abteilung", "département", "departamento"], TaskType.CREATE_DEPARTMENT),
+            (["prosjekt", "project", "projet", "proyecto", "projeto"], TaskType.CREATE_PROJECT),
+            (["produkt", "product", "produit", "producto", "produto"], TaskType.CREATE_PRODUCT),
+            (["timer", "hours", "timesheet", "timeliste", "stunden", "heures"], TaskType.LOG_HOURS),
+            (["reiseregning", "reiserekning", "travel expense", "reisekosten", "frais de voyage"], TaskType.CREATE_TRAVEL_EXPENSE),
+            (["kontakt", "contact", "contacto", "contato"], TaskType.CREATE_CONTACT),
+        ]
+        for words, fallback_type in _LAST_RESORT:
+            if any(w in prompt_lower for w in words):
+                best_type = fallback_type
+                best_hits = 1
+                break
 
     # Confidence based on hit count
     if best_hits >= 3:

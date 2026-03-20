@@ -890,6 +890,35 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
                     fields=fields,
                     raw_prompt=prompt,
                 )
+
+    # Last resort: single-word heuristic — NEVER return UNKNOWN if there's any signal
+    _LAST_RESORT_WORDS = [
+        (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
+        (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário"], TaskType.CREATE_EMPLOYEE),
+        (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
+        (["avdeling", "department", "abteilung", "département", "departamento"], TaskType.CREATE_DEPARTMENT),
+        (["prosjekt", "project", "projekt", "projet", "proyecto"], TaskType.CREATE_PROJECT),
+        (["produkt", "product", "produit", "producto", "produto"], TaskType.CREATE_PRODUCT),
+        (["timer", "hours", "timesheet", "timeliste", "stunden", "heures"], TaskType.LOG_HOURS),
+        (["reiseregning", "reiserekning", "travel expense", "reisekosten", "frais de voyage"], TaskType.CREATE_TRAVEL_EXPENSE),
+        (["kontaktperson", "contact", "contacto", "contato"], TaskType.CREATE_CONTACT),
+        (["betaling", "payment", "innbetaling", "pago", "zahlung", "paiement"], TaskType.REGISTER_PAYMENT),
+        (["kreditnota", "credit note", "gutschrift", "avoir"], TaskType.CREATE_CREDIT_NOTE),
+        (["modul", "module"], TaskType.ENABLE_MODULE),
+        (["bankavsteming", "reconcil", "avstem"], TaskType.BANK_RECONCILIATION),
+        (["årsavslut", "årsoppgjør", "year-end"], TaskType.YEAR_END_CLOSING),
+        (["korriger", "correct error", "feilrett"], TaskType.ERROR_CORRECTION),
+    ]
+    for words, fallback_type in _LAST_RESORT_WORDS:
+        if any(w in text for w in words):
+            fields = _extract_fields_rule_based(fallback_type, prompt)
+            return TaskClassification(
+                task_type=fallback_type,
+                confidence=0.35,
+                fields=fields,
+                raw_prompt=prompt,
+            )
+
     return TaskClassification(task_type=TaskType.UNKNOWN, confidence=0.0, fields={}, raw_prompt=prompt)
 
 
@@ -901,16 +930,34 @@ async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClass
     """Route to the appropriate classifier based on LLM_MODE."""
     if LLM_MODE == "gemini":
         from classifier import classify_task
-        return await classify_task(prompt, files)  # already applies _post_process_fields
+        result = await classify_task(prompt, files)  # already applies _post_process_fields
     elif LLM_MODE == "claude":
         result = await _classify_with_claude(prompt, files)
     else:
         result = await _classify_rule_based(prompt, files)
 
     # Apply post-processing and normalization to Claude and rule-based paths
-    from classifier import _post_process_fields, _normalize_fields
-    result.fields = _post_process_fields(result.task_type, result.fields)
-    result.fields = _normalize_fields(result.task_type, result.fields)
+    if LLM_MODE != "gemini":
+        from classifier import _post_process_fields, _normalize_fields
+        result.fields = _post_process_fields(result.task_type, result.fields)
+        result.fields = _normalize_fields(result.task_type, result.fields)
+
+    # SAFETY NET: if still UNKNOWN after primary classifier, try rule-based as backup
+    if result.task_type == TaskType.UNKNOWN and LLM_MODE != "none":
+        log("WARNING", "Primary classifier returned UNKNOWN, trying rule-based fallback",
+            prompt_preview=prompt[:150])
+        fallback = await _classify_rule_based(prompt, files)
+        if fallback.task_type != TaskType.UNKNOWN:
+            from classifier import _post_process_fields, _normalize_fields
+            fallback.fields = _post_process_fields(fallback.task_type, fallback.fields)
+            fallback.fields = _normalize_fields(fallback.task_type, fallback.fields)
+            log("INFO", "Rule-based fallback recovered", task_type=str(fallback.task_type))
+            return fallback
+
+    if result.task_type == TaskType.UNKNOWN:
+        log("ERROR", "ALL classifiers returned UNKNOWN — this will score 0",
+            prompt_preview=prompt[:200])
+
     return result
 
 
@@ -969,6 +1016,10 @@ async def solve(request: Request):
     session_token = creds.get("session_token", "") or body.get("tripletex_session_token", "")
 
     log("INFO", "Received task", prompt_preview=prompt[:120], file_count=len(files))
+    log("INFO", "Credential check",
+        base_url=base_url,
+        token_length=len(session_token) if session_token else 0,
+        token_tail=session_token[-4:] if len(session_token) >= 4 else "***")
 
     if not base_url or not session_token:
         log("ERROR", "Missing Tripletex credentials", base_url_present=bool(base_url), token_present=bool(session_token))
