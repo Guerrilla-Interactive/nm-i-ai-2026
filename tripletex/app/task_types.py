@@ -39,12 +39,15 @@ class TaskType(str, Enum):
     DELETE_CUSTOMER = "delete_customer"
     UPDATE_CONTACT = "update_contact"
     UPDATE_DEPARTMENT = "update_department"
+    CREATE_SUPPLIER_INVOICE = "create_supplier_invoice"
+    CREATE_SUPPLIER = "create_supplier"
 
     # Tier 3 — Complex scenarios (×3 multiplier)
     BANK_RECONCILIATION = "bank_reconciliation"
     ERROR_CORRECTION = "error_correction"
     YEAR_END_CLOSING = "year_end_closing"
     ENABLE_MODULE = "enable_module"
+    CREATE_DIMENSION_VOUCHER = "create_dimension_voucher"
 
     # Fallback
     UNKNOWN = "unknown"
@@ -263,6 +266,22 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
             "new_name", "new_department_number", "manager_name",
         ],
     },
+    TaskType.CREATE_SUPPLIER_INVOICE: {
+        "required": ["supplier_name"],
+        "optional": [
+            "organization_number", "invoice_number", "amount_including_vat",
+            "amount_excluding_vat", "vat_amount", "invoice_date", "due_date",
+            "description", "account_number",
+        ],
+    },
+    TaskType.CREATE_SUPPLIER: {
+        "required": ["name"],
+        "optional": [
+            "organization_number", "email", "phone",
+            "address_line1", "postal_code", "city",
+            "bank_account_number", "supplier_number",
+        ],
+    },
 
     # ── Tier 3 ─────────────────────────────────────────────────────────────
     TaskType.BANK_RECONCILIATION: {
@@ -283,6 +302,13 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
     TaskType.ENABLE_MODULE: {
         "required": ["module_name"],
         "optional": [],
+    },
+    TaskType.CREATE_DIMENSION_VOUCHER: {
+        "required": ["dimension_name"],
+        "optional": [
+            "dimension_values", "account_number", "contra_account_number",
+            "amount", "linked_dimension_value", "description", "voucher_date",
+        ],
     },
 
     # ── Fallback ───────────────────────────────────────────────────────────
@@ -324,9 +350,12 @@ TASK_TYPE_DESCRIPTIONS: dict[TaskType, str] = {
     TaskType.DELETE_CUSTOMER: "Delete/remove an existing customer",
     TaskType.UPDATE_CONTACT: "Update an existing contact person's details (name, email, phone)",
     TaskType.UPDATE_DEPARTMENT: "Update an existing department's details (name, number, manager)",
+    TaskType.CREATE_SUPPLIER_INVOICE: "Register an incoming supplier invoice (leverandørfaktura / inngående faktura)",
+    TaskType.CREATE_SUPPLIER: "Register/create a new supplier (leverandør / Lieferant / fournisseur)",
     TaskType.BANK_RECONCILIATION: "Reconcile bank transactions (often from a CSV file)",
     TaskType.ERROR_CORRECTION: "Correct an error in the ledger (reverse or adjust a voucher)",
     TaskType.YEAR_END_CLOSING: "Perform year-end closing procedures",
     TaskType.ENABLE_MODULE: "Enable a company module or feature in Tripletex",
+    TaskType.CREATE_DIMENSION_VOUCHER: "Create a custom accounting dimension with values, and optionally post a voucher linked to a dimension value",
     TaskType.UNKNOWN: "Could not determine the task type — use fallback logic",
 }

@@ -28,6 +28,9 @@ logging.basicConfig(
 logger = logging.getLogger("tripletex-agent")
 
 
+_request_counter = 0
+
+
 def log(severity: str, message: str, **extra):
     """Emit structured JSON log compatible with Cloud Run / Cloud Logging."""
     entry = {"severity": severity, "message": message, **extra}
@@ -87,6 +90,7 @@ TASK TYPES:
 {_build_classifier_prompt()}
 
 EXTRACTION RULES:
+- ONLY extract fields explicitly stated in the prompt. NEVER fabricate emails, phones, addresses, or websites not present in the input.
 - Dates → YYYY-MM-DD. Numbers → plain decimals, no thousand separators.
 - Entity names must be CLEAN — never include prices, emails, numbers, or descriptors.
   "til 2500 kr", "with email X", "med nummer N" → extract as SEPARATE fields.
@@ -103,9 +107,12 @@ EXTRACTION RULES:
 LANGUAGE HINTS:
 - nb/nn: opprett=create, avdeling=department, avdelingsnummer=department_number, kunde=customer,
   ansatt=employee, faktura=invoice, reiseregning=travel_expense, prosjekt=project,
-  slett=delete, oppdater=update, kontaktperson=contact, betaling=payment, kreditnota=credit_note
-- de: Erstellen=create, Abteilung=department, Abteilungsnummer=department_number, Mitarbeiter=employee
-- fr: Créer=create, département=department, numéro=number, employé=employee
+  slett=delete, oppdater=update, kontaktperson=contact, betaling=payment, kreditnota=credit_note,
+  leverandør=supplier, leverandørfaktura/inngående faktura=supplier_invoice
+- de: Erstellen=create, Abteilung=department, Abteilungsnummer=department_number, Mitarbeiter=employee,
+  Buchhaltungsdimension=accounting_dimension, Beleg=voucher, Kostenstelle=cost_center,
+  Lieferant/Lieferanten=supplier (NOT customer!), Registrieren=register
+- fr: Créer=create, département=department, numéro=number, employé=employee, dimension=dimension
 - es: Crear=create, departamento=department, empleado=employee, cliente=customer
 - pt: Criar=create, departamento=department, empregado=employee
 
@@ -147,8 +154,16 @@ Output: {{"task_type":"update_employee","confidence":0.95,"fields":{{"employee_i
 Input: "Slett prosjekt Nettside Redesign"
 Output: {{"task_type":"delete_project","confidence":0.95,"fields":{{"project_identifier":"Nettside Redesign"}}}}
 
+Input: "Erstellen Sie eine benutzerdefinierte Buchhaltungsdimension 'Kostsenter' mit den Werten 'IT' und 'Innkjøp'. Buchen Sie dann einen Beleg auf Konto 7000 über 19450 NOK, verknüpft mit dem Dimensionswert 'IT'."
+Output: {{"task_type":"create_dimension_voucher","confidence":0.97,"fields":{{"dimension_name":"Kostsenter","dimension_values":["IT","Innkjøp"],"account_number":"7000","amount":19450.0,"linked_dimension_value":"IT"}}}}
+
 Input: "Registrer reiseregning for ansatt Ola Nordmann, tittel Kundebesøk Oslo"
 Output: {{"task_type":"create_travel_expense","confidence":0.95,"fields":{{"employee_identifier":"Ola Nordmann","title":"Kundebesøk Oslo"}}}}
+
+Input: "Registrieren Sie den Lieferanten Nordlicht GmbH mit der Organisationsnummer 922976457. E-Mail: faktura@nordlichtgmbh.no."
+Output: {{"task_type":"create_supplier","confidence":0.97,"fields":{{"name":"Nordlicht GmbH","organization_number":"922976457","email":"faktura@nordlichtgmbh.no"}}}}
+
+CRITICAL: Lieferant/leverandør/supplier = create_supplier (NOT create_customer). These are different entities in Tripletex.
 
 If unsure, use "unknown" with confidence 0.0.
 Respond with ONLY a JSON object, no markdown."""
@@ -204,7 +219,7 @@ async def _classify_with_claude(prompt: str, files: Optional[list[dict]] = None)
 
 _KEYWORD_MAP = [
     # --- Enable Module (MUST come before travel — "Aktiver modul Reiseregning" must not match travel) ---
-    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer)\w*\b.*\b(modul|module)\b",
+    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate)\w*\b.*\b(modul|module)\b",
                                r"\bslå\s+på\b.*\b(modul|module)\b"]),
     # --- T3: Bank / Year-end / Error (before travel/employee to catch compound words) ---
     (TaskType.BANK_RECONCILIATION, [r"\bbankavstem\w*\b",
@@ -212,7 +227,8 @@ _KEYWORD_MAP = [
                                      r"\bavstem\w*\b.*\bbank\w*\b",
                                      r"\b(reconcil|abgleich|rapprochement)\w*\b"]),
     (TaskType.ERROR_CORRECTION, [r"\b(korriger|correct|fiks|fix)\w*\b.*\b(feil|error|bilag|voucher|postering)\b",
-                                   r"\b(feil|error)\w*\b.*\b(korriger|correct|rett)\b"]),
+                                   r"\b(feil|error)\w*\b.*\b(korriger|correct|rett)\b",
+                                   r"\b(reverser|reverse|tilbakefør)\w*\b.*\b(bilag|voucher|postering)\b"]),
     (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\bårsoppgjør\w*\b",
                                    r"\byear.?end\b", r"\bjahresabschluss\w*\b", r"\bclôture\b",
                                    r"\b(avslutt|close|lukk)\w*\b.*\b(år|year|regnskapsår)\w*\b"]),
@@ -222,21 +238,41 @@ _KEYWORD_MAP = [
                                        r"\b(slett|delete|remove|fjern)\b.*\b(?:reiseregning|reiserekning)\b"]),
     (TaskType.CREATE_TRAVEL_EXPENSE, [r"\breiseregning\b", r"\breiserekning\b",
                                        r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar)\b.*\b(reise|travel|viaje|voyage|reisekostenabrechnung)\b"]),
-    # --- Employee ---
+    # --- Employee (SET_EMPLOYEE_ROLES before UPDATE to catch "endre rolle" before "endre ansatt") ---
     (TaskType.DELETE_EMPLOYEE, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b"]),
-    (TaskType.UPDATE_EMPLOYEE, [r"\b(oppdater|endre|update|modify|ändra|aktualisieren|ändern|actualizar|modificar|modifier|atualizar)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|empregado)\b"]),
     (TaskType.SET_EMPLOYEE_ROLES, [r"\b(rolle|role|access|tilgang|user.?type)\b.*\b(ansatt|tilsett|employee)\b",
                                     r"\b(ansatt|employee)\b.*\b(rolle|role|access|tilgang)\b",
-                                    r"\b(sett|set|gi|give|assign)\b.*\b(ansatt|employee)\b.*\b(som|as|to)\s+\w+"]),
+                                    r"\b(sett|set|gi|give|assign)\b.*\b(ansatt|employee)\b.*\b(som|as|to)\s+\w+",
+                                    r"\b(endre|change|sett)\b.*\b(rolle|role)\b"]),
+    (TaskType.UPDATE_EMPLOYEE, [r"\b(oppdater|endre|update|modify|ändra|aktualisieren|ändern|actualizar|modificar|modifier|atualizar)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|empregado)\b"]),
     (TaskType.CREATE_EMPLOYEE, [r"\b(opprett|lag|create|add|erstellen|créer|crear|criar|register|registrer|legg\s+til)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b",
                                 r"\bny\w?\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé)\b",
                                 r"\b(ansatt|tilsett|employee)\b.*\b(som\s+heter|named?|called)\b",
                                 r"\b(ansatt|tilsett|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b"]),
+    # --- Dimension + Voucher (MUST come before invoice/voucher patterns — "Beleg" alone could trigger invoice) ---
+    (TaskType.CREATE_DIMENSION_VOUCHER, [
+        r"\b(?:dimensjon|dimension|buchhaltungsdimension|fri\s+dimensjon|custom\s+dimension|benutzerdefinierte\s+dimension)\b",
+        r"\b(?:kostsenter|kostenstelle|cost\s*center|kostnadssenter)\b",
+        r"\b(?:dimensjonsverdier|dimensionswert|dimension\s*values?)\b",
+    ]),
+    # --- Supplier Invoice (more specific — MUST come before supplier and regular invoice) ---
+    (TaskType.CREATE_SUPPLIER_INVOICE, [
+        r"leverandør.*faktura|faktura.*leverandør",
+        r"(inngående|incoming|mottatt|motteke|received).*faktura|invoice",
+        r"leverandørfaktura",
+        r"supplier.*invoice|Eingangsrechnung|facture.*fournisseur",
+    ]),
+    # --- Supplier (register supplier entity — after supplier invoice, before customer) ---
+    (TaskType.CREATE_SUPPLIER, [
+        r"\b(?:registrer|opprett|create|register|add|erstellen|registrieren|créer|crear|criar)\w*\b.*\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b",
+        r"\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b.*\b(?:registrer|opprett|create|register|add|ny|new|erstellen|registrieren)\w*\b",
+    ]),
     # --- Invoice (MUST come before customer to avoid "opprett faktura for kunde" → CREATE_CUSTOMER) ---
     (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b"]),
     (TaskType.INVOICE_WITH_PAYMENT, [r"\b(faktura|invoice|factura|rechnung|facture)\b.*\b(betaling|payment|betalt|paid|pago|zahlung|paiement)\b",
-                                     r"\b(facture|faktura|invoice|rechnung)\s+impayée?\b.*\b(enregistr|registr|betaling|payment|paiement)\b",
-                                     r"\b(unbezahlte|impayée?|unpaid)\b.*\b(rechnung|facture|invoice|faktura)\b.*\b(zahlung|paiement|payment|betaling)\b"]),
+                                     r"\b(facture|faktura|invoice|rechnung)\s+impayée?\b",
+                                     r"\b(unbezahlte|impayée?|unpaid)\b.*\b(rechnung|facture|invoice|faktura)\b",
+                                     r"\bclient\w*\b.*\bfacture\b.*\bimpayée?\b"]),
     (TaskType.REGISTER_PAYMENT, [r"\b(registrer|register)\b.*\b(betaling|innbetaling|payment|pago)\b",
                                   r"\b(betaling|payment)\b.*\b(faktura|invoice)\b"]),
     (TaskType.INVOICE_EXISTING_CUSTOMER, [r"\b(faktura|invoice|factura|rechnung)\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
@@ -270,10 +306,10 @@ _KEYWORD_MAP = [
     # --- Product / Department ---
     (TaskType.CREATE_PRODUCT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(produkt|product|producto|produit|produto)\b",
                                 r"\bny\w?\b.*\b(produkt|product|producto|produit|produto)\b"]),
-    (TaskType.UPDATE_DEPARTMENT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(avdeling|department|departamento|abteilung|département)\b"]),
-    (TaskType.CREATE_DEPARTMENT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(avdeling|department|departamento|abteilung|département)\b",
-                                   r"\bny\w?\b.*\b(avdeling|department|departamento|abteilung|département)\b",
-                                   r"\b(avdeling|department|departamento|abteilung|département)\b.*\b(opprett|create|lag)\b"]),
+    (TaskType.UPDATE_DEPARTMENT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b"]),
+    (TaskType.CREATE_DEPARTMENT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b",
+                                   r"\bny\w?\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b",
+                                   r"\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b.*\b(opprett|create|lag)\b"]),
     # --- Log Hours / Timesheet ---
     (TaskType.LOG_HOURS, [r"\b(log|logg|registrer|register|føre?|enter|erfassen|enregistrer)\b.*\b(timer|hours?|stunden|heures|horas|tid|time)\b",
                            r"\b(timer|hours?|timesheet|timefør\w*|tidregistrering|timeliste)\b.*\b(prosjekt|project|projekt|projet)\b",
@@ -316,8 +352,9 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         fields["last_name"] = m.group(2)
 
     # "employee named X Y" / "ansatt med navn X Y" / "som heiter X Y"
-    if task_type in (TaskType.CREATE_EMPLOYEE, TaskType.UPDATE_EMPLOYEE, TaskType.DELETE_EMPLOYEE):
-        # Pattern 1: "ansatt/employee [named] X Y"
+    if task_type in (TaskType.CREATE_EMPLOYEE, TaskType.UPDATE_EMPLOYEE, TaskType.DELETE_EMPLOYEE,
+                     TaskType.SET_EMPLOYEE_ROLES):
+        # Pattern 1: "ansatt/employee [named] X Y" (two-name)
         m = re.search(
             r"(?:ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário)\s+"
             r"(?:med\s+navn\s+|named?\s+|called\s+|namens\s+|appelée?\s+|chamad[oa]\s+|kalt\s+)?"
@@ -338,6 +375,17 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             if m:
                 fields["first_name"] = m.group(1).rstrip(",.")
                 fields["last_name"] = m.group(2).rstrip(",.")
+
+        # Pattern 3: Single-name fallback — "ansatt/employee X" (only one name given)
+        if "first_name" not in fields and "employee_identifier" not in fields:
+            m = re.search(
+                r"(?:ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário)\s+"
+                r"(?:med\s+navn\s+|named?\s+|called\s+|namens\s+|kalt\s+)?"
+                r"([A-ZÆØÅ\u00C0-\u024F]\S+)",
+                text,
+            )
+            if m:
+                fields["employee_identifier"] = m.group(1).rstrip(",.")
 
     # Entity-keyword + name (for departments, products, projects without "med navn"/"named")
     # "avdeling HR", "department Finance", "Abteilung Vertrieb", "produkt Widget"
@@ -441,9 +489,9 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 fields["number"] = m.group(1)
 
     # --- Organization number ---
-    m = re.search(r"(?:org\.?(?:anisasjonsnummer|\.?\s*nr\.?)?|organization\s*number)\s*:?\s*(\d{9})", text, re.I)
+    m = re.search(r"(?:org\.?(?:anisasjonsnummer|\.?\s*nr\.?)?|organization\s*number)\s*:?\s*([\d\-\s]{9,})", text, re.I)
     if m:
-        fields["organization_number"] = m.group(1)
+        fields["organization_number"] = m.group(1).replace("-", "").replace(" ", "").strip()
 
     # --- Date of birth ---
     if task_type in (TaskType.CREATE_EMPLOYEE, TaskType.UPDATE_EMPLOYEE):
@@ -655,6 +703,42 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         if m:
             fields["module_name"] = m.group(1).strip()
 
+    if task_type == TaskType.CREATE_DIMENSION_VOUCHER:
+        # Extract quoted values for dimension_name and dimension_values
+        quoted = re.findall(r"""['"\u2018\u2019\u201C\u201D]([^'"\u2018\u2019\u201C\u201D]+)['"\u2018\u2019\u201C\u201D]""", text)
+        if quoted:
+            fields["dimension_name"] = quoted[0]
+            if len(quoted) > 1:
+                # linked_dimension_value: look for association keyword + quoted value
+                link_match = re.search(
+                    r"(?:verknüpft|linked|knyttet|lié|vinculado|associé)\s+(?:mit|with|til|med|à|a|con)?\s*(?:dem\s+)?(?:Dimensionswert|dimension\s*value?|dimensjonsverdien?)?\s*['\u2018\u2019\u201C\u201D\"']([^'\u2018\u2019\u201C\u201D\"']+)['\u2018\u2019\u201C\u201D\"']",
+                    text, re.I,
+                )
+                if link_match:
+                    fields["linked_dimension_value"] = link_match.group(1)
+                # Deduplicate values and exclude the dimension name itself
+                seen = set()
+                dim_values = []
+                for q in quoted[1:]:
+                    if q.lower() != quoted[0].lower() and q.lower() not in seen:
+                        seen.add(q.lower())
+                        dim_values.append(q)
+                fields["dimension_values"] = dim_values
+                if not fields.get("linked_dimension_value") and len(dim_values) == 1:
+                    fields["linked_dimension_value"] = dim_values[0]
+        # Account number: "Konto 7000" / "account 7000"
+        m = re.search(r"(?:konto|account|Konto|compte|cuenta)\s*:?\s*(\d{4})", text, re.I)
+        if m:
+            fields["account_number"] = m.group(1)
+        # Amount: "19450 NOK" / "über 19450"
+        m = re.search(r"(?:über|over|for|på|av|of|om|por|pour)?\s*(\d+[\d.,]*)\s*(?:kr|NOK)", text, re.I)
+        if m:
+            amt_str = m.group(1).replace(",", ".").replace(" ", "")
+            try:
+                fields["amount"] = float(amt_str)
+            except ValueError:
+                pass
+
     if task_type == TaskType.BANK_RECONCILIATION:
         # Extract account number: "konto 1920" / "account 1920"
         m = re.search(r"(?:konto|account|Konto|compte|cuenta)\s*:?\s*(\d+)", text, re.I)
@@ -801,6 +885,36 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             }
             fields["user_type"] = role_map.get(role_raw, role_raw)
 
+    # --- Supplier: extract name, org number, email ---
+    if task_type == TaskType.CREATE_SUPPLIER:
+        m = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con)\s|$)",
+            text, re.I,
+        )
+        if m:
+            fields["name"] = m.group(1).strip().rstrip(",.")
+
+    # --- Supplier invoice: extract supplier name and amount ---
+    if task_type == TaskType.CREATE_SUPPLIER_INVOICE:
+        m = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant|proveedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til)\s|$)",
+            text, re.I,
+        )
+        if m:
+            fields["supplier_name"] = m.group(1).strip().rstrip(",.")
+        # Amount
+        m = re.search(r"(\d+[\d\s.,]*)\s*(?:kr|NOK)", text, re.I)
+        if m:
+            amt_str = m.group(1).replace(",", ".").replace(" ", "")
+            try:
+                fields["amount_including_vat"] = float(amt_str)
+            except ValueError:
+                pass
+
     # --- Delete travel expense: extract ID ---
     if task_type == TaskType.DELETE_TRAVEL_EXPENSE:
         # "Slett reiseregning 11142218" / "Delete travel expense 11142145"
@@ -877,12 +991,73 @@ def _extract_invoice_lines(text: str) -> list[dict]:
     return lines
 
 
+def _detect_batch(prompt: str, task_type: TaskType) -> list[dict] | None:
+    """Detect batch/multi-entity patterns like 'Create three departments: X, Y, Z'.
+
+    Returns a list of field dicts (one per entity) or None if not a batch.
+    """
+    # Only handle CREATE tasks for batching
+    _BATCH_TYPES = {
+        TaskType.CREATE_DEPARTMENT: "name",
+        TaskType.CREATE_EMPLOYEE: "name",
+        TaskType.CREATE_CUSTOMER: "name",
+        TaskType.CREATE_PRODUCT: "name",
+        TaskType.CREATE_PROJECT: "name",
+    }
+    if task_type not in _BATCH_TYPES:
+        return None
+
+    # Pattern: "create N entities: X, Y, Z" or "create N entities: X, Y and Z"
+    m = re.search(
+        r"(?:opprett|create|lag|erstellen|créer|crear|criar)\s+"
+        r"(?:tre|three|drei|trois|tres|três|3|fire|four|vier|quatre|cuatro|quatro|4|"
+        r"fem|five|fünf|cinq|cinco|5|seks|six|sechs|6|sju|seven|sieben|sept|siete|sete|7|"
+        r"åtte|eight|acht|huit|ocho|oito|8|ni|nine|neun|neuf|nueve|nove|9|"
+        r"ti|ten|zehn|dix|diez|dez|10|to|two|zwei|deux|dos|dois|2)\s+"
+        r"(?:nye?\s+)?"
+        r"(?:avdeling\w*|department\w*|département\w*|departamento\w*|abteilung\w*|"
+        r"ansatt\w*|employee\w*|kunde\w*|customer\w*|produkt\w*|product\w*|"
+        r"prosjekt\w*|project\w*)\s*[:\-]\s*"
+        r"(.+)",
+        prompt, re.I | re.DOTALL,
+    )
+    if not m:
+        return None
+
+    items_text = m.group(1).strip()
+    # Split by comma or " og "/" and "/" und "/" et "/" y "/" e "
+    items = re.split(r"\s*(?:,\s*(?:og|and|und|et|y|e)\s+|,\s+|\s+og\s+|\s+and\s+|\s+und\s+|\s+et\s+|\s+y\s+|\s+e\s+)\s*", items_text)
+    items = [item.strip().rstrip(".,") for item in items if item.strip()]
+
+    if len(items) < 2:
+        return None
+
+    name_field = _BATCH_TYPES[task_type]
+    return [{name_field: item} for item in items]
+
+
 async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) -> TaskClassification:
     """Simple keyword-based classification with regex field extraction — no LLM required."""
     text = prompt.lower()
     for task_type, patterns in _KEYWORD_MAP:
         for pattern in patterns:
             if re.search(pattern, text, re.IGNORECASE):
+                # Check for batch/multi-entity patterns
+                batch_items = _detect_batch(prompt, task_type)
+                if batch_items:
+                    # Return list of classifications for batch processing
+                    classifications = []
+                    for item_fields in batch_items:
+                        base_fields = _extract_fields_rule_based(task_type, prompt)
+                        base_fields.update(item_fields)
+                        classifications.append(TaskClassification(
+                            task_type=task_type,
+                            confidence=0.6,
+                            fields=base_fields,
+                            raw_prompt=prompt,
+                        ))
+                    return classifications  # type: ignore[return-value]
+
                 fields = _extract_fields_rule_based(task_type, prompt)
                 return TaskClassification(
                     task_type=task_type,
@@ -893,6 +1068,9 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
 
     # Last resort: single-word heuristic — NEVER return UNKNOWN if there's any signal
     _LAST_RESORT_WORDS = [
+        (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
+        (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
+        (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
         (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário"], TaskType.CREATE_EMPLOYEE),
         (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
@@ -936,17 +1114,52 @@ async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClass
     else:
         result = await _classify_rule_based(prompt, files)
 
+    # Rule-based may return a list for batch classifications
+    if isinstance(result, list):
+        from classifier import _post_process_fields, _normalize_fields
+        for r in result:
+            r.fields = _post_process_fields(r.task_type, r.fields)
+            r.fields = _normalize_fields(r.task_type, r.fields)
+        return result
+
     # Apply post-processing and normalization to Claude and rule-based paths
     if LLM_MODE != "gemini":
         from classifier import _post_process_fields, _normalize_fields
         result.fields = _post_process_fields(result.task_type, result.fields)
         result.fields = _normalize_fields(result.task_type, result.fields)
 
+    # For LLM classifiers: check if prompt is actually a batch
+    if not isinstance(result, list) and LLM_MODE != "none":
+        batch_items = _detect_batch(prompt, result.task_type)
+        if batch_items:
+            from classifier import _post_process_fields, _normalize_fields
+            classifications = []
+            for item_fields in batch_items:
+                base_fields = dict(result.fields)
+                base_fields.update(item_fields)
+                base_fields = _post_process_fields(result.task_type, base_fields)
+                base_fields = _normalize_fields(result.task_type, base_fields)
+                classifications.append(TaskClassification(
+                    task_type=result.task_type,
+                    confidence=result.confidence,
+                    fields=base_fields,
+                    raw_prompt=prompt,
+                ))
+            log("INFO", "LLM result expanded to batch", count=len(classifications))
+            return classifications  # type: ignore[return-value]
+
     # SAFETY NET: if still UNKNOWN after primary classifier, try rule-based as backup
     if result.task_type == TaskType.UNKNOWN and LLM_MODE != "none":
         log("WARNING", "Primary classifier returned UNKNOWN, trying rule-based fallback",
             prompt_preview=prompt[:150])
         fallback = await _classify_rule_based(prompt, files)
+        # Handle list from rule-based fallback
+        if isinstance(fallback, list):
+            from classifier import _post_process_fields, _normalize_fields
+            for r in fallback:
+                r.fields = _post_process_fields(r.task_type, r.fields)
+                r.fields = _normalize_fields(r.task_type, r.fields)
+            return fallback
         if fallback.task_type != TaskType.UNKNOWN:
             from classifier import _post_process_fields, _normalize_fields
             fallback.fields = _post_process_fields(fallback.task_type, fallback.fields)
@@ -993,6 +1206,9 @@ async def health_post():
 @app.post("/solve")
 @app.post("/")
 async def solve(request: Request):
+    global _request_counter
+    _request_counter += 1
+    req_num = _request_counter
     start = time.monotonic()
 
     # --- Optional Bearer auth ---
@@ -1030,6 +1246,7 @@ async def solve(request: Request):
 
     result = None
     task_type = None
+    classification = None
     try:
         # 1. Classify the task
         classification = await classify(prompt, files)
@@ -1082,6 +1299,39 @@ async def solve(request: Request):
 
     elapsed = time.monotonic() - start
     log("INFO", "Request complete", elapsed_seconds=round(elapsed, 2))
+
+    # --- Human-readable request summary ---
+    sep = "\u2550" * 60
+    success = isinstance(result, dict) and result.get("success", False)
+    status_str = "SUCCESS" if success else "FAILED"
+    if not success and isinstance(result, dict) and result.get("error"):
+        status_str += f" \u2014 {result['error']}"
+
+    conf_str = ""
+    fields_str = "{}"
+    if classification is not None and not isinstance(classification, list):
+        conf_str = f" (confidence: {classification.confidence})" if hasattr(classification, "confidence") and classification.confidence is not None else ""
+        fields_str = json.dumps(classification.fields, ensure_ascii=False, default=str) if classification.fields else "{}"
+    elif isinstance(classification, list):
+        fields_str = f"[{len(classification)} sub-tasks]"
+
+    detail_lines = ""
+    if success and isinstance(result, dict):
+        details = {k: v for k, v in result.items() if k != "success" and k != "batch_results"}
+        if details:
+            detail_lines = "\n  " + "\n  ".join(f"{k}: {v}" for k, v in details.items())
+
+    summary = (
+        f"\n{sep}\n"
+        f"REQUEST #{req_num} | {elapsed:.1f}s | {LLM_MODE}\n"
+        f"PROMPT: \"{prompt[:100]}{'...' if len(prompt) > 100 else ''}\"\n"
+        f"CLASSIFIED: {task_type or 'N/A'}{conf_str}\n"
+        f"FIELDS: {fields_str}\n"
+        f"RESULT: {status_str}{detail_lines}\n"
+        f"API CALLS: {client.api_call_count} | ERRORS: {client.error_count}\n"
+        f"{sep}"
+    )
+    print(summary, flush=True)
 
     # Always return {"status":"completed"} — the competition grader requires it.
     # Include details for our debugging.

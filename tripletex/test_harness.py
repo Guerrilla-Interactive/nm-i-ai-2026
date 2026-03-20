@@ -60,6 +60,32 @@ DEFAULT_ENDPOINT = "http://localhost:8080"
 DEFAULT_TIMEOUT = 300  # 5 min, matching competition
 
 
+def load_real_credentials() -> dict:
+    """Load real Tripletex credentials from tripletex/.env file."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        print(f"ERROR: .env file not found at {env_path}")
+        print("  Expected TRIPLETEX_BASE_URL and TRIPLETEX_SESSION_TOKEN")
+        sys.exit(1)
+
+    env_vars = {}
+    for line in open(env_path):
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            env_vars[k.strip()] = v.strip()
+
+    base_url = env_vars.get("TRIPLETEX_BASE_URL", "")
+    session_token = env_vars.get("TRIPLETEX_SESSION_TOKEN", "")
+
+    if not base_url or not session_token:
+        print("ERROR: .env missing TRIPLETEX_BASE_URL or TRIPLETEX_SESSION_TOKEN")
+        sys.exit(1)
+
+    print(f"  Using real credentials: {base_url[:40]}...")
+    return {"base_url": base_url, "session_token": session_token}
+
+
 def load_test_cases(path: Path) -> list[dict]:
     with open(path) as f:
         data = json.load(f)
@@ -85,13 +111,13 @@ def filter_cases(
     return filtered
 
 
-def run_test(endpoint: str, case: dict, timeout: int) -> dict:
+def run_test(endpoint: str, case: dict, timeout: int, credentials: dict | None = None) -> dict:
     """Send a single test case to the /solve endpoint and return results."""
     url = f"{endpoint.rstrip('/')}/solve"
 
     payload = {
         "prompt": case["prompt"],
-        "tripletex_credentials": FAKE_CREDENTIALS,
+        "tripletex_credentials": credentials or FAKE_CREDENTIALS,
         "files": [],
     }
 
@@ -220,6 +246,10 @@ def main():
     parser.add_argument("--list", action="store_true", help="List test cases without running")
     parser.add_argument("--json-output", help="Write results to JSON file")
     parser.add_argument(
+        "--real-creds", action="store_true",
+        help="Use real Tripletex credentials from .env instead of fake ones",
+    )
+    parser.add_argument(
         "--prompts", default=str(Path(__file__).parent / "test_prompts.json"),
         help="Path to test_prompts.json",
     )
@@ -241,15 +271,21 @@ def main():
         list_cases(cases)
         sys.exit(0)
 
+    credentials = None
+    if args.real_creds:
+        credentials = load_real_credentials()
+    creds_label = "REAL (from .env)" if args.real_creds else "FAKE (testing only)"
+
     print(f"\n  Tripletex Agent Test Harness")
     print(f"  Endpoint: {args.endpoint}")
+    print(f"  Creds:    {creds_label}")
     print(f"  Tests:    {len(cases)}")
     print(f"  Timeout:  {args.timeout}s\n")
     print("-" * 70)
 
     results = []
     for case in cases:
-        result = run_test(args.endpoint, case, args.timeout)
+        result = run_test(args.endpoint, case, args.timeout, credentials)
         results.append(result)
         print_result(result, args.verbose)
 

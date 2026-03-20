@@ -362,6 +362,16 @@ class TripletexClient:
         resp = await self._request("GET", "/travelExpense/costCategory")
         return self._extract_values(resp)
 
+    async def create_travel_expense_per_diem_compensation(self, data: dict) -> dict:
+        """POST /travelExpense/perDiemCompensation — add per diem to a travel expense."""
+        resp = await self._request("POST", "/travelExpense/perDiemCompensation", json=data)
+        return self._extract_value(resp)
+
+    async def create_travel_expense_mileage_allowance(self, data: dict) -> dict:
+        """POST /travelExpense/mileageAllowance — add mileage allowance to a travel expense."""
+        resp = await self._request("POST", "/travelExpense/mileageAllowance", json=data)
+        return self._extract_value(resp)
+
     # ------------------------------------------------------------------
     # Ledger Account (for bank account setup before invoicing)
     # ------------------------------------------------------------------
@@ -394,6 +404,30 @@ class TripletexClient:
 
     async def update_contact(self, id: int, data: dict) -> dict:
         resp = await self._request("PUT", f"/contact/{id}", json=data)
+        return self._extract_value(resp)
+
+    # ------------------------------------------------------------------
+    # Accounting Dimensions (Tier 3)
+    # ------------------------------------------------------------------
+
+    async def get_dimension_names(self, params: dict | None = None) -> list:
+        """GET /ledger/accountingDimensionName — list custom accounting dimensions."""
+        resp = await self._request("GET", "/ledger/accountingDimensionName", params=params)
+        return self._extract_values(resp)
+
+    async def create_dimension_name(self, data: dict) -> dict:
+        """POST /ledger/accountingDimensionName — create a custom accounting dimension."""
+        resp = await self._request("POST", "/ledger/accountingDimensionName", json=data)
+        return self._extract_value(resp)
+
+    async def get_dimension_values(self, params: dict | None = None) -> list:
+        """GET /ledger/accountingDimensionValue — list dimension values."""
+        resp = await self._request("GET", "/ledger/accountingDimensionValue", params=params)
+        return self._extract_values(resp)
+
+    async def create_dimension_value(self, data: dict) -> dict:
+        """POST /ledger/accountingDimensionValue — create a dimension value."""
+        resp = await self._request("POST", "/ledger/accountingDimensionValue", json=data)
         return self._extract_value(resp)
 
     # ------------------------------------------------------------------

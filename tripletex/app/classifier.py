@@ -48,6 +48,13 @@ MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 TEMPERATURE = 0.0
 MAX_RETRIES = 3
 
+# Claude fallback — disable after first failure to avoid wasting round-trips
+_claude_disabled = False
+
+def _set_claude_disabled():
+    global _claude_disabled
+    _claude_disabled = True
+
 # ---------------------------------------------------------------------------
 # System prompt — comprehensive, multilingual, with few-shot examples
 # ---------------------------------------------------------------------------
@@ -91,6 +98,7 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 {_build_task_type_block()}
 
 ## FIELD FORMATTING RULES
+- ONLY extract fields explicitly stated in the prompt. NEVER fabricate emails, phones, addresses, or websites that are not present in the input text.
 - Dates → YYYY-MM-DD (convert from any format: "15. mars 2026" → "2026-03-15")
 - Numbers → plain decimals, no thousand separators ("1 200,50" → 1200.50)
 - Currency amounts → assume NOK unless explicitly stated otherwise
@@ -113,6 +121,8 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 | credit note | kreditnota | kreditnota | credit note | nota de crédito | nota de crédito | Gutschrift | avoir |
 | payment | betaling/innbetaling | betaling | payment | pago | pagamento | Zahlung | paiement |
 | contact | kontaktperson | kontaktperson | contact | contacto | contato | Kontakt | contact |
+| dimension | dimensjon | dimensjon | dimension | dimensión | dimensão | Dimension/Buchhaltungsdimension | dimension |
+| voucher/posting | bilag/postering | bilag/postering | voucher/posting | asiento | lançamento | Beleg/Buchung | écriture |
 | delete | slett/fjern | slett/fjern | delete/remove | eliminar/borrar | excluir/remover | löschen/entfernen | supprimer |
 | update | oppdater/endre | oppdater/endre | update/modify | actualizar/modificar | atualizar/modificar | aktualisieren/ändern | mettre à jour/modifier |
 
@@ -127,6 +137,10 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 - If unsure between create_invoice and invoice_existing_customer, prefer invoice_existing_customer \
 when the prompt implies the customer already exists in the system.
 - Travel expense keywords: "reiseregning", "reise", "diett", "kjøregodtgjørelse", "utlegg"
+- leverandør/supplier + faktura/invoice → create_supplier_invoice (NOT create_invoice)
+- "inngående faktura", "mottatt faktura", "leverandørfaktura", "Eingangsrechnung", "facture fournisseur" → create_supplier_invoice
+- CRITICAL: "Registrieren Sie den Lieferanten" / "registrer leverandør" / "register supplier" → create_supplier (NOT create_customer)
+- Lieferant/leverandør/supplier WITHOUT faktura/invoice keywords → create_supplier (register the supplier entity)
 - When a prompt mentions both creating a project AND linking it to a customer → project_with_customer
 - "Legg til rolle" / "set role" / "set access" → set_employee_roles
 - CRITICAL: If the prompt describes a customer with an unpaid invoice and asks to register payment, \
@@ -135,6 +149,8 @@ register_payment is ONLY for registering payment on an ALREADY EXISTING invoice 
 - "facture impayée" / "unbezahlte Rechnung" / "unpaid invoice" + customer details → invoice_with_payment
 - If the prompt gives customer details (name, org number) AND invoice details (amount, description) \
 AND mentions payment → invoice_with_payment
+- dimension/Buchhaltungsdimension/dimensjon + values/voucher/Beleg → create_dimension_voucher
+- "fri dimensjon", "custom dimension", "Kostsenter", "Kostenstelle", "cost center" → create_dimension_voucher
 
 ## FEW-SHOT EXAMPLES
 
@@ -263,10 +279,35 @@ Input: "Finn kunde med org.nr 912345678"
 Output:
 {{"task_type": "find_customer", "confidence": 0.96, "fields": {{"search_query": "912345678", "search_field": "organization_number"}}}}
 
+### Example 19b — Supplier invoice (Nynorsk)
+Input: "Me har motteke faktura frå leverandøren Vestfjord AS (org.nr 923456789) på 45000 kr inkl. mva for konsulenttjenester"
+Output:
+{{"task_type": "create_supplier_invoice", "confidence": 0.97, "fields": {{"supplier_name": "Vestfjord AS", "organization_number": "923456789", "amount_including_vat": 45000.0, "description": "konsulenttjenester"}}}}
+
 ### Example 20 — Set employee roles (English)
 Input: "Set employee John Doe as a standard user with no access"
 Output:
 {{"task_type": "set_employee_roles", "confidence": 0.94, "fields": {{"employee_identifier": "John Doe", "user_type": "NO_ACCESS"}}}}
+
+### Example 22 — Create dimension + voucher (German)
+Input: "Erstellen Sie eine benutzerdefinierte Buchhaltungsdimension 'Kostsenter' mit den Werten 'IT' und 'Innkjøp'. Buchen Sie dann einen Beleg auf Konto 7000 über 19450 NOK, verknüpft mit dem Dimensionswert 'IT'."
+Output:
+{{"task_type": "create_dimension_voucher", "confidence": 0.97, "fields": {{"dimension_name": "Kostsenter", "dimension_values": ["IT", "Innkjøp"], "account_number": "7000", "amount": 19450.0, "linked_dimension_value": "IT"}}}}
+
+### Example 22b — Create dimension (Norwegian)
+Input: "Opprett en fri dimensjon 'Kostsenter' med verdiene 'Salg' og 'Drift', og bokfør et bilag på konto 6000 for 5000 NOK knyttet til 'Salg'"
+Output:
+{{"task_type": "create_dimension_voucher", "confidence": 0.96, "fields": {{"dimension_name": "Kostsenter", "dimension_values": ["Salg", "Drift"], "account_number": "6000", "amount": 5000.0, "linked_dimension_value": "Salg"}}}}
+
+### Example 23 — Register supplier (German)
+Input: "Registrieren Sie den Lieferanten Nordlicht GmbH mit der Organisationsnummer 922976457. E-Mail: faktura@nordlichtgmbh.no."
+Output:
+{{"task_type": "create_supplier", "confidence": 0.97, "fields": {{"name": "Nordlicht GmbH", "organization_number": "922976457", "email": "faktura@nordlichtgmbh.no"}}}}
+
+### Example 23b — Register supplier (Norwegian)
+Input: "Registrer leverandøren Havbris AS med org.nr. 987654321 og e-post: post@havbris.no"
+Output:
+{{"task_type": "create_supplier", "confidence": 0.96, "fields": {{"name": "Havbris AS", "organization_number": "987654321", "email": "post@havbris.no"}}}}
 
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
@@ -380,8 +421,10 @@ TASK TYPES:
 {_build_claude_system_prompt()}
 
 RULES:
+- ONLY extract fields explicitly stated in the prompt. NEVER fabricate emails, phones, addresses, or websites.
 - Dates → YYYY-MM-DD
 - Numbers → plain decimals, no thousand separators
+- leverandør/supplier + faktura/invoice → create_supplier_invoice (NOT create_invoice)
 - If unsure, use "unknown" with confidence 0.0
 
 Respond with ONLY a JSON object, no markdown."""
@@ -440,6 +483,7 @@ async def classify_task(
     """
     def _post_process_result(r):
         r.fields = _post_process_fields(r.task_type, r.fields)
+        r.fields = _strip_hallucinated_fields(r.fields, prompt)
         return r
 
     def _post_process_any(r):
@@ -460,15 +504,16 @@ async def classify_task(
         except Exception as e:
             logger.warning("Gemini classification failed: %s — trying next fallback", e)
 
-    # --- Try Claude second ---
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    # --- Try Claude second (skip if previously failed) ---
+    if os.environ.get("ANTHROPIC_API_KEY") and not _claude_disabled:
         try:
             result = await _classify_with_claude(prompt, files)
             if result.task_type != TaskType.UNKNOWN or result.confidence > 0.5:
                 return _post_process_result(result)
             logger.info("Claude returned UNKNOWN, trying keyword fallback")
         except Exception as e:
-            logger.warning("Claude classification failed: %s — using keyword fallback", e)
+            logger.warning("Claude classification failed: %s — disabling Claude fallback", e)
+            _set_claude_disabled()
 
     # --- Keyword fallback (always available) ---
     result = _classify_with_keywords(prompt, files)
@@ -517,6 +562,9 @@ async def _classify_with_gemini(
         try:
             raw_text = await _call_gemini(client, content_parts)
             result = _parse_response(raw_text, prompt)
+            # _parse_response may return a list for batch operations
+            if isinstance(result, list):
+                return result
             # If Gemini returned UNKNOWN on first try, retry before giving up
             if result.task_type == TaskType.UNKNOWN and attempt < MAX_RETRIES:
                 logger.warning("Gemini returned UNKNOWN (attempt %d), retrying...", attempt + 1)
@@ -750,6 +798,21 @@ def _normalize_fields(task_type: TaskType, fields: dict) -> dict:
     return f
 
 
+def _strip_hallucinated_fields(fields: dict, original_prompt: str) -> dict:
+    """Remove email, phone, website fields whose values don't appear in the original prompt.
+
+    LLMs sometimes fabricate contact info that isn't in the input text.
+    """
+    f = dict(fields)
+    prompt_lower = original_prompt.lower()
+    for key in ("email", "phone", "website"):
+        val = f.get(key)
+        if val and isinstance(val, str) and val.lower() not in prompt_lower:
+            logger.info("Stripping hallucinated %s: %s", key, val)
+            f.pop(key)
+    return f
+
+
 def _parse_single(data: dict, original_prompt: str) -> TaskClassification:
     """Parse a single classification dict into TaskClassification."""
     if not isinstance(data, dict):
@@ -770,6 +833,7 @@ def _parse_single(data: dict, original_prompt: str) -> TaskClassification:
         fields = {}
 
     fields = _normalize_fields(task_type, fields)
+    fields = _strip_hallucinated_fields(fields, original_prompt)
 
     return TaskClassification(
         task_type=task_type,
@@ -1059,6 +1123,36 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "atualizar departamento",
         ],
     },
+    TaskType.CREATE_DIMENSION_VOUCHER: {
+        "keywords": [
+            "dimensjon", "dimension", "buchhaltungsdimension", "fri dimensjon",
+            "custom dimension", "benutzerdefinierte dimension",
+            "kostsenter", "kostenstelle", "cost center", "centre de coût",
+            "centro de costo", "centro de custo",
+            "dimensjonsverdier", "dimensionswert",
+        ],
+    },
+    TaskType.CREATE_SUPPLIER: {
+        "keywords": [
+            "registrer leverandør", "opprett leverandør", "ny leverandør",
+            "create supplier", "register supplier", "new supplier",
+            "add supplier", "legg til leverandør",
+            "registrieren lieferant", "lieferanten registrieren",
+            "erstellen lieferant", "neuer lieferant", "einen lieferanten",
+            "créer fournisseur", "enregistrer fournisseur", "nouveau fournisseur",
+            "crear proveedor", "registrar proveedor", "nuevo proveedor",
+            "criar fornecedor", "registrar fornecedor", "novo fornecedor",
+        ],
+        "anti_keywords": ["faktura", "invoice", "rechnung", "facture", "factura"],
+    },
+    TaskType.CREATE_SUPPLIER_INVOICE: {
+        "keywords": [
+            "leverandørfaktura", "inngående faktura", "supplier invoice",
+            "eingangsrechnung", "facture fournisseur", "factura proveedor",
+            "faktura fra leverandør", "mottatt faktura", "motteke faktura",
+            "received invoice", "incoming invoice",
+        ],
+    },
     TaskType.LOG_HOURS: {
         "keywords": [
             "logg timer", "log hours", "registrer timer", "timesheet", "timeliste",
@@ -1072,7 +1166,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
 # Pre-compiled regex patterns for field extraction
 _RE_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _RE_PHONE = re.compile(r"(?:\+\d{1,3}\s?)?(?:\d[\d\s\-]{6,14}\d)")
-_RE_ORG_NR = re.compile(r"(?:org\.?\s*(?:nr\.?|nummer)?\s*:?\s*)(\d[\d\s]{7,10}\d)", re.IGNORECASE)
+_RE_ORG_NR = re.compile(r"(?:org(?:anisas?tion(?:s?nummer)?)?\.?\s*(?:n[rº]\.?|nummer|number|numéro|número)?\s*:?\s*)(\d[\d\s]{7,10}\d)", re.IGNORECASE)
 _RE_DATE_DMY = re.compile(r"\b(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})\b")
 _RE_DATE_YMD = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 _RE_DATE_TEXT_NB = re.compile(
@@ -1272,7 +1366,7 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
     # Email
     email_match = _RE_EMAIL.search(prompt)
     if email_match:
-        fields["email"] = email_match.group(0)
+        fields["email"] = email_match.group(0).rstrip(".")
 
     # Phone — skip if the match is preceded by org number keywords
     phone_match = _RE_PHONE.search(prompt)
@@ -1280,7 +1374,7 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
         phone_val = phone_match.group(0).strip()
         # Don't treat org numbers as phone numbers
         before_phone = prompt[:phone_match.start()].lower()
-        if not re.search(r"org\.?\s*(?:nr\.?|nummer)?\s*:?\s*$", before_phone):
+        if not re.search(r"(?:org(?:anisas?tion(?:s?nummer)?)?\.?\s*(?:n[rº]\.?|nummer|number|numéro|número)?\s*:?\s*)$", before_phone):
             fields["phone"] = phone_val
 
     # Org number
@@ -1502,6 +1596,63 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
         if cust:
             fields["customer_identifier"] = cust
 
+    elif task_type == TaskType.CREATE_SUPPLIER:
+        # Extract supplier name: "Lieferanten X GmbH" / "leverandør X AS" / "supplier X"
+        sup_match = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if sup_match:
+            fields["name"] = sup_match.group(1).strip().rstrip(",.")
+
+    elif task_type == TaskType.CREATE_SUPPLIER_INVOICE:
+        # Extract supplier name: "leverandøren X" / "fra leverandør X" / "supplier X"
+        sup_match = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant|proveedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if sup_match:
+            fields["supplier_name"] = sup_match.group(1).strip().rstrip(",.")
+        if amounts:
+            fields["amount_including_vat"] = amounts[0]
+        if dates:
+            fields["invoice_date"] = dates[0]
+
+    elif task_type == TaskType.CREATE_DIMENSION_VOUCHER:
+        # Extract quoted values for dimension_name and dimension_values
+        quoted = re.findall(r"['\u2018\u2019\u201C\u201D\"']([^'\u2018\u2019\u201C\u201D\"']+)['\u2018\u2019\u201C\u201D\"']", prompt)
+        if quoted:
+            fields["dimension_name"] = quoted[0]
+            if len(quoted) > 1:
+                # linked_dimension_value: look for association keyword + quoted value
+                link_match = re.search(
+                    r"(?:verknüpft|linked|knyttet|lié|vinculado|associé)\s+(?:mit|with|til|med|à|a|con)?\s*(?:dem\s+)?(?:Dimensionswert|dimension\s*value?|dimensjonsverdien?)?\s*['\u2018\u2019\u201C\u201D\"']([^'\u2018\u2019\u201C\u201D\"']+)['\u2018\u2019\u201C\u201D\"']",
+                    prompt, re.IGNORECASE,
+                )
+                if link_match:
+                    fields["linked_dimension_value"] = link_match.group(1)
+                # Deduplicate values and exclude the dimension name itself
+                seen = set()
+                dim_values = []
+                for q in quoted[1:]:
+                    if q.lower() != quoted[0].lower() and q.lower() not in seen:
+                        seen.add(q.lower())
+                        dim_values.append(q)
+                fields["dimension_values"] = dim_values
+        # Account number: "Konto 7000" / "account 7000" / "konto 6000"
+        acct_match = re.search(r"(?:Konto|konto|account|compte|cuenta|conta|Buchungskonto)\s+(\d{4})", prompt, re.IGNORECASE)
+        if acct_match:
+            fields["account_number"] = acct_match.group(1)
+        # Amount
+        if amounts:
+            fields["amount"] = amounts[0]
+        if dates:
+            fields["voucher_date"] = dates[0]
+
     return fields
 
 
@@ -1588,6 +1739,11 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
     p = prompt.lower()
     # Order matters — more specific matches first
     _LAST_RESORT = [
+        # Supplier invoice before regular invoice
+        # Dimension/voucher before invoice/voucher
+        (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
+        (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "facture fournisseur"], TaskType.CREATE_SUPPLIER_INVOICE),
+        (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         # Credit note before invoice
         (["kreditnota", "credit note", "gutschrift", "avoir", "nota de crédito"], TaskType.CREATE_CREDIT_NOTE),
         # Invoice+payment before plain invoice
@@ -1701,6 +1857,9 @@ def _classify_with_keywords(
     # Last resort: single-word heuristic — NEVER return UNKNOWN if there's any signal
     if best_type == TaskType.UNKNOWN:
         _LAST_RESORT = [
+            (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon"], TaskType.CREATE_DIMENSION_VOUCHER),
+            (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
+            (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
             (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário", "empregado"], TaskType.CREATE_EMPLOYEE),
             (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
