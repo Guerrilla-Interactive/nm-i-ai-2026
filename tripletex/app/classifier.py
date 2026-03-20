@@ -140,6 +140,8 @@ when the prompt implies the customer already exists in the system.
 - leverandør/supplier + faktura/invoice → create_supplier_invoice (NOT create_invoice)
 - "inngående faktura", "mottatt faktura", "leverandørfaktura", "Eingangsrechnung", "facture fournisseur" → create_supplier_invoice
 - CRITICAL: "Registrieren Sie den Lieferanten" / "registrer leverandør" / "register supplier" → create_supplier (NOT create_customer)
+- CRITICAL: "Exécutez la paie" / "kjør lønn" / "run payroll" / "Gehaltsabrechnung" / "ejecutar nómina" → run_payroll
+- paie/salaire/lønn/Gehalt/nómina + employee name + amount → run_payroll (salary payment)
 - Lieferant/leverandør/supplier WITHOUT faktura/invoice keywords → create_supplier (register the supplier entity)
 - When a prompt mentions both creating a project AND linking it to a customer → project_with_customer
 - "Legg til rolle" / "set role" / "set access" → set_employee_roles
@@ -308,6 +310,16 @@ Output:
 Input: "Registrer leverandøren Havbris AS med org.nr. 987654321 og e-post: post@havbris.no"
 Output:
 {{"task_type": "create_supplier", "confidence": 0.96, "fields": {{"name": "Havbris AS", "organization_number": "987654321", "email": "post@havbris.no"}}}}
+
+### Example 24 — Run payroll (French)
+Input: "Exécutez la paie de Jules Leroy (jules.leroy@example.org) pour ce mois. Le salaire de base est de 56950 NOK. Ajoutez une prime unique de 9350 NOK en plus du salaire de base."
+Output:
+{{"task_type": "run_payroll", "confidence": 0.97, "fields": {{"employee_identifier": "Jules Leroy", "first_name": "Jules", "last_name": "Leroy", "email": "jules.leroy@example.org", "base_salary": 56950.0, "bonus": 9350.0}}}}
+
+### Example 24b — Run payroll (Norwegian)
+Input: "Kjør lønn for ansatt Kari Hansen (kari@example.no) for mars 2026. Grunnlønn 45000 NOK."
+Output:
+{{"task_type": "run_payroll", "confidence": 0.96, "fields": {{"employee_identifier": "Kari Hansen", "first_name": "Kari", "last_name": "Hansen", "email": "kari@example.no", "base_salary": 45000.0, "month": "03", "year": "2026"}}}}
 
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
@@ -1132,6 +1144,18 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "dimensjonsverdier", "dimensionswert",
         ],
     },
+    TaskType.RUN_PAYROLL: {
+        "keywords": [
+            "kjør lønn", "utbetal lønn", "lønnskjøring", "lønnsslipp",
+            "run payroll", "execute payroll", "process payroll", "salary payment",
+            "paie", "exécutez la paie", "exécuter la paie", "fiche de paie", "bulletin de paie",
+            "gehalt", "gehaltsabrechnung", "lohnabrechnung", "lohn auszahlen",
+            "nómina", "ejecutar nómina", "procesar nómina",
+            "folha de pagamento", "processar folha",
+            "lønn", "lønnsutbetaling",
+            "salaire", "salaire de base",
+        ],
+    },
     TaskType.CREATE_SUPPLIER: {
         "keywords": [
             "registrer leverandør", "opprett leverandør", "ny leverandør",
@@ -1742,6 +1766,7 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         # Supplier invoice before regular invoice
         # Dimension/voucher before invoice/voucher
         (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
+        (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lønnsslipp", "salary"], TaskType.RUN_PAYROLL),
         (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "facture fournisseur"], TaskType.CREATE_SUPPLIER_INVOICE),
         (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         # Credit note before invoice
@@ -1858,6 +1883,7 @@ def _classify_with_keywords(
     if best_type == TaskType.UNKNOWN:
         _LAST_RESORT = [
             (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon"], TaskType.CREATE_DIMENSION_VOUCHER),
+            (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "salary"], TaskType.RUN_PAYROLL),
             (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
