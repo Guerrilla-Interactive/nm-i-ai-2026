@@ -1348,11 +1348,18 @@ async def _exec_create_travel_expense(fields: dict, client: TripletexClient) -> 
 
     # Add per diem compensations if specified
     raw_per_diems = _get(fields, "per_diem_compensations") or []
+    # Derive location from destination, title, or fallback
+    default_location = (
+        _get(fields, "destination") or _get(fields, "departure_from")
+        or _get(fields, "title") or "Norge"
+    )
     for pd in raw_per_diems:
+        pd_count = int(_get(pd, "count") or _get(pd, "quantity") or _get(pd, "days") or 1)
+        pd_location = _get(pd, "location") or default_location
         pd_payload = _clean({
             "travelExpense": {"id": expense_id},
-            "location": _get(pd, "location"),
-            "count": int(_get(pd, "count") or 1),
+            "location": pd_location,
+            "count": pd_count,
             "rateTypeId": _get(pd, "rate_type_id"),
             "date": _get(pd, "date") or _get(fields, "departure_date"),
         })
@@ -2498,70 +2505,41 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
     emp_name = f"{emp.get('firstName', '')} {emp.get('lastName', '')}".strip()
     today = _today()
 
-    # Step 2: Try salary payslip API first
-    payslip_id = None
-    salary_api_worked = False
-    try:
-        # Try creating payslip
-        payslip_data = {
-            "employee": {"id": emp_id},
-            "date": today,
-            "year": int(today[:4]),
-            "month": int(today[5:7]),
-        }
-        payslip = await client.create_salary_payslip(payslip_data)
-        payslip_id = payslip.get("id")
+    # Step 2: Voucher-based salary posting
+    # Account 5000 is system-managed (salary module), use 7700 instead
+    # Try accounts in order: 7700, 7000, 5900 (non-system salary/personnel costs)
+    # Credit: 2920 (skyldig lønn) or 2780 or 2400
+    salary_acct_candidates = ["7700", "7000", "5900", "7099"]
+    liability_acct_candidates = ["2920", "2780", "2400"]
 
-        # If payslip worked, create transactions on it
-        if payslip_id and base_salary:
-            try:
-                salary_types = await client.get_salary_types({"fields": "*"})
-                salary_type_id = salary_types[0].get("id") if salary_types else None
-                if salary_type_id:
-                    txn = await client.create_salary_transaction({
-                        "payslip": {"id": payslip_id},
-                        "salaryType": {"id": salary_type_id},
-                        "amount": base_salary,
-                        "count": 1,
-                    })
-                    salary_api_worked = True
-            except TripletexAPIError:
-                pass
+    salary_acct_id = None
+    liability_acct_id = None
 
-        if salary_api_worked:
-            return {
-                "entity": "payroll",
-                "employee_id": emp_id,
-                "employee_name": emp_name,
-                "payslip_id": payslip_id,
-                "base_salary": base_salary,
-                "bonus": bonus,
-                "total": total_amount,
-            }
-    except TripletexAPIError as e:
-        _log("INFO", "Salary API unavailable, using voucher approach", error=str(e))
+    for acct_num in salary_acct_candidates:
+        try:
+            accts = await client.get_ledger_accounts({"number": acct_num, "fields": "*"})
+            if accts:
+                salary_acct_id = accts[0]["id"]
+                _log("INFO", "Using salary expense account", number=acct_num, id=salary_acct_id)
+                break
+        except TripletexAPIError:
+            continue
 
-    # Step 3: Voucher-based fallback — post salary as journal entries
-    # Debit: 5000 (Lønn/salary expense) for base + bonus
-    # Credit: 2780 (Skyldig lønn/salary payable) for total
-    salary_acct_num = "5000"
-    liability_acct_num = "2780"
-
-    try:
-        salary_accounts = await client.get_ledger_accounts({"number": salary_acct_num, "fields": "*"})
-        liability_accounts = await client.get_ledger_accounts({"number": liability_acct_num, "fields": "*"})
-    except TripletexAPIError as e:
-        return {"success": False, "error": f"Failed to look up salary accounts: {e}",
-                "employee_id": emp_id}
-
-    salary_acct_id = salary_accounts[0]["id"] if salary_accounts else None
-    liability_acct_id = liability_accounts[0]["id"] if liability_accounts else None
+    for acct_num in liability_acct_candidates:
+        try:
+            accts = await client.get_ledger_accounts({"number": acct_num, "fields": "*"})
+            if accts:
+                liability_acct_id = accts[0]["id"]
+                _log("INFO", "Using salary liability account", number=acct_num, id=liability_acct_id)
+                break
+        except TripletexAPIError:
+            continue
 
     if not salary_acct_id or not liability_acct_id:
-        # Try alternative accounts: 5001 for salary, 2700 for liability
+        # Last resort: try any 7xxx and 2xxx account
         try:
             if not salary_acct_id:
-                alt = await client.get_ledger_accounts({"number": "5001", "fields": "*"})
+                alt = await client.get_ledger_accounts({"number": "7001", "fields": "*"})
                 salary_acct_id = alt[0]["id"] if alt else None
             if not liability_acct_id:
                 alt = await client.get_ledger_accounts({"number": "2700", "fields": "*"})
