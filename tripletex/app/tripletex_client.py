@@ -536,6 +536,40 @@ class TripletexClient:
         return self._extract_values(resp)
 
     # ------------------------------------------------------------------
+    # Salary / Payroll
+    # ------------------------------------------------------------------
+
+    async def get_salary_types(self, params: dict | None = None) -> list:
+        """GET /salary/type — list salary/wage types."""
+        resp = await self._request("GET", "/salary/type", params=params)
+        return self._extract_values(resp)
+
+    async def get_salary_payslips(self, params: dict | None = None) -> list:
+        """GET /salary/payslip — list payslips."""
+        resp = await self._request("GET", "/salary/payslip", params=params)
+        return self._extract_values(resp)
+
+    async def create_salary_payslip(self, data: dict) -> dict:
+        """POST /salary/payslip — create a payslip for an employee."""
+        resp = await self._request("POST", "/salary/payslip", json=data)
+        return self._extract_value(resp)
+
+    async def get_salary_transactions(self, params: dict | None = None) -> list:
+        """GET /salary/transaction — list salary transactions."""
+        resp = await self._request("GET", "/salary/transaction", params=params)
+        return self._extract_values(resp)
+
+    async def create_salary_transaction(self, data: dict) -> dict:
+        """POST /salary/transaction — add a salary transaction line."""
+        resp = await self._request("POST", "/salary/transaction", json=data)
+        return self._extract_value(resp)
+
+    async def get_salary_settings(self, params: dict | None = None) -> dict:
+        """GET /salary/settings — get salary settings (pay period, etc.)."""
+        resp = await self._request("GET", "/salary/settings", params=params or {"fields": "*"})
+        return self._extract_value(resp)
+
+    # ------------------------------------------------------------------
     # Company Modules
     # ------------------------------------------------------------------
 
