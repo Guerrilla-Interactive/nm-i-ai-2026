@@ -261,10 +261,14 @@ async def _resolve_vat_type(client: TripletexClient, vat_pct: Any = None) -> int
     except Exception as e:
         _log("WARNING", f"VAT type lookup failed: {e}")
 
-    # Fallback: return 3 for 25%, 6 for 0%
-    if target_pct == 0:
-        return 6
-    return 3
+    # Hardcoded fallback for common Norwegian VAT types
+    if target_pct is not None and abs(target_pct) < 0.01:
+        return 6   # 0% exempt
+    if target_pct is not None and abs(target_pct - 12.0) < 0.01:
+        return 5   # 12% transport/hotel
+    if target_pct is not None and abs(target_pct - 15.0) < 0.01:
+        return 4   # 15% food
+    return 3       # 25% standard (default)
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +493,25 @@ async def _exec_update_customer(fields: dict, client: TripletexClient) -> dict:
 
 
 async def _exec_create_product(fields: dict, client: TripletexClient) -> dict:
-    """POST /product — name is required, vatType resolved dynamically."""
+    """POST /product — name is required, vatType resolved dynamically.
+
+    Bug-fix: search for existing product by name first to avoid 422 collisions.
+    If creation fails with 422 "er i bruk", retry without the number field.
+    """
+    product_name = _get(fields, "name")
+    product_number = _get(fields, "product_number") or _get(fields, "number")
+
+    # Search for existing product by name before creating
+    if product_name:
+        try:
+            existing = await client.get_products({"name": product_name})
+            if existing:
+                _log("INFO", "Found existing product by name, reusing",
+                     name=product_name, product_id=existing[0]["id"])
+                return {"created_id": existing[0]["id"], "entity": "product"}
+        except Exception:
+            pass
+
     # Resolve VAT type: use extracted percentage, or default to 25% (standard Norwegian)
     vat_type_id = _get(fields, "vat_type_id")
     if not vat_type_id:
@@ -497,8 +519,7 @@ async def _exec_create_product(fields: dict, client: TripletexClient) -> dict:
         vat_type_id = await _resolve_vat_type(client, vat_pct)
 
     payload = _clean({
-        "name": _get(fields, "name"),
-        "number": _get(fields, "product_number") or _get(fields, "number"),
+        "name": product_name,
         "description": _get(fields, "description"),
         "priceExcludingVatCurrency": _get(fields, "price") or _get(fields, "price_excluding_vat"),
         "priceIncludingVatCurrency": _get(fields, "price_including_vat"),
@@ -508,8 +529,22 @@ async def _exec_create_product(fields: dict, client: TripletexClient) -> dict:
         "productUnit": _ref(_get(fields, "product_unit_id")),
         "department": _ref(_get(fields, "department_id")),
     })
-    result = await client.create_product(payload)
-    return {"created_id": result.get("id"), "entity": "product"}
+    # Only include number if explicitly provided — let Tripletex auto-assign otherwise
+    # to avoid 422 "Produktnummeret X er i bruk" collisions
+    if product_number:
+        payload["number"] = product_number
+
+    try:
+        result = await client.create_product(payload)
+        return {"created_id": result.get("id"), "entity": "product"}
+    except TripletexAPIError as e:
+        if e.status_code == 422 and "er i bruk" in (e.detail or ""):
+            _log("WARNING", "Product number collision, retrying without number",
+                 number=product_number)
+            payload.pop("number", None)
+            result = await client.create_product(payload)
+            return {"created_id": result.get("id"), "entity": "product"}
+        raise
 
 
 async def _exec_create_department(fields: dict, client: TripletexClient) -> dict:
@@ -654,19 +689,48 @@ async def _create_products_for_lines(
         if product_number and not ol.get("product"):
             desc = ol.get("description", "Product")
             price = ol.get("unitPriceExcludingVatCurrency", 0.0)
+
+            # Search for existing product by name first to avoid collisions
+            try:
+                existing = await client.get_products({"name": desc})
+                if existing:
+                    ol["product"] = {"id": existing[0]["id"]}
+                    _log("INFO", "Reusing existing product for invoice line",
+                         name=desc, product_id=existing[0]["id"])
+                    continue
+            except Exception:
+                pass
+
             # Resolve VAT type once (default 25% Norwegian standard)
             if vat_type_id is None:
                 vat_type_id = await _resolve_vat_type(client, None)
+
+            product_payload = _clean({
+                "name": desc,
+                "priceExcludingVatCurrency": price,
+                "vatType": {"id": int(vat_type_id)} if vat_type_id else None,
+            })
+            # Only include number if it's a digit — let Tripletex auto-assign otherwise
+            if str(product_number).isdigit():
+                product_payload["number"] = int(product_number)
+
             try:
-                product = await client.create_product(_clean({
-                    "name": desc,
-                    "number": int(product_number) if str(product_number).isdigit() else None,
-                    "priceExcludingVatCurrency": price,
-                    "vatType": {"id": int(vat_type_id)} if vat_type_id else None,
-                }))
+                product = await client.create_product(product_payload)
                 ol["product"] = {"id": product["id"]}
                 _log("INFO", "Created product for invoice line",
                      name=desc, number=product_number, product_id=product["id"])
+            except TripletexAPIError as e:
+                if e.status_code == 422 and "er i bruk" in (e.detail or ""):
+                    _log("WARNING", "Product number collision in line, retrying without number",
+                         name=desc, number=product_number)
+                    product_payload.pop("number", None)
+                    try:
+                        product = await client.create_product(product_payload)
+                        ol["product"] = {"id": product["id"]}
+                    except Exception as e2:
+                        _log("WARNING", f"Failed to create product {desc} on retry: {e2}")
+                else:
+                    _log("WARNING", f"Failed to create product {desc}: {e}")
             except Exception as e:
                 _log("WARNING", f"Failed to create product {desc}: {e}")
     return order_lines
@@ -772,6 +836,67 @@ async def _exec_invoice_existing_customer(fields: dict, client: TripletexClient)
     return await _exec_create_invoice(fields, client)
 
 
+async def _resolve_invoice_by_identifier(
+    client: TripletexClient, identifier: str, fields: dict | None = None
+) -> int | None:
+    """Resolve an invoice ID from a non-numeric identifier string.
+
+    Tries: search by customer name extracted from identifier, then by full identifier
+    as customer name. Returns invoice ID or None.
+    """
+    import re
+
+    # Try to extract a customer-like name from the identifier
+    # Patterns like "Factura para Viento SL por '...'" or "Invoice for Acme Corp"
+    candidate_names = []
+
+    # Try "para X por" pattern (Spanish)
+    m = re.search(r"para\s+(.+?)\s+por\b", identifier, re.IGNORECASE)
+    if m:
+        candidate_names.append(m.group(1).strip())
+
+    # Try "for X" pattern (English/Norwegian)
+    m = re.search(r"(?:for|til|fra)\s+(.+?)(?:\s+(?:por|for|med|with|re:|vedr)\b|$)", identifier, re.IGNORECASE)
+    if m:
+        candidate_names.append(m.group(1).strip().rstrip("'\""))
+
+    # Also try the customer_name field if available
+    if fields:
+        cust_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+        if cust_name:
+            candidate_names.insert(0, cust_name)
+
+    # Try each candidate name as a customer search
+    for name in candidate_names:
+        if not name:
+            continue
+        try:
+            invoices = await client.get_invoices({
+                "customerName": name,
+                "invoiceDateFrom": "2000-01-01",
+                "invoiceDateTo": "2099-12-31",
+            })
+            if invoices:
+                # Return the most recent invoice (highest ID)
+                return max(invoices, key=lambda inv: inv.get("id", 0))["id"]
+        except Exception:
+            pass
+
+    # Last resort: try the full identifier as customerName
+    try:
+        invoices = await client.get_invoices({
+            "customerName": identifier,
+            "invoiceDateFrom": "2000-01-01",
+            "invoiceDateTo": "2099-12-31",
+        })
+        if invoices:
+            return max(invoices, key=lambda inv: inv.get("id", 0))["id"]
+    except Exception:
+        pass
+
+    return None
+
+
 async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
     """Register payment on an existing invoice — 1-2 API calls.
 
@@ -792,13 +917,34 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
                 return {"success": False, "error": f"Invoice #{invoice_number} not found"}
             invoice_id = invoices[0]["id"]
         else:
-            return {"success": False, "error": f"Cannot resolve invoice identifier: {invoice_number}"}
+            # Non-numeric identifier — try to resolve by customer name
+            resolved = await _resolve_invoice_by_identifier(client, str(invoice_number), fields)
+            if resolved:
+                invoice_id = resolved
+                _log("INFO", "Resolved invoice by customer search",
+                     identifier=str(invoice_number)[:100], invoice_id=invoice_id)
+            else:
+                return {"success": False, "error": f"Cannot resolve invoice identifier: {invoice_number}"}
 
     if not invoice_id:
         return {"success": False, "error": "No invoice specified for payment"}
 
     payment_date = _get(fields, "payment_date") or _today()
     amount = _get(fields, "amount") or _get(fields, "payment_amount") or _get(fields, "paid_amount")
+
+    # Bug fix: fetch invoice to get actual outstanding amount to avoid "ugyldig beløp"
+    try:
+        invoice_data = await client.get_invoice(int(invoice_id))
+        outstanding = invoice_data.get("amountOutstanding") or invoice_data.get("amount")
+        if outstanding is not None and amount is not None:
+            if abs(float(amount) - float(outstanding)) > 0.01:
+                _log("INFO", "Adjusting payment amount to match outstanding",
+                     provided=amount, outstanding=outstanding)
+                amount = outstanding
+        elif outstanding is not None and amount is None:
+            amount = outstanding
+    except Exception as e:
+        _log("WARNING", f"Could not fetch invoice for amount validation: {e}")
 
     if amount is None:
         return {"success": False, "error": "No payment amount specified"}
@@ -838,7 +984,32 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
                 return {"success": False, "error": f"Invoice #{invoice_number} not found"}
             invoice_id = invoices[0]["id"]
         else:
-            return {"success": False, "error": f"Cannot resolve invoice identifier: {invoice_number}"}
+            # Non-numeric identifier — try to resolve by customer name
+            resolved = await _resolve_invoice_by_identifier(client, str(invoice_number), fields)
+            if resolved:
+                invoice_id = resolved
+                _log("INFO", "Resolved invoice for credit note by customer search",
+                     identifier=str(invoice_number)[:100], invoice_id=invoice_id)
+            else:
+                # Try to create prerequisite chain if we have enough info
+                customer_name = _get(fields, "customer_name")
+                lines = _get(fields, "lines") or _get(fields, "order_lines")
+                if customer_name and lines:
+                    _log("INFO", "Creating prerequisite invoice for credit note",
+                         customer_name=customer_name)
+                    try:
+                        invoice_result = await _exec_create_invoice(fields, client)
+                        if invoice_result.get("invoice_id"):
+                            invoice_id = invoice_result["invoice_id"]
+                        else:
+                            return {"success": False,
+                                    "error": f"Cannot resolve invoice identifier and prerequisite creation failed: {invoice_number}"}
+                    except Exception as e:
+                        return {"success": False,
+                                "error": f"Cannot resolve invoice identifier: {invoice_number}, prerequisite creation failed: {e}"}
+                else:
+                    return {"success": False,
+                            "error": f"Cannot resolve invoice identifier: {invoice_number}"}
 
     if not invoice_id:
         return {"success": False, "error": "No invoice specified for credit note"}
@@ -918,13 +1089,16 @@ async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> d
     invoice_id = invoice.get("id")
 
     # Step 2: Use the API's actual invoice amount for payment (correct VAT)
-    api_amount = invoice.get("amount") or invoice.get("amountCurrency")
-    if explicit_paid:
-        paid_amount = float(explicit_paid)
-    elif api_amount:
+    # Prefer amountOutstanding (what's actually owed), fall back to amount
+    api_amount = invoice.get("amountOutstanding") or invoice.get("amount") or invoice.get("amountCurrency")
+    if api_amount is not None:
         paid_amount = float(api_amount)
+    elif explicit_paid:
+        paid_amount = float(explicit_paid)
     else:
         paid_amount = None
+        _log("WARNING", "No amount available from invoice, skipping payment",
+             invoice_id=invoice_id)
 
     # Step 3: Register payment separately with the correct amount
     payment_registered = False
