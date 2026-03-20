@@ -152,6 +152,14 @@ Output: {{"task_type":"delete_project","confidence":0.95,"fields":{{"project_ide
 Input: "Registrer reiseregning for ansatt Ola Nordmann, tittel Kundebesøk Oslo"
 Output: {{"task_type":"create_travel_expense","confidence":0.95,"fields":{{"employee_identifier":"Ola Nordmann","title":"Kundebesøk Oslo"}}}}
 
+CRITICAL: "reverser betaling" / "payment returned/bounced by bank" / "Zahlung rückerstattet" → reverse_payment (NOT create_credit_note or error_correction). The goal is to reverse the payment voucher so the invoice is outstanding again.
+
+Input: "Betalingen fra Tindra AS ble returnert av banken. Reverser betalingen slik at fakturaen igjen vises som utestående."
+Output: {{"task_type":"reverse_payment","confidence":0.97,"fields":{{"customer_name":"Tindra AS"}}}}
+
+Input: "Exécutez la paie de Jules Leroy (jules.leroy@example.org) pour ce mois. Le salaire de base est de 56950 NOK. Ajoutez une prime unique de 9350 NOK."
+Output: {{"task_type":"run_payroll","confidence":0.97,"fields":{{"employee_identifier":"Jules Leroy","first_name":"Jules","last_name":"Leroy","email":"jules.leroy@example.org","base_salary":56950.0,"bonus":9350.0}}}}
+
 If unsure, use "unknown" with confidence 0.0.
 Respond with ONLY a JSON object, no markdown."""
 
