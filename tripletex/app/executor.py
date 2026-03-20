@@ -429,6 +429,12 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
 
     Required: firstName, lastName, email, userType, department ref.
     """
+    # If classifier extracted "name" but not first_name/last_name, split it
+    if not _get(fields, "first_name") and _get(fields, "name"):
+        parts = fields["name"].split(None, 1)
+        fields["first_name"] = parts[0]
+        fields["last_name"] = parts[1] if len(parts) > 1 else parts[0]
+
     dept_id = _get(fields, "department_id")
     if not dept_id:
         dept_id = await _ensure_department(client, _get(fields, "department_name"))
@@ -451,8 +457,12 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
     # Generate email if not provided (required for POST)
     email = _get(fields, "email")
     if not email:
-        first = (_get(fields, "first_name") or "user").lower().replace(" ", "")
-        last = (_get(fields, "last_name") or "test").lower().replace(" ", "")
+        import unicodedata
+        def _ascii_safe(s: str) -> str:
+            """Strip diacritics for email-safe ASCII (e.g. Müller → muller)."""
+            return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower().replace(" ", "")
+        first = _ascii_safe(_get(fields, "first_name") or "user")
+        last = _ascii_safe(_get(fields, "last_name") or "test")
         email = f"{first}.{last}@example.com"
 
     payload = _clean({
@@ -809,7 +819,9 @@ async def _exec_create_project(fields: dict, client: TripletexClient) -> dict:
             last_name = parts[1] if len(parts) > 1 else parts[0]
             email = mgr_email
             if not email:
-                email = f"{first_name.lower()}.{last_name.lower()}@example.com"
+                import unicodedata
+                _a = lambda s: unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
+                email = f"{_a(first_name)}.{_a(last_name)}@example.com"
             dept_id = await _ensure_department(client)
             new_emp = await client.create_employee(_clean({
                 "firstName": first_name,
@@ -822,7 +834,14 @@ async def _exec_create_project(fields: dict, client: TripletexClient) -> dict:
             _log("INFO", "Created project manager employee", name=mgr_name, id=manager_id)
 
     if not manager_id:
-        # Default to first available employee
+        # Default to logged-in user (admin — guaranteed to have PM access)
+        try:
+            whoami = await client._request("GET", "/token/session/>whoAmI")
+            manager_id = whoami.get("value", {}).get("employeeId")
+        except Exception:
+            pass
+    if not manager_id:
+        # Fallback to first available employee
         employees = await client.get_employees({"count": 1})
         if employees:
             manager_id = employees[0]["id"]
@@ -853,13 +872,29 @@ async def _exec_create_project(fields: dict, client: TripletexClient) -> dict:
         return {"created_id": result.get("id"), "entity": "project"}
     except TripletexAPIError as e:
         if e.status_code == 422 and "prosjektleder" in (e.detail or "").lower():
-            # Project manager doesn't have PM access — try other employees
-            _log("WARNING", "Project manager lacks access, trying other employees",
+            # Project manager doesn't have PM access — try whoAmI admin user first
+            _log("WARNING", "Project manager lacks access, trying admin user",
                  failed_id=manager_id)
+            tried_ids = {manager_id}
+            # Try the logged-in admin user (most likely to have PM access)
+            try:
+                whoami = await client._request("GET", "/token/session/>whoAmI")
+                admin_id = whoami.get("value", {}).get("employeeId")
+                if admin_id and admin_id not in tried_ids:
+                    tried_ids.add(admin_id)
+                    payload["projectManager"] = {"id": admin_id}
+                    result = await client.create_project(payload)
+                    return {"created_id": result.get("id"), "entity": "project"}
+            except TripletexAPIError as e2:
+                if not (e2.status_code == 422 and "prosjektleder" in (e2.detail or "").lower()):
+                    raise
+            except Exception:
+                pass
+            # Try remaining employees
             employees = await client.get_employees({"count": 20})
             for emp in employees:
-                if emp["id"] == manager_id:
-                    continue  # skip the one that already failed
+                if emp["id"] in tried_ids:
+                    continue
                 payload["projectManager"] = {"id": emp["id"]}
                 try:
                     result = await client.create_project(payload)
@@ -1860,6 +1895,11 @@ async def _exec_delete_customer(fields: dict, client: TripletexClient) -> dict:
     except TripletexAPIError as e:
         if e.status_code == 403:
             return {"success": False, "error": "Permission denied: cannot delete customer"}
+        if e.status_code == 422:
+            detail = (e.detail or "").lower()
+            if any(kw in detail for kw in ["faktura", "invoice", "ordre", "order", "tilknyttet", "relatert", "cannot"]):
+                return {"success": False, "error": f"Cannot delete customer (has related entities): {cust.get('name', cust['id'])}"}
+            return {"success": False, "error": f"Cannot delete customer: {e.detail}"}
         raise
     return {"deleted_id": cust["id"], "entity": "customer"}
 
