@@ -1685,6 +1685,9 @@ async def _exec_project_with_customer(fields: dict, client: TripletexClient) -> 
         _log("INFO", "Created customer for project", name=cust_name, id=cust.get("id"))
 
     fields["customer_id"] = cust["id"]
+    # Ensure project_name is used as the project name (not customer name)
+    if _get(fields, "project_name"):
+        fields["name"] = fields["project_name"]
     return await _exec_create_project(fields, client)
 
 
