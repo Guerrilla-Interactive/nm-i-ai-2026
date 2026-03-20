@@ -310,14 +310,15 @@ def _build_client():
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
     if _USE_NEW_SDK:
-        if gcp_project:
+        if api_key:
+            # Prefer API key — works everywhere, no Vertex AI region issues
+            return genai.Client(api_key=api_key)
+        elif gcp_project:
             return genai.Client(
                 vertexai=True,
                 project=gcp_project,
                 location=os.environ.get("GCP_REGION", "europe-north1"),
             )
-        elif api_key:
-            return genai.Client(api_key=api_key)
         else:
             # Default: try Vertex AI with Application Default Credentials (Cloud Run)
             return genai.Client(vertexai=True)
