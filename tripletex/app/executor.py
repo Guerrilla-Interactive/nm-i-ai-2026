@@ -2368,6 +2368,137 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
         raise
 
 
+async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
+    """Run payroll / create salary payment for an employee.
+
+    1. Find employee by name/email
+    2. GET /salary/type to find salary types
+    3. POST /salary/payslip to create payslip
+    4. POST /salary/transaction for base salary + bonus lines
+    """
+    employee_id = _get(fields, "employee_identifier")
+    first_name = _get(fields, "first_name")
+    last_name = _get(fields, "last_name")
+    email = _get(fields, "email")
+    base_salary = _get(fields, "base_salary")
+    bonus = _get(fields, "bonus")
+
+    if base_salary is not None:
+        base_salary = float(base_salary)
+    if bonus is not None:
+        bonus = float(bonus)
+
+    # Step 1: Find employee
+    emp = None
+    search_params = {"fields": "*"}
+    if first_name:
+        search_params["firstName"] = first_name
+    elif email:
+        search_params["email"] = email
+
+    try:
+        employees = await client.get_employees(search_params)
+        if last_name:
+            for e in employees:
+                if (e.get("lastName") or "").lower() == last_name.lower():
+                    emp = e
+                    break
+        if not emp and employees:
+            emp = employees[0]
+    except TripletexAPIError as e:
+        _log("WARNING", "Employee search failed", error=str(e))
+
+    if not emp:
+        return {"success": False, "error": f"Employee not found: {employee_id or first_name}"}
+
+    emp_id = emp.get("id")
+
+    # Step 2: Get salary types
+    salary_type_id = None
+    bonus_type_id = None
+    try:
+        salary_types = await client.get_salary_types({"fields": "*"})
+        for st in salary_types:
+            name_lower = (st.get("name") or st.get("description") or "").lower()
+            num = st.get("number")
+            # Common salary type numbers: 111=Fastlønn, 200=Bonus
+            if num == 111 or "fastlønn" in name_lower or "grunnlønn" in name_lower or "fast lønn" in name_lower or "base" in name_lower or "grund" in name_lower:
+                if not salary_type_id:
+                    salary_type_id = st.get("id")
+            if num == 200 or "bonus" in name_lower or "tillegg" in name_lower or "prime" in name_lower or "prämie" in name_lower:
+                if not bonus_type_id:
+                    bonus_type_id = st.get("id")
+        # Fallback: use first salary type
+        if not salary_type_id and salary_types:
+            salary_type_id = salary_types[0].get("id")
+        if not bonus_type_id and salary_types:
+            # Use second type or first as fallback for bonus
+            bonus_type_id = salary_types[1].get("id") if len(salary_types) > 1 else salary_type_id
+    except TripletexAPIError as e:
+        _log("WARNING", "Salary types lookup failed", error=str(e))
+
+    # Step 3: Create payslip
+    today = _today()
+    # Determine month — use current month
+    payslip_data = {
+        "employee": {"id": emp_id},
+        "date": today,
+        "year": int(today[:4]),
+        "month": int(today[5:7]),
+    }
+
+    payslip_id = None
+    try:
+        payslip = await client.create_salary_payslip(payslip_data)
+        payslip_id = payslip.get("id")
+    except TripletexAPIError as e:
+        _log("WARNING", "Payslip creation failed, trying transaction directly", error=str(e))
+
+    # Step 4: Create salary transactions
+    transactions_created = []
+
+    if base_salary and salary_type_id:
+        try:
+            txn_data = _clean({
+                "payslip": {"id": payslip_id} if payslip_id else None,
+                "employee": {"id": emp_id},
+                "salaryType": {"id": salary_type_id},
+                "date": today,
+                "amount": base_salary,
+                "count": 1,
+                "description": "Base salary",
+            })
+            txn = await client.create_salary_transaction(txn_data)
+            transactions_created.append({"type": "base_salary", "amount": base_salary, "id": txn.get("id")})
+        except TripletexAPIError as e:
+            _log("WARNING", "Base salary transaction failed", error=str(e))
+
+    if bonus and bonus_type_id:
+        try:
+            txn_data = _clean({
+                "payslip": {"id": payslip_id} if payslip_id else None,
+                "employee": {"id": emp_id},
+                "salaryType": {"id": bonus_type_id},
+                "date": today,
+                "amount": bonus,
+                "count": 1,
+                "description": "Bonus",
+            })
+            txn = await client.create_salary_transaction(txn_data)
+            transactions_created.append({"type": "bonus", "amount": bonus, "id": txn.get("id")})
+        except TripletexAPIError as e:
+            _log("WARNING", "Bonus transaction failed", error=str(e))
+
+    return {
+        "entity": "payroll",
+        "employee_id": emp_id,
+        "payslip_id": payslip_id,
+        "base_salary": base_salary,
+        "bonus": bonus,
+        "transactions": transactions_created,
+    }
+
+
 async def _exec_create_supplier(fields: dict, client: TripletexClient) -> dict:
     """Register a new supplier via POST /supplier."""
     name = _get(fields, "name") or _get(fields, "supplier_name") or "Unknown Supplier"
@@ -2707,6 +2838,7 @@ _EXECUTORS: dict[TaskType, Any] = {
     TaskType.UPDATE_DEPARTMENT: _exec_update_department,
     TaskType.CREATE_SUPPLIER_INVOICE: _exec_create_supplier_invoice,
     TaskType.CREATE_SUPPLIER: _exec_create_supplier,
+    TaskType.RUN_PAYROLL: _exec_run_payroll,
     # Tier 3
     TaskType.BANK_RECONCILIATION: _exec_bank_reconciliation,
     TaskType.ERROR_CORRECTION: _exec_error_correction,

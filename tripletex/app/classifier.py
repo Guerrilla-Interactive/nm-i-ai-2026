@@ -1620,6 +1620,32 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
         if cust:
             fields["customer_identifier"] = cust
 
+    elif task_type == TaskType.RUN_PAYROLL:
+        # Extract employee name
+        first_name, last_name = _extract_name_parts(prompt)
+        if first_name:
+            fields["first_name"] = first_name
+        if last_name:
+            fields["last_name"] = last_name
+        if first_name and last_name:
+            fields["employee_identifier"] = f"{first_name} {last_name}"
+        # Base salary: "salaire de base est de 56950" / "grunnlønn 45000" / "base salary 45000"
+        base_match = re.search(
+            r"(?:salaire\s+de\s+base|grunnlønn|grundgehalt|base\s+salary|sueldo\s+base|salário\s+base|basislønn)\s+(?:est\s+de\s+|er\s+|ist\s+|es\s+|é\s+)?(\d[\d\s.,]*)\s*(?:kr|NOK)?",
+            prompt, re.IGNORECASE,
+        )
+        if base_match:
+            fields["base_salary"] = float(base_match.group(1).replace(",", ".").replace(" ", ""))
+        elif amounts:
+            fields["base_salary"] = amounts[0]
+        # Bonus: "prime unique de 9350" / "bonus 9350" / "tillegg 9350"
+        bonus_match = re.search(
+            r"(?:prime|bonus|tillegg|Bonus|Zuschlag|Prämie|bonificación|bônus|gratification)\s+(?:unique\s+)?(?:de\s+|på\s+|von\s+|of\s+)?(\d[\d\s.,]*)\s*(?:kr|NOK)?",
+            prompt, re.IGNORECASE,
+        )
+        if bonus_match:
+            fields["bonus"] = float(bonus_match.group(1).replace(",", ".").replace(" ", ""))
+
     elif task_type == TaskType.CREATE_SUPPLIER:
         # Extract supplier name: "Lieferanten X GmbH" / "leverandør X AS" / "supplier X"
         sup_match = re.search(
