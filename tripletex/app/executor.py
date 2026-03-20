@@ -893,9 +893,8 @@ def _build_order_lines(fields: dict) -> list[dict]:
         if product_id:
             ol["product"] = {"id": int(product_id)}
 
-        desc = _get(line, "description") or _get(line, "product_name")
-        if desc:
-            ol["description"] = desc
+        desc = _get(line, "description") or _get(line, "product_name") or "Item"
+        ol["description"] = desc
 
         # Track product number for pre-creation (e.g., "Sesión de formación (6481)")
         product_number = _get(line, "number") or _get(line, "product_number")
