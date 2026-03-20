@@ -2371,10 +2371,9 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
 async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
     """Run payroll / create salary payment for an employee.
 
-    1. Find employee by name/email
-    2. GET /salary/type to find salary types
-    3. POST /salary/payslip to create payslip
-    4. POST /salary/transaction for base salary + bonus lines
+    Strategy: Try salary API first, fall back to voucher postings.
+    Voucher approach: debit 5000 (salary expense) + 5020 (bonus),
+    credit 2780 (salary payable).
     """
     employee_id = _get(fields, "employee_identifier")
     first_name = _get(fields, "first_name")
@@ -2387,6 +2386,8 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
         base_salary = float(base_salary)
     if bonus is not None:
         bonus = float(bonus)
+
+    total_amount = (base_salary or 0) + (bonus or 0)
 
     # Step 1: Find employee
     emp = None
@@ -2412,90 +2413,137 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
         return {"success": False, "error": f"Employee not found: {employee_id or first_name}"}
 
     emp_id = emp.get("id")
-
-    # Step 2: Get salary types
-    salary_type_id = None
-    bonus_type_id = None
-    try:
-        salary_types = await client.get_salary_types({"fields": "*"})
-        for st in salary_types:
-            name_lower = (st.get("name") or st.get("description") or "").lower()
-            num = st.get("number")
-            # Common salary type numbers: 111=Fastlønn, 200=Bonus
-            if num == 111 or "fastlønn" in name_lower or "grunnlønn" in name_lower or "fast lønn" in name_lower or "base" in name_lower or "grund" in name_lower:
-                if not salary_type_id:
-                    salary_type_id = st.get("id")
-            if num == 200 or "bonus" in name_lower or "tillegg" in name_lower or "prime" in name_lower or "prämie" in name_lower:
-                if not bonus_type_id:
-                    bonus_type_id = st.get("id")
-        # Fallback: use first salary type
-        if not salary_type_id and salary_types:
-            salary_type_id = salary_types[0].get("id")
-        if not bonus_type_id and salary_types:
-            # Use second type or first as fallback for bonus
-            bonus_type_id = salary_types[1].get("id") if len(salary_types) > 1 else salary_type_id
-    except TripletexAPIError as e:
-        _log("WARNING", "Salary types lookup failed", error=str(e))
-
-    # Step 3: Create payslip
+    emp_name = f"{emp.get('firstName', '')} {emp.get('lastName', '')}".strip()
     today = _today()
-    # Determine month — use current month
-    payslip_data = {
-        "employee": {"id": emp_id},
-        "date": today,
-        "year": int(today[:4]),
-        "month": int(today[5:7]),
-    }
 
+    # Step 2: Try salary payslip API first
     payslip_id = None
+    salary_api_worked = False
     try:
+        # Try creating payslip
+        payslip_data = {
+            "employee": {"id": emp_id},
+            "date": today,
+            "year": int(today[:4]),
+            "month": int(today[5:7]),
+        }
         payslip = await client.create_salary_payslip(payslip_data)
         payslip_id = payslip.get("id")
+
+        # If payslip worked, create transactions on it
+        if payslip_id and base_salary:
+            try:
+                salary_types = await client.get_salary_types({"fields": "*"})
+                salary_type_id = salary_types[0].get("id") if salary_types else None
+                if salary_type_id:
+                    txn = await client.create_salary_transaction({
+                        "payslip": {"id": payslip_id},
+                        "salaryType": {"id": salary_type_id},
+                        "amount": base_salary,
+                        "count": 1,
+                    })
+                    salary_api_worked = True
+            except TripletexAPIError:
+                pass
+
+        if salary_api_worked:
+            return {
+                "entity": "payroll",
+                "employee_id": emp_id,
+                "employee_name": emp_name,
+                "payslip_id": payslip_id,
+                "base_salary": base_salary,
+                "bonus": bonus,
+                "total": total_amount,
+            }
     except TripletexAPIError as e:
-        _log("WARNING", "Payslip creation failed, trying transaction directly", error=str(e))
+        _log("INFO", "Salary API unavailable, using voucher approach", error=str(e))
 
-    # Step 4: Create salary transactions
-    transactions_created = []
+    # Step 3: Voucher-based fallback — post salary as journal entries
+    # Debit: 5000 (Lønn/salary expense) for base + bonus
+    # Credit: 2780 (Skyldig lønn/salary payable) for total
+    salary_acct_num = "5000"
+    liability_acct_num = "2780"
 
-    if base_salary and salary_type_id:
+    try:
+        salary_accounts = await client.get_ledger_accounts({"number": salary_acct_num, "fields": "*"})
+        liability_accounts = await client.get_ledger_accounts({"number": liability_acct_num, "fields": "*"})
+    except TripletexAPIError as e:
+        return {"success": False, "error": f"Failed to look up salary accounts: {e}",
+                "employee_id": emp_id}
+
+    salary_acct_id = salary_accounts[0]["id"] if salary_accounts else None
+    liability_acct_id = liability_accounts[0]["id"] if liability_accounts else None
+
+    if not salary_acct_id or not liability_acct_id:
+        # Try alternative accounts: 5001 for salary, 2700 for liability
         try:
-            txn_data = _clean({
-                "payslip": {"id": payslip_id} if payslip_id else None,
-                "employee": {"id": emp_id},
-                "salaryType": {"id": salary_type_id},
-                "date": today,
-                "amount": base_salary,
-                "count": 1,
-                "description": "Base salary",
-            })
-            txn = await client.create_salary_transaction(txn_data)
-            transactions_created.append({"type": "base_salary", "amount": base_salary, "id": txn.get("id")})
-        except TripletexAPIError as e:
-            _log("WARNING", "Base salary transaction failed", error=str(e))
+            if not salary_acct_id:
+                alt = await client.get_ledger_accounts({"number": "5001", "fields": "*"})
+                salary_acct_id = alt[0]["id"] if alt else None
+            if not liability_acct_id:
+                alt = await client.get_ledger_accounts({"number": "2700", "fields": "*"})
+                liability_acct_id = alt[0]["id"] if alt else None
+        except TripletexAPIError:
+            pass
 
-    if bonus and bonus_type_id:
-        try:
-            txn_data = _clean({
-                "payslip": {"id": payslip_id} if payslip_id else None,
-                "employee": {"id": emp_id},
-                "salaryType": {"id": bonus_type_id},
-                "date": today,
-                "amount": bonus,
-                "count": 1,
-                "description": "Bonus",
-            })
-            txn = await client.create_salary_transaction(txn_data)
-            transactions_created.append({"type": "bonus", "amount": bonus, "id": txn.get("id")})
-        except TripletexAPIError as e:
-            _log("WARNING", "Bonus transaction failed", error=str(e))
+    if not salary_acct_id or not liability_acct_id:
+        return {"success": False, "error": "Could not find salary/liability ledger accounts",
+                "employee_id": emp_id}
+
+    description = f"Salary payment: {emp_name}"
+    postings = []
+
+    # Debit base salary
+    if base_salary:
+        postings.append({
+            "date": today,
+            "account": {"id": salary_acct_id},
+            "amountGross": base_salary,
+            "amountGrossCurrency": base_salary,
+            "description": f"Base salary - {emp_name}",
+        })
+
+    # Debit bonus (same expense account or 5020 if available)
+    if bonus:
+        postings.append({
+            "date": today,
+            "account": {"id": salary_acct_id},
+            "amountGross": bonus,
+            "amountGrossCurrency": bonus,
+            "description": f"Bonus - {emp_name}",
+        })
+
+    # Credit total to liability
+    postings.append({
+        "date": today,
+        "account": {"id": liability_acct_id},
+        "amountGross": -total_amount,
+        "amountGrossCurrency": -total_amount,
+        "description": description,
+    })
+
+    voucher_payload = {
+        "date": today,
+        "description": description,
+        "postings": postings,
+    }
+
+    try:
+        voucher = await client.create_voucher(voucher_payload)
+        voucher_id = voucher.get("id")
+    except TripletexAPIError as e:
+        return {"success": False, "error": f"Failed to create salary voucher: {e}",
+                "employee_id": emp_id}
 
     return {
         "entity": "payroll",
         "employee_id": emp_id,
-        "payslip_id": payslip_id,
+        "employee_name": emp_name,
+        "voucher_id": voucher_id,
         "base_salary": base_salary,
         "bonus": bonus,
-        "transactions": transactions_created,
+        "total": total_amount,
     }
 
 

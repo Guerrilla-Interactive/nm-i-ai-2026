@@ -231,6 +231,9 @@ _KEYWORD_MAP = [
                                      r"\bbank\w*\b.*\bavstem\w*\b",
                                      r"\bavstem\w*\b.*\bbank\w*\b",
                                      r"\b(reconcil|abgleich|rapprochement)\w*\b"]),
+    # --- Payment returned / bounced → credit note (before error correction) ---
+    (TaskType.CREATE_CREDIT_NOTE, [r"\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b.*\b(pagamento|payment|betaling|zahlung|paiement|pago)\b",
+                                    r"\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b.*\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b"]),
     (TaskType.ERROR_CORRECTION, [r"\b(korriger|correct|fiks|fix)\w*\b.*\b(feil|error|bilag|voucher|postering)\b",
                                    r"\b(feil|error)\w*\b.*\b(korriger|correct|rett)\b",
                                    r"\b(reverser|reverse|tilbakefør)\w*\b.*\b(bilag|voucher|postering)\b"]),

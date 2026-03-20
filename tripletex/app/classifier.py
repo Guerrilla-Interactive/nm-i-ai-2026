@@ -141,6 +141,8 @@ when the prompt implies the customer already exists in the system.
 - "inngående faktura", "mottatt faktura", "leverandørfaktura", "Eingangsrechnung", "facture fournisseur" → create_supplier_invoice
 - CRITICAL: "Registrieren Sie den Lieferanten" / "registrer leverandør" / "register supplier" → create_supplier (NOT create_customer)
 - CRITICAL: "Exécutez la paie" / "kjør lønn" / "run payroll" / "Gehaltsabrechnung" / "ejecutar nómina" → run_payroll
+- CRITICAL: "payment returned/bounced/devolvido/rückerstattet" by bank → create_credit_note (NOT error_correction). \
+The goal is to reverse the payment and reopen the invoice.
 - paie/salaire/lønn/Gehalt/nómina + employee name + amount → run_payroll (salary payment)
 - Lieferant/leverandør/supplier WITHOUT faktura/invoice keywords → create_supplier (register the supplier entity)
 - When a prompt mentions both creating a project AND linking it to a customer → project_with_customer
