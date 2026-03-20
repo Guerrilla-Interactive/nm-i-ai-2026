@@ -53,6 +53,8 @@ class TripletexClient:
         # Efficiency tracking
         self.api_call_count = 0
         self.error_count = 0
+        # Cached session owner employee ID (avoid repeated whoAmI calls)
+        self._session_employee_id: int | None = None
 
     async def close(self):
         await self._client.aclose()
@@ -125,6 +127,26 @@ class TripletexClient:
     async def delete(self, path: str) -> dict:
         """Generic DELETE."""
         return await self._request("DELETE", path)
+
+    # ------------------------------------------------------------------
+    # Session / Identity
+    # ------------------------------------------------------------------
+
+    async def get_session_employee_id(self) -> int | None:
+        """GET /token/session/>whoAmI — returns the logged-in employee ID.
+
+        This employee is the account owner and always has project manager access.
+        Cached after first call to save API calls.
+        """
+        if self._session_employee_id is not None:
+            return self._session_employee_id
+        try:
+            resp = await self._request("GET", "/token/session/%3EwhoAmI")
+            val = self._extract_value(resp)
+            self._session_employee_id = val.get("employeeId")
+            return self._session_employee_id
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Employee

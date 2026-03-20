@@ -173,7 +173,11 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
     },
     TaskType.CREATE_CREDIT_NOTE: {
         "required": ["invoice_identifier"],
-        "optional": ["comment", "credit_note_date"],
+        "optional": [
+            "comment", "credit_note_date",
+            "customer_name", "customer_identifier", "organization_number",
+            "description", "amount", "lines",
+        ],
     },
     TaskType.INVOICE_WITH_PAYMENT: {
         "required": ["customer_name", "lines", "paid_amount"],

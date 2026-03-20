@@ -45,6 +45,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-001", "gemini-1.5-flash"]
 TEMPERATURE = 0.0
 MAX_RETRIES = 3
 
@@ -232,6 +233,11 @@ Output:
 Input: "Registrer innbetaling på faktura 10042 med beløp 15000 kr, dato 15.03.2026"
 Output:
 {{"task_type": "register_payment", "confidence": 0.97, "fields": {{"invoice_identifier": "10042", "amount": 15000.0, "payment_date": "2026-03-15"}}}}
+
+### Example 11b — Register payment without currency suffix (Bokmål)
+Input: "Registrer betaling på faktura 12345 beløp 5000"
+Output:
+{{"task_type": "register_payment", "confidence": 0.96, "fields": {{"invoice_identifier": "12345", "amount": 5000.0}}}}
 
 ### Example 12 — Create travel expense (Bokmål)
 Input: "Opprett reiseregning for ansatt Per Hansen, dagsreise fra Bergen til Oslo 19. mars 2026, formål: kundemøte"
@@ -611,28 +617,39 @@ async def _classify_with_gemini(
 
 
 async def _call_gemini(client: Any, user_message: str | list) -> str:
-    """Call Gemini and return the raw response text."""
+    """Call Gemini and return the raw response text. Falls back to alternate models on 404."""
     loop = asyncio.get_running_loop()
+    models_to_try = [MODEL_NAME] + [m for m in FALLBACK_MODELS if m != MODEL_NAME]
 
     if _USE_NEW_SDK:
 
         def _sync():
-            config_kwargs = dict(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=TEMPERATURE,
-                response_mime_type="application/json",
-            )
-            # gemini-2.5-pro requires thinking mode — use generous budget for best accuracy
-            if "2.5-pro" in MODEL_NAME:
-                config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
-                    thinking_budget=8192,
+            last_err = None
+            for model_name in models_to_try:
+                config_kwargs = dict(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=TEMPERATURE,
+                    response_mime_type="application/json",
                 )
-            resp = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=user_message,
-                config=genai_types.GenerateContentConfig(**config_kwargs),
-            )
-            return resp.text
+                # gemini-2.5-pro requires thinking mode
+                if "2.5-pro" in model_name:
+                    config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                        thinking_budget=8192,
+                    )
+                try:
+                    resp = client.models.generate_content(
+                        model=model_name,
+                        contents=user_message,
+                        config=genai_types.GenerateContentConfig(**config_kwargs),
+                    )
+                    return resp.text
+                except Exception as e:
+                    last_err = e
+                    if "404" in str(e) or "not found" in str(e).lower():
+                        logger.warning("Model %s not found, trying next fallback", model_name)
+                        continue
+                    raise  # Non-404 errors should not trigger fallback
+            raise last_err  # type: ignore[misc]
 
     else:
         # Older google.generativeai SDK
@@ -1023,6 +1040,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "créer facture", "créer une facture",
             "criar fatura", "criar uma fatura",
             "fakturer",
+            "create order", "create an order", "new order", "place order",
+            "opprett ordre", "ny ordre", "bestilling",
+            "crear pedido", "créer commande", "bestellung erstellen",
         ],
         "anti_keywords": ["betalt", "paid", "innbetaling", "payment", "kreditnota", "credit note"],
     },
@@ -1221,7 +1241,7 @@ _MONTH_NB = {
     "juli": 7, "august": 8, "september": 9, "oktober": 10, "november": 11, "desember": 12,
 }
 _RE_AMOUNT = re.compile(r"(\d[\d\s]*(?:[.,]\d+)?)\s*(?:kr|nok|eur|usd|NOK|EUR|USD)", re.IGNORECASE)
-_RE_AMOUNT_PRICE = re.compile(r"(?:pris|price|prix|precio|preis|preço)\s+(\d[\d\s]*(?:[.,]\d+)?)", re.IGNORECASE)
+_RE_AMOUNT_PRICE = re.compile(r"(?:pris|price|prix|precio|preis|preço|beløp|amount|betrag|montant|importe|monto|betaling|innbetaling|pago|pagamento|paiement|zahlung)\s+(?:på\s+)?(\d[\d\s]*(?:[.,]\d+)?)", re.IGNORECASE)
 _RE_AMOUNT_UNIT = re.compile(r"(?:à|@|a)\s*(\d[\d\s]*(?:[.,]\d+)?)\s*(?:kr|nok)?", re.IGNORECASE)
 _RE_QUANTITY = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:stk|enheter|timer|units?|hours?|pcs|unidades?|heures?|Stunden?|horas?)", re.IGNORECASE)
 
@@ -1626,6 +1646,14 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
             fields["invoice_number"] = inv_match.group(1)
         if amounts and task_type == TaskType.REGISTER_PAYMENT:
             fields["amount"] = amounts[0]
+        elif task_type == TaskType.REGISTER_PAYMENT and not amounts:
+            # Fallback: grab a standalone number after the invoice reference
+            after_inv = re.search(r"faktura\s*(?:nr\.?\s*)?#?\s*\d+\s+(?:\w+\s+)?(\d[\d\s]*(?:[.,]\d+)?)", prompt, re.IGNORECASE)
+            if after_inv:
+                try:
+                    fields["amount"] = _parse_amount(after_inv.group(1))
+                except ValueError:
+                    pass
         if dates:
             fields["payment_date"] = dates[0]
 
@@ -1845,7 +1873,7 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         # Contact
         (["kontaktperson", "contact person", "kontakt"], TaskType.CREATE_CONTACT),
         # Create patterns — broad matches last
-        (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
+        (["faktura", "invoice", "factura", "rechnung", "facture", "fatura", "order", "ordre", "bestilling", "pedido", "commande", "bestellung"], TaskType.CREATE_INVOICE),
         (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé"], TaskType.CREATE_EMPLOYEE),
         (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
         (["prosjekt", "project", "proyecto", "projekt", "projet"], TaskType.CREATE_PROJECT),
@@ -1931,7 +1959,7 @@ def _classify_with_keywords(
             (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "salary"], TaskType.RUN_PAYROLL),
             (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
-            (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
+            (["faktura", "invoice", "factura", "rechnung", "facture", "fatura", "order", "ordre", "bestilling", "pedido", "commande", "bestellung"], TaskType.CREATE_INVOICE),
             (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário", "empregado"], TaskType.CREATE_EMPLOYEE),
             (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
             (["avdeling", "department", "abteilung", "département", "departamento"], TaskType.CREATE_DEPARTMENT),
