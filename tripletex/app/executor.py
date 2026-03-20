@@ -81,6 +81,49 @@ def _clean(payload: dict) -> dict:
     return {k: v for k, v in payload.items() if v is not None}
 
 
+async def _get_voucher_type_id(client: TripletexClient, preferred_keywords: list[str] | None = None) -> int | None:
+    """Get a voucher type ID, with per-request caching.
+
+    Looks up available voucher types and returns the ID of one matching
+    the preferred keywords. Falls back to the first non-system type.
+
+    Args:
+        client: TripletexClient instance (cache is keyed by client instance)
+        preferred_keywords: List of keywords to match against voucher type name
+            e.g. ["leverandør", "supplier", "incoming"] for supplier invoices
+    """
+    # Per-request cache
+    cache = getattr(client, '_voucher_type_cache', None)
+    if cache is None:
+        try:
+            voucher_types = await client.get_voucher_types()
+            client._voucher_type_cache = voucher_types or []
+        except Exception as e:
+            _log("WARNING", "Failed to fetch voucher types", error=str(e))
+            client._voucher_type_cache = []
+        cache = client._voucher_type_cache
+
+    if not cache:
+        return None
+
+    # Try to match preferred keywords
+    if preferred_keywords:
+        for vt in cache:
+            vt_name = (vt.get("name") or vt.get("displayName") or "").lower()
+            for kw in preferred_keywords:
+                if kw.lower() in vt_name:
+                    return vt["id"]
+
+    # Fallback: first non-system-generated type
+    for vt in cache:
+        name = (vt.get("name") or "").lower()
+        if "system" not in name and "auto" not in name:
+            return vt["id"]
+
+    # Last resort: first type
+    return cache[0]["id"] if cache else None
+
+
 # ---------------------------------------------------------------------------
 # Employee search — ONLY firstName and email work as query params!
 # lastName must be filtered client-side.
@@ -1416,24 +1459,36 @@ async def _exec_create_travel_expense(fields: dict, client: TripletexClient) -> 
         })
         await client.create_travel_expense_cost(cost_payload)
 
+    # Per diem location fallback: item-level → fields-level → "Norge"
+    def _per_diem_location(item: dict | None = None) -> str:
+        if item:
+            loc = item.get("location") or item.get("destination")
+            if loc:
+                return loc
+        return (_get(fields, "destination")
+                or _get(fields, "departure_from")
+                or _get(fields, "title")
+                or "Norge")
+
     # Add per diem compensations if specified
-    raw_per_diem = _get(fields, "per_diem_compensations") or []
+    raw_per_diem = _get(fields, "per_diem_compensations") or _get(fields, "per_diem_items") or _get(fields, "per_diems") or []
 
     if raw_per_diem:
         for pd_item in raw_per_diem:
             if isinstance(pd_item, str):
                 continue
             count = pd_item.get("count") or pd_item.get("days") or pd_item.get("nights") or 1
-            location = pd_item.get("location") or pd_item.get("destination") or _get(fields, "destination") or ""
+            location = _per_diem_location(pd_item)
             rate_amount = pd_item.get("rate") or pd_item.get("daily_rate") or pd_item.get("amount")
 
             # Don't send rateCategory — let Tripletex assign the default based on dates
-            overnight = "HOTEL" if int(count) > 1 else "NONE"
+            overnight = pd_item.get("overnight_accommodation") or ("HOTEL" if int(count) > 1 else "NONE")
             pd_payload = _clean({
                 "travelExpense": {"id": expense_id},
                 "count": int(count),
                 "location": location,
                 "overnightAccommodation": overnight,
+                "isAbroad": pd_item.get("is_abroad") or _get(fields, "is_foreign_travel"),
             })
             if rate_amount:
                 pd_payload["rate"] = float(rate_amount)
@@ -1459,7 +1514,7 @@ async def _exec_create_travel_expense(fields: dict, client: TripletexClient) -> 
                     pd_payload = _clean({
                         "travelExpense": {"id": expense_id},
                         "count": days,
-                        "location": _get(fields, "destination") or "",
+                        "location": _per_diem_location(),
                         "overnightAccommodation": overnight,
                     })
                     try:
@@ -1469,6 +1524,18 @@ async def _exec_create_travel_expense(fields: dict, client: TripletexClient) -> 
                         _log("WARNING", "Auto per diem failed", error=str(e))
             except (ValueError, TypeError):
                 pass
+        elif _get(fields, "destination") or _get(fields, "departure_from"):
+            # Auto-create per diem if destination provided but no dates
+            pd_payload = _clean({
+                "travelExpense": {"id": expense_id},
+                "date": _get(fields, "departure_date") or _get(fields, "date"),
+                "location": _per_diem_location(),
+                "isAbroad": _get(fields, "is_foreign_travel"),
+            })
+            try:
+                await client.create_per_diem_compensation(pd_payload)
+            except (TripletexAPIError, AttributeError) as e:
+                _log("WARNING", "Failed to auto-create per diem", error=str(e))
 
     # Add mileage allowances if specified
     raw_mileage = _get(fields, "mileage_allowances") or []
@@ -1991,6 +2058,7 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
              status=e.status_code, error=str(e))
 
     # Step 4: If transactions provided, create journal vouchers
+    voucher_type_id = await _get_voucher_type_id(client, ["bank", "innbetaling", "reconciliation"])
     voucher_ids = []
     if transactions:
         for txn in transactions:
@@ -2032,6 +2100,8 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
                     "description": f"Bank reconciliation: {txn_description}",
                     "postings": postings,
                 }
+                if voucher_type_id:
+                    voucher_data["voucherType"] = {"id": voucher_type_id}
                 voucher = await client.create_voucher(voucher_data)
                 voucher_ids.append(voucher.get("id"))
             except TripletexAPIError as e:
@@ -2096,6 +2166,7 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
 
     API calls: 2-6 depending on path.
     """
+    voucher_type_id = await _get_voucher_type_id(client, ["korreksjon", "correction", "memorial"])
     voucher_identifier = _get(fields, "voucher_identifier") or ""
     correction_desc = _get(fields, "correction_description") or ""
     combined_text = f"{voucher_identifier} {correction_desc}".lower()
@@ -2298,6 +2369,8 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                                                or f"Korreksjon av bilag {voucher_identifier}",
                                 "postings": reversed_postings,
                             })
+                            if voucher_type_id:
+                                correction_voucher["voucherType"] = {"id": voucher_type_id}
                             try:
                                 new_voucher = await client.create_voucher(correction_voucher)
                                 return {
@@ -2342,6 +2415,8 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
             "description": correction_desc or f"Korrigering etter bilag {voucher_identifier}",
             "postings": formatted_postings,
         })
+        if voucher_type_id:
+            correction_payload["voucherType"] = {"id": voucher_type_id}
         try:
             new_v = await client.create_voucher(correction_payload)
             correction_voucher_id = new_v.get("id")
@@ -2436,19 +2511,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     # Norwegian accounting year-end: transfer P&L to equity.
     # Revenue (3xxx) + expenses (4xxx-7xxx) net result → equity (2050).
     try:
-        # Get voucher types to find a suitable one
-        voucher_types = await client.get_voucher_types()
-        voucher_type_id = None
-        for vt in voucher_types:
-            vt_name = (vt.get("name") or "").lower()
-            if any(kw in vt_name for kw in [
-                "årsavslutning", "year-end", "closing", "avslutning",
-                "årsoppgjør", "memorial", "memorialnota",
-            ]):
-                voucher_type_id = vt["id"]
-                break
-        if not voucher_type_id and voucher_types:
-            voucher_type_id = voucher_types[0]["id"]
+        voucher_type_id = await _get_voucher_type_id(client, ["årsavslutning", "year-end", "closing", "memorial"])
 
         if not voucher_type_id:
             return {"success": False, "error": "No voucher types available for closing entries"}
