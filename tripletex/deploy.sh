@@ -20,7 +20,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --min-instances 1 \
   --max-instances 5 \
   --concurrency 1 \
-  --set-env-vars "GEMINI_MODEL=gemini-2.5-flash"
+  --set-env-vars "GEMINI_MODEL=gemini-2.5-pro,GOOGLE_API_KEY=REDACTED_GOOGLE_API_KEY"
 
 URL=$(gcloud run services describe "$SERVICE_NAME" \
   --region "$REGION" \

@@ -17,6 +17,7 @@ import onnxruntime as ort
 
 CONF_THRESH = 0.01
 NMS_IOU_THRESH = 0.5
+MAX_DET = 300
 INPUT_SIZE = 640
 PAD_COLOR = (114, 114, 114)
 
@@ -113,6 +114,11 @@ def postprocess(
     # Flatten indices (cv2 returns nested array in some versions)
     if isinstance(indices, np.ndarray):
         indices = indices.flatten()
+
+    # Limit to top MAX_DET detections by confidence
+    if len(indices) > MAX_DET:
+        top_idx = np.argsort(max_scores[indices])[::-1][:MAX_DET]
+        indices = indices[top_idx]
 
     detections = []
     for idx in indices:

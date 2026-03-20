@@ -18,8 +18,15 @@ class TaskType(str, Enum):
     CREATE_CUSTOMER = "create_customer"
     UPDATE_CUSTOMER = "update_customer"
     CREATE_PRODUCT = "create_product"
+    UPDATE_PRODUCT = "update_product"
+    DELETE_PRODUCT = "delete_product"
+    CREATE_SUPPLIER = "create_supplier"
+    UPDATE_SUPPLIER = "update_supplier"
+    DELETE_SUPPLIER = "delete_supplier"
+    FIND_SUPPLIER = "find_supplier"
     CREATE_INVOICE = "create_invoice"
     CREATE_DEPARTMENT = "create_department"
+    DELETE_DEPARTMENT = "delete_department"
     CREATE_PROJECT = "create_project"
 
     # Tier 2 — Multi-step workflows (×2 multiplier)
@@ -29,9 +36,11 @@ class TaskType(str, Enum):
     INVOICE_WITH_PAYMENT = "invoice_with_payment"
     CREATE_TRAVEL_EXPENSE = "create_travel_expense"
     DELETE_TRAVEL_EXPENSE = "delete_travel_expense"
+    UPDATE_TRAVEL_EXPENSE = "update_travel_expense"
     PROJECT_WITH_CUSTOMER = "project_with_customer"
     PROJECT_BILLING = "project_billing"
     CREATE_CONTACT = "create_contact"
+    DELETE_CONTACT = "delete_contact"
     FIND_CUSTOMER = "find_customer"
     UPDATE_PROJECT = "update_project"
     DELETE_PROJECT = "delete_project"
@@ -39,17 +48,16 @@ class TaskType(str, Enum):
     DELETE_CUSTOMER = "delete_customer"
     UPDATE_CONTACT = "update_contact"
     UPDATE_DEPARTMENT = "update_department"
-    CREATE_SUPPLIER_INVOICE = "create_supplier_invoice"
-    CREATE_SUPPLIER = "create_supplier"
-    RUN_PAYROLL = "run_payroll"
-    REVERSE_PAYMENT = "reverse_payment"
 
     # Tier 3 — Complex scenarios (×3 multiplier)
     BANK_RECONCILIATION = "bank_reconciliation"
     ERROR_CORRECTION = "error_correction"
     YEAR_END_CLOSING = "year_end_closing"
     ENABLE_MODULE = "enable_module"
-    CREATE_DIMENSION_VOUCHER = "create_dimension_voucher"
+    CREATE_DIMENSION_AND_VOUCHER = "create_dimension_and_voucher"
+    RUN_PAYROLL = "run_payroll"
+    REGISTER_SUPPLIER_INVOICE = "register_supplier_invoice"
+    REVERSE_PAYMENT = "reverse_payment"
 
     # Fallback
     UNKNOWN = "unknown"
@@ -122,6 +130,36 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
             "ean", "weight", "weight_unit", "department_name",
         ],
     },
+    TaskType.CREATE_SUPPLIER: {
+        "required": ["name"],
+        "optional": [
+            "email", "phone", "organization_number", "invoice_email",
+            "address_line1", "postal_code", "city", "country",
+            "supplier_number", "bank_account_number", "description",
+            "is_private_individual", "category_1", "category_2", "category_3",
+        ],
+    },
+    TaskType.UPDATE_SUPPLIER: {
+        "required": ["supplier_identifier"],  # name, number, or org number
+        "optional": [
+            "name", "email", "phone", "organization_number",
+            "invoice_email", "address_line1", "postal_code", "city",
+            "bank_account_number", "description",
+        ],
+    },
+    TaskType.DELETE_SUPPLIER: {"required": ["supplier_identifier"], "optional": []},
+    TaskType.FIND_SUPPLIER: {"required": ["search_query"], "optional": ["search_field"]},
+    TaskType.UPDATE_PRODUCT: {
+        "required": ["product_identifier"],
+        "optional": ["new_name", "new_price", "new_description", "new_vat_percentage", "name", "price_excluding_vat", "description"],
+    },
+    TaskType.DELETE_PRODUCT: {"required": ["product_identifier"], "optional": []},
+    TaskType.DELETE_DEPARTMENT: {"required": ["department_identifier"], "optional": []},
+    TaskType.DELETE_CONTACT: {"required": ["contact_identifier"], "optional": ["customer_identifier"]},
+    TaskType.UPDATE_TRAVEL_EXPENSE: {
+        "required": ["travel_expense_identifier"],
+        "optional": ["new_title", "new_destination", "new_departure_date", "new_return_date", "title", "employee_identifier"],
+    },
     TaskType.CREATE_INVOICE: {
         "required": ["customer_name", "lines"],
         "optional": [
@@ -173,11 +211,7 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
     },
     TaskType.CREATE_CREDIT_NOTE: {
         "required": ["invoice_identifier"],
-        "optional": [
-            "comment", "credit_note_date",
-            "customer_name", "customer_identifier", "organization_number",
-            "description", "amount", "lines",
-        ],
+        "optional": ["comment", "credit_note_date"],
     },
     TaskType.INVOICE_WITH_PAYMENT: {
         "required": ["customer_name", "lines", "paid_amount"],
@@ -273,37 +307,6 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
             "new_name", "new_department_number", "manager_name",
         ],
     },
-    TaskType.CREATE_SUPPLIER_INVOICE: {
-        "required": ["supplier_name"],
-        "optional": [
-            "organization_number", "invoice_number", "amount_including_vat",
-            "amount_excluding_vat", "vat_amount", "vat_percentage",
-            "invoice_date", "due_date", "description", "account_number",
-        ],
-    },
-    TaskType.CREATE_SUPPLIER: {
-        "required": ["name"],
-        "optional": [
-            "organization_number", "email", "phone",
-            "address_line1", "postal_code", "city",
-            "bank_account_number", "supplier_number",
-        ],
-    },
-    TaskType.RUN_PAYROLL: {
-        "required": ["employee_identifier"],
-        "optional": [
-            "base_salary", "bonus", "month", "year",
-            "first_name", "last_name", "email",
-            "deductions", "description",
-        ],
-    },
-    TaskType.REVERSE_PAYMENT: {
-        "required": ["customer_name"],
-        "optional": [
-            "organization_number", "invoice_number", "invoice_identifier",
-            "amount", "amount_excluding_vat", "reason",
-        ],
-    },
 
     # ── Tier 3 ─────────────────────────────────────────────────────────────
     TaskType.BANK_RECONCILIATION: {
@@ -325,11 +328,38 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
         "required": ["module_name"],
         "optional": [],
     },
-    TaskType.CREATE_DIMENSION_VOUCHER: {
+    TaskType.CREATE_DIMENSION_AND_VOUCHER: {
         "required": ["dimension_name"],
         "optional": [
-            "dimension_values", "account_number", "contra_account_number",
-            "amount", "linked_dimension_value", "description", "voucher_date",
+            "dimension_values",  # list of value names, e.g. ["Innkjøp", "Logistikk"]
+            "voucher_description", "voucher_date",
+            "postings",  # list of {account_number, amount, description, dimension_value}
+        ],
+    },
+    TaskType.REGISTER_SUPPLIER_INVOICE: {
+        "required": ["supplier_identifier"],
+        "optional": [
+            "invoice_number", "invoice_date", "due_date",
+            "amount_incl_vat", "amount_excl_vat", "vat_percentage",
+            "description", "account_number", "currency",
+            "supplier_name", "organization_number",
+        ],
+    },
+    TaskType.RUN_PAYROLL: {
+        "required": ["employee_identifier"],
+        "optional": [
+            "base_salary", "bonus", "overtime_amount", "overtime_hours",
+            "month", "year", "date",
+            "first_name", "last_name", "email", "employee_email",
+            "deductions",  # list of {description, amount}
+            "additions",  # list of {description, amount}
+        ],
+    },
+    TaskType.REVERSE_PAYMENT: {
+        "required": ["customer_name"],
+        "optional": [
+            "organization_number", "invoice_number", "invoice_identifier",
+            "amount", "amount_excluding_vat", "reason",
         ],
     },
 
@@ -353,8 +383,15 @@ TASK_TYPE_DESCRIPTIONS: dict[TaskType, str] = {
     TaskType.CREATE_CUSTOMER: "Create a new customer",
     TaskType.UPDATE_CUSTOMER: "Update an existing customer's details",
     TaskType.CREATE_PRODUCT: "Create a new product or service",
+    TaskType.UPDATE_PRODUCT: "Update an existing product's details (name, price, VAT, etc.)",
+    TaskType.DELETE_PRODUCT: "Delete/remove an existing product",
+    TaskType.CREATE_SUPPLIER: "Create/register a new supplier (leverandør/fournisseur/proveedor/Lieferant)",
+    TaskType.UPDATE_SUPPLIER: "Update an existing supplier's details",
+    TaskType.DELETE_SUPPLIER: "Delete/remove an existing supplier (leverandør/fournisseur)",
+    TaskType.FIND_SUPPLIER: "Search for / find a supplier by name, org number, or other criteria",
     TaskType.CREATE_INVOICE: "Create an invoice for a customer (may include creating a new customer inline)",
     TaskType.CREATE_DEPARTMENT: "Create a new department",
+    TaskType.DELETE_DEPARTMENT: "Delete/remove an existing department",
     TaskType.CREATE_PROJECT: "Create a new project",
     TaskType.INVOICE_EXISTING_CUSTOMER: "Create an invoice for an already-existing customer (look up by name/number)",
     TaskType.REGISTER_PAYMENT: "Register a payment on an existing invoice",
@@ -362,24 +399,25 @@ TASK_TYPE_DESCRIPTIONS: dict[TaskType, str] = {
     TaskType.INVOICE_WITH_PAYMENT: "Create an invoice AND register payment for it in one go",
     TaskType.CREATE_TRAVEL_EXPENSE: "Create a travel expense / reiseregning",
     TaskType.DELETE_TRAVEL_EXPENSE: "Delete an existing travel expense",
+    TaskType.UPDATE_TRAVEL_EXPENSE: "Update an existing travel expense's details",
     TaskType.PROJECT_WITH_CUSTOMER: "Create a project linked to an existing customer",
     TaskType.PROJECT_BILLING: "Invoice a project (create invoice from project work)",
     TaskType.CREATE_CONTACT: "Create a contact person for an existing customer",
+    TaskType.DELETE_CONTACT: "Delete/remove an existing contact person",
     TaskType.FIND_CUSTOMER: "Search for / find a customer by name, org number, or other criteria",
-    TaskType.UPDATE_PROJECT: "Update an existing project's details (name, dates, status, etc.)",
+    TaskType.UPDATE_PROJECT: "Update an existing project's details (name, dates, status, fixed price, etc.)",
     TaskType.DELETE_PROJECT: "Delete/remove an existing project",
     TaskType.LOG_HOURS: "Log/register hours or time entries on a project activity (timesheet entry)",
     TaskType.DELETE_CUSTOMER: "Delete/remove an existing customer",
     TaskType.UPDATE_CONTACT: "Update an existing contact person's details (name, email, phone)",
     TaskType.UPDATE_DEPARTMENT: "Update an existing department's details (name, number, manager)",
-    TaskType.CREATE_SUPPLIER_INVOICE: "Register an incoming supplier invoice (leverandørfaktura / inngående faktura)",
-    TaskType.CREATE_SUPPLIER: "Register/create a new supplier (leverandør / Lieferant / fournisseur)",
-    TaskType.RUN_PAYROLL: "Run payroll / create salary payment for an employee (lønn / paie / Gehalt / nómina)",
-    TaskType.REVERSE_PAYMENT: "Reverse a payment that was returned/bounced by the bank, reopening the invoice as outstanding",
     TaskType.BANK_RECONCILIATION: "Reconcile bank transactions (often from a CSV file)",
     TaskType.ERROR_CORRECTION: "Correct an error in the ledger (reverse or adjust a voucher)",
     TaskType.YEAR_END_CLOSING: "Perform year-end closing procedures",
     TaskType.ENABLE_MODULE: "Enable a company module or feature in Tripletex",
-    TaskType.CREATE_DIMENSION_VOUCHER: "Create a custom accounting dimension with values, and optionally post a voucher linked to a dimension value",
+    TaskType.CREATE_DIMENSION_AND_VOUCHER: "Create a free accounting dimension (regnskapsdimensjon) with values and optionally post a voucher/journal entry using those dimensions",
+    TaskType.REGISTER_SUPPLIER_INVOICE: "Register/book an incoming supplier invoice (leverandørfaktura/facture fournisseur/Eingangsrechnung) with VAT and account posting",
+    TaskType.RUN_PAYROLL: "Execute/run payroll for an employee — create a salary transaction with base salary, bonuses, and deductions (lønn/paie/nómina/Gehalt)",
+    TaskType.REVERSE_PAYMENT: "Reverse a payment that was returned/bounced by the bank, reopening the invoice as outstanding",
     TaskType.UNKNOWN: "Could not determine the task type — use fallback logic",
 }
