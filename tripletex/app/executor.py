@@ -27,6 +27,7 @@ Key API facts from tested sandbox (MUST handle):
 
 import json
 import logging
+import re
 from datetime import date
 from typing import Any
 
@@ -79,6 +80,44 @@ def _build_address(fields: dict, prefix: str = "") -> dict | None:
 
 def _clean(payload: dict) -> dict:
     return {k: v for k, v in payload.items() if v is not None}
+
+
+def _clean_org_number(org_nr: str | None) -> str | None:
+    """Strip dashes, spaces, and non-digit characters from organization numbers.
+
+    Tripletex API requires clean 9-digit org numbers. Users often write them as:
+    - "922 976 457" (spaces)
+    - "922-976-457" (dashes)
+    - "922.976.457" (dots)
+    Must become: "922976457"
+    """
+    if not org_nr:
+        return org_nr
+    cleaned = re.sub(r'[^\d]', '', str(org_nr))
+    return cleaned if cleaned else org_nr
+
+
+async def _get_payment_type_id(client: TripletexClient) -> int | None:
+    """Get the default payment type ID, with caching."""
+    cache = getattr(client, '_payment_type_cache', None)
+    if cache is not None:
+        return cache
+
+    try:
+        payment_types = await client.get_invoice_payment_types()
+        if payment_types:
+            # Prefer "Innbetaling" or first available
+            for pt in payment_types:
+                if "innbetaling" in pt.get("description", "").lower():
+                    client._payment_type_cache = pt["id"]
+                    return pt["id"]
+            # Fallback to first payment type
+            client._payment_type_cache = payment_types[0]["id"]
+            return payment_types[0]["id"]
+    except Exception as e:
+        _log("WARNING", "Failed to fetch payment types", error=str(e))
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +178,7 @@ async def _find_employee(client: TripletexClient, fields: dict) -> dict | None:
 async def _find_customer(client: TripletexClient, fields: dict, name_key: str = "customer_name") -> dict | None:
     """Find a customer by name or org number."""
     name = _get(fields, name_key) or _get(fields, "customer_identifier") or _get(fields, "name")
-    org_number = _get(fields, "organization_number") or _get(fields, "org_number")
+    org_number = _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number"))
 
     if name:
         params = {"customerName": name}
@@ -448,7 +487,7 @@ async def _exec_create_customer(fields: dict, client: TripletexClient) -> dict:
     """POST /customer — 1 API call. Only 'name' is required."""
     payload = _clean({
         "name": _get(fields, "name"),
-        "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+        "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
         "customerNumber": _get(fields, "customer_number"),
         "email": _get(fields, "email"),
         "invoiceEmail": _get(fields, "invoice_email"),
@@ -482,7 +521,7 @@ async def _exec_update_customer(fields: dict, client: TripletexClient) -> dict:
         "email": _get(fields, "new_email") or _get(fields, "email") or cust.get("email"),
         "invoiceEmail": _get(fields, "new_invoice_email") or _get(fields, "invoice_email"),
         "phoneNumber": _get(fields, "new_phone") or _get(fields, "phone"),
-        "organizationNumber": _get(fields, "new_org_number") or _get(fields, "org_number"),
+        "organizationNumber": _clean_org_number(_get(fields, "new_org_number") or _get(fields, "org_number")),
         "isPrivateIndividual": _get(fields, "is_private_individual"),
         "postalAddress": _build_address(fields, "new_") or _build_address(fields) or cust.get("postalAddress"),
         "description": _get(fields, "new_description") or _get(fields, "description"),
@@ -793,7 +832,7 @@ async def _exec_create_invoice(fields: dict, client: TripletexClient) -> dict:
                 cust_payload = _clean({
                     "name": customer_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
                     "email": _get(fields, "email") or _get(fields, "customer_email"),
                     "postalAddress": _build_address(fields),
                 })
@@ -827,7 +866,7 @@ async def _exec_invoice_existing_customer(fields: dict, client: TripletexClient)
         cust_payload = _clean({
             "name": customer_name,
             "isCustomer": True,
-            "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+            "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
         })
         cust = await client.create_customer(cust_payload)
         _log("INFO", "Created customer for invoice", name=customer_name, id=cust.get("id"))
@@ -844,7 +883,6 @@ async def _resolve_invoice_by_identifier(
     Tries: search by customer name extracted from identifier, then by full identifier
     as customer name. Returns invoice ID or None.
     """
-    import re
 
     # Try to extract a customer-like name from the identifier
     # Patterns like "Factura para Viento SL por '...'" or "Invoice for Acme Corp"
@@ -952,9 +990,7 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
     # Look up payment type if not provided
     payment_type_id = _get(fields, "payment_type_id")
     if not payment_type_id:
-        payment_types = await client.get_invoice_payment_types()
-        if payment_types:
-            payment_type_id = payment_types[0]["id"]
+        payment_type_id = await _get_payment_type_id(client)
 
     payment_params = _clean({
         "paymentDate": payment_date,
@@ -1040,7 +1076,7 @@ async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> d
                 cust_payload = _clean({
                     "name": customer_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
                     "email": _get(fields, "email"),
                     "postalAddress": _build_address(fields),
                 })
@@ -1066,9 +1102,7 @@ async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> d
     # Look up payment type
     payment_type_id = _get(fields, "payment_type_id")
     if not payment_type_id:
-        payment_types = await client.get_invoice_payment_types()
-        if payment_types:
-            payment_type_id = payment_types[0]["id"]
+        payment_type_id = await _get_payment_type_id(client)
 
     # Create order
     order_payload = _clean({
@@ -1257,7 +1291,7 @@ async def _exec_create_contact(fields: dict, client: TripletexClient) -> dict:
                 cust_payload = _clean({
                     "name": cust_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
                 })
                 new_cust = await client.create_customer(cust_payload)
                 customer_id = new_cust["id"]
@@ -1291,7 +1325,7 @@ async def _exec_project_with_customer(fields: dict, client: TripletexClient) -> 
         cust_payload = _clean({
             "name": cust_name,
             "isCustomer": True,
-            "organizationNumber": _get(fields, "organization_number"),
+            "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
             "email": _get(fields, "customer_email"),
         })
         cust = await client.create_customer(cust_payload)
@@ -1311,7 +1345,7 @@ async def _exec_find_customer(fields: dict, client: TripletexClient) -> dict:
     if _get(fields, "email"):
         params["email"] = fields["email"]
     if _get(fields, "org_number") or _get(fields, "organization_number"):
-        params["organizationNumber"] = _get(fields, "org_number") or _get(fields, "organization_number")
+        params["organizationNumber"] = _clean_org_number(_get(fields, "org_number") or _get(fields, "organization_number"))
 
     results = await client.get_customers(params)
     return {"entity": "customer", "count": len(results), "results": results}
