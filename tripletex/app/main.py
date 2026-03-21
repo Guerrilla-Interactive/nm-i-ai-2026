@@ -231,8 +231,9 @@ async def _classify_with_claude(prompt: str, files: Optional[list[dict]] = None)
 
 _KEYWORD_MAP = [
     # --- Enable Module (MUST come before travel — "Aktiver modul Reiseregning" must not match travel) ---
-    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate)\w*\b.*\b(modul|module)\b",
-                               r"\bslå\s+på\b.*\b(modul|module)\b"]),
+    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate)\w*\b.*\b(modul|module)\w*\b",
+                               r"\bslå\s+på\b.*\b(modul|module)\w*\b",
+                               r"\bslaa\s+paa\b.*\b(modul|module)\w*\b"]),
     # --- T3: Bank / Year-end / Error (before travel/employee to catch compound words) ---
     (TaskType.BANK_RECONCILIATION, [r"\bbankavstem\w*\b",
                                      r"\bbank\w*\b.*\bavstem\w*\b",
@@ -246,9 +247,10 @@ _KEYWORD_MAP = [
     (TaskType.ERROR_CORRECTION, [r"\b(korriger|correct|fiks|fix)\w*\b.*\b(feil|error|bilag|voucher|postering)\b",
                                    r"\b(feil|error)\w*\b.*\b(korriger|correct|rett)\b",
                                    r"\b(reverser|reverse|tilbakefør)\w*\b.*\b(bilag|voucher|postering)\b"]),
-    (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\bårsoppgjør\w*\b",
+    (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\barsavslut\w*\b", r"\baarsavslut\w*\b",
+                                   r"\bårsoppgjør\w*\b", r"\barsoppgjor\w*\b", r"\baarsoppgjor\w*\b",
                                    r"\byear.?end\b", r"\bjahresabschluss\w*\b", r"\bclôture\b",
-                                   r"\b(avslutt|close|lukk)\w*\b.*\b(år|year|regnskapsår)\w*\b"]),
+                                   r"\b(avslutt|close|lukk)\w*\b.*\b(år|year|ar|regnskapsår|regnskapsar)\w*\b"]),
     # --- Travel (after enable_module — "reiseregning" alone should match travel) ---
     # NOTE: "reise" without trailing \b so it matches "reiseregning" as substring
     (TaskType.DELETE_TRAVEL_EXPENSE, [r"\b(slett|delete|remove|fjern|löschen|eliminar|supprimer)\b.*\b(reise|travel|viaje|voyage|reisekostenabrechnung)",
@@ -268,8 +270,8 @@ _KEYWORD_MAP = [
                                 r"\b(ansatt|tilsett|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b"]),
     # --- Payroll (MUST come before employee patterns — "paie de X" should not match employee) ---
     (TaskType.RUN_PAYROLL, [
-        r"\b(?:paie|payroll|lønn|gehalt|nómina|salaire|lønnskjøring|lønnsslipp|salary)\b",
-        r"\b(?:kjør|run|execute|exécutez|exécuter|ejecutar|processar)\b.*\b(?:lønn|payroll|paie|gehalt|nómina)\b",
+        r"\b(?:paie|payroll|lønn|lonn|gehalt|nómina|salaire|lønnskjøring|lonnskjoring|lønnsslipp|lonnsslipp|salary|lønnsutbetaling|lonnsutbetaling)\b",
+        r"\b(?:kjør|kjor|run|execute|exécutez|exécuter|ejecutar|processar|utfor|utfør)\b.*\b(?:lønn|lonn|payroll|paie|gehalt|nómina)\b",
     ]),
     # --- Dimension + Voucher (MUST come before invoice/voucher patterns — "Beleg" alone could trigger invoice) ---
     (TaskType.CREATE_DIMENSION_VOUCHER, [
@@ -280,8 +282,10 @@ _KEYWORD_MAP = [
     # --- Supplier Invoice (more specific — MUST come before supplier and regular invoice) ---
     (TaskType.CREATE_SUPPLIER_INVOICE, [
         r"leverandør.*faktura|faktura.*leverandør",
-        r"(inngående|incoming|mottatt|motteke|received).*faktura|invoice",
+        r"leverandor.*faktura|faktura.*leverandor",
+        r"(inngående|inngaaende|incoming|mottatt|motteke|received).*faktura|invoice",
         r"leverandørfaktura",
+        r"leverandorfaktura",
         r"supplier.*invoice|Eingangsrechnung|facture.*fournisseur",
     ]),
     # --- Supplier (register supplier entity — after supplier invoice, before customer) ---
@@ -1122,14 +1126,15 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
 
     # Last resort: single-word heuristic — NEVER return UNKNOWN if there's any signal
     _LAST_RESORT_WORDS = [
-        (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "salary"], TaskType.RUN_PAYROLL),
+        (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "salary"], TaskType.RUN_PAYROLL),
         (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
-        (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
+        (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
         (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
         (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário"], TaskType.CREATE_EMPLOYEE),
         (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
         (["avdeling", "department", "abteilung", "département", "departamento"], TaskType.CREATE_DEPARTMENT),
+        (["modul", "module"], TaskType.ENABLE_MODULE),
         (["prosjekt", "project", "projekt", "projet", "proyecto"], TaskType.CREATE_PROJECT),
         (["produkt", "product", "produit", "producto", "produto"], TaskType.CREATE_PRODUCT),
         (["timer", "hours", "timesheet", "timeliste", "stunden", "heures"], TaskType.LOG_HOURS),
@@ -1137,9 +1142,8 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
         (["kontaktperson", "contact", "contacto", "contato"], TaskType.CREATE_CONTACT),
         (["betaling", "payment", "innbetaling", "pago", "zahlung", "paiement"], TaskType.REGISTER_PAYMENT),
         (["kreditnota", "credit note", "gutschrift", "avoir"], TaskType.CREATE_CREDIT_NOTE),
-        (["modul", "module"], TaskType.ENABLE_MODULE),
         (["bankavsteming", "reconcil", "avstem"], TaskType.BANK_RECONCILIATION),
-        (["årsavslut", "årsoppgjør", "year-end"], TaskType.YEAR_END_CLOSING),
+        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct error", "feilrett"], TaskType.ERROR_CORRECTION),
     ]
     for words, fallback_type in _LAST_RESORT_WORDS:

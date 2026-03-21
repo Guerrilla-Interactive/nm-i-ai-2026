@@ -177,7 +177,7 @@ Output:
 ### Example 3 — Create employee (English)
 Input: "Create an employee named John Smith with email john@smith.com, phone +47 912 34 567, starting March 1st 2026"
 Output:
-{{"task_type": "create_employee", "confidence": 0.99, "fields": {{"first_name": "John", "last_name": "Smith", "email": "john@smith.com", "phone": "+47 912 34 567", "start_date": "2026-03-01"}}}}
+{{"task_type": "create_employee", "confidence": 0.99, "fields": {{"first_name": "John", "last_name": "Smith", "email": "john@smith.com", "phone": "+47 912 34 567"}}}}
 
 ### Example 4 — Create customer (German)
 Input: "Erstellen Sie einen Kunden namens Schmidt GmbH mit der Organisationsnummer 123456789"
@@ -1653,8 +1653,8 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
             fields["employee_identifier"] = _guess_entity_name(prompt, [
                 "ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário",
             ])
-        if dates:
-            fields["start_date"] = dates[0]
+        # NOTE: Do NOT set start_date for employees — Tripletex Employee API
+        # does not have a startDate field and rejects it with 422.
 
     elif task_type in (TaskType.CREATE_CUSTOMER, TaskType.UPDATE_CUSTOMER):
         name = _guess_customer_name(prompt)
@@ -2000,8 +2000,8 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         # Supplier invoice before regular invoice
         # Dimension/voucher before invoice/voucher
         (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
-        (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lønnsslipp", "salary"], TaskType.RUN_PAYROLL),
-        (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "facture fournisseur"], TaskType.CREATE_SUPPLIER_INVOICE),
+        (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "lønnsslipp", "lonnsslipp", "salary"], TaskType.RUN_PAYROLL),
+        (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice", "facture fournisseur"], TaskType.CREATE_SUPPLIER_INVOICE),
         (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         # Reverse payment before credit note (both deal with "undo" but reverse_payment is for bank returns)
         (["reverser", "reverse payment", "tilbakefør", "stornere", "rückbuchung", "bounced", "returned by bank", "returnert av banken", "devolvido pelo banco", "pago devuelto", "paiement retourné"], TaskType.REVERSE_PAYMENT),
@@ -2015,9 +2015,9 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         (["timer", "hours", "stunden", "heures", "horas", "timesheet", "timeliste", "timefør", "logg"], TaskType.LOG_HOURS),
         # Bank/year-end/error
         (["bankavstem", "reconcil", "abgleich", "rapprochement"], TaskType.BANK_RECONCILIATION),
-        (["årsavslut", "årsoppgjør", "year-end", "year end", "jahresabschluss", "clôture"], TaskType.YEAR_END_CLOSING),
+        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct", "feil", "error correction"], TaskType.ERROR_CORRECTION),
-        (["aktiver modul", "enable module", "slå på"], TaskType.ENABLE_MODULE),
+        (["aktiver modul", "enable module", "slå på", "slaa paa", "activate module"], TaskType.ENABLE_MODULE),
         # Delete patterns (check before create)
         (["slett kunde", "delete customer", "fjern kunde"], TaskType.DELETE_CUSTOMER),
         (["slett ansatt", "delete employee", "fjern ansatt"], TaskType.DELETE_EMPLOYEE),
@@ -2130,7 +2130,7 @@ def _classify_with_keywords(
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["reverser", "reverse payment", "tilbakefør", "stornere", "bounced", "rückbuchung", "returnert av banken"], TaskType.REVERSE_PAYMENT),
             (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "year-end", "year.end", "arsslutt", "jahresabschluss"], TaskType.YEAR_END_CLOSING),
-            (["aktiver modul", "enable module", "slaa paa modul", "activate module"], TaskType.ENABLE_MODULE),
+            (["aktiver modul", "enable module", "slaa paa modul", "activate module", "aktiver modul"], TaskType.ENABLE_MODULE),
             (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
             (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário", "empregado"], TaskType.CREATE_EMPLOYEE),
             (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),

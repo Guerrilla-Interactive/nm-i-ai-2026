@@ -378,6 +378,11 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
 
     Required: firstName, lastName, email, userType, department ref.
     """
+    # Strip startDate/start_date — not valid on Employee objects (project-only).
+    # The classifier may extract it from prompts mentioning employment start dates.
+    fields.pop("start_date", None)
+    fields.pop("startDate", None)
+
     dept_id = _get(fields, "department_id")
     if not dept_id:
         dept_id = await _ensure_department(client, _get(fields, "department_name"))
@@ -439,6 +444,9 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
         "address": _build_address(fields),
         "comments": _get(fields, "comments"),
     })
+    # Final safety: ensure startDate never reaches the API (causes 422 on Employee)
+    payload.pop("startDate", None)
+    payload.pop("start_date", None)
     result = await client.create_employee(payload)
     return {"created_id": result.get("id"), "entity": "employee"}
 
@@ -2321,9 +2329,29 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
 
     The year is extracted from fields by the classifier (e.g. "2025").
     """
-    year = _get(fields, "year")
+    year = _get(fields, "year") or _get(fields, "fiscal_year")
+
+    # Try to extract year from period or date fields
     if not year:
-        return {"success": False, "error": "No year specified for year-end closing"}
+        for fallback_key in ("period", "date", "closing_date", "end_date"):
+            raw = _get(fields, fallback_key)
+            if raw:
+                m = re.search(r"(20\d{2})", str(raw))
+                if m:
+                    year = m.group(1)
+                    break
+
+    # Try extracting from the prompt text itself
+    if not year:
+        prompt = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+        m = re.search(r"(20\d{2})", str(prompt))
+        if m:
+            year = m.group(1)
+
+    if not year:
+        # Default to previous year (most common for year-end closing)
+        year = date.today().year - 1
+        _log("INFO", "No year specified, defaulting to previous year", year=year)
 
     year = int(year)
     year_start = f"{year}-01-01"
@@ -2517,8 +2545,10 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
       Timeregistrering / Time Tracking    → completeMonthlyHourLists (or moduleHourList)
       Prosjektøkonomi / Project Economy   → moduleprojecteconomy
     """
-    module_name = _get(fields, "module_name") or ""
+    module_name = _get(fields, "module_name") or _get(fields, "name") or ""
     module_name_lower = module_name.lower().strip()
+    # Strip common Norwegian prefixes like "modulen" from "Aktiver modulen Prosjekt"
+    module_name_lower = re.sub(r"^(modulen|modul)\s+", "", module_name_lower).strip()
 
     # Map common Norwegian/English module names to API field names
     MODULE_MAP: dict[str, list[str]] = {
@@ -2563,6 +2593,19 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
         # Customer
         "kunde": ["modulecustomer"],
         "customer": ["modulecustomer"],
+        # Supplier
+        "leverandør": ["moduleSupplier"],
+        "supplier": ["moduleSupplier"],
+        # Wage / Salary
+        "lønn": ["moduleWageSalary", "moduleemployee"],
+        "salary": ["moduleWageSalary", "moduleemployee"],
+        "wage": ["moduleWageSalary"],
+        # Budget
+        "budsjett": ["moduleBudget"],
+        "budget": ["moduleBudget"],
+        # Note / Approval
+        "godkjenning": ["moduleApproveVoucher"],
+        "approval": ["moduleApproveVoucher"],
     }
 
     # Find matching API field names
@@ -2643,11 +2686,43 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
 
     # Parse Norwegian month names if needed
     _month_map = {
-        "januar": 1, "february": 2, "februar": 2, "mars": 3, "march": 3,
-        "april": 4, "mai": 5, "may": 5, "juni": 6, "june": 6,
-        "juli": 7, "july": 7, "august": 8, "september": 9,
-        "oktober": 10, "october": 10, "november": 11, "desember": 12, "december": 12,
+        "januar": 1, "january": 1, "february": 2, "februar": 2,
+        "mars": 3, "march": 3, "april": 4, "mai": 5, "may": 5,
+        "juni": 6, "june": 6, "juli": 7, "july": 7, "august": 8,
+        "september": 9, "oktober": 10, "october": 10,
+        "november": 11, "desember": 12, "december": 12,
     }
+
+    # Try to extract month/year from period string (e.g. "mars 2026", "March 2026", "03/2026")
+    if period and (not payroll_month or not payroll_year):
+        period_str = str(period).lower().strip()
+        # Try "month year" pattern
+        for month_name, month_num in _month_map.items():
+            if month_name in period_str:
+                if not payroll_month:
+                    payroll_month = month_num
+                yr_match = re.search(r"(20\d{2})", period_str)
+                if yr_match and not payroll_year:
+                    payroll_year = int(yr_match.group(1))
+                break
+        # Try "MM/YYYY" or "MM-YYYY" pattern
+        if not payroll_month:
+            m = re.match(r"(\d{1,2})[/\-](\d{4})", period_str)
+            if m:
+                payroll_month = int(m.group(1))
+                if not payroll_year:
+                    payroll_year = int(m.group(2))
+
+    # Try extracting from date field
+    if not payroll_month or not payroll_year:
+        date_str = _get(fields, "date") or _get(fields, "payroll_date") or ""
+        if date_str:
+            m = re.search(r"(\d{4})-(\d{2})", str(date_str))
+            if m:
+                if not payroll_year:
+                    payroll_year = int(m.group(1))
+                if not payroll_month:
+                    payroll_month = int(m.group(2))
 
     if payroll_month and not str(payroll_month).isdigit():
         payroll_month = _month_map.get(str(payroll_month).lower(), None)
@@ -3265,9 +3340,11 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
     3. Find the payment voucher and reverse it
     4. Fallback: create a credit note
     """
-    customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+    customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier") or _get(fields, "name")
     invoice_id = _get(fields, "invoice_id")
-    invoice_number = _get(fields, "invoice_number") or _get(fields, "invoice_identifier")
+    invoice_number = _get(fields, "invoice_number") or _get(fields, "invoice_identifier") or _get(fields, "number")
+    amount = _get(fields, "amount") or _get(fields, "paid_amount")
+    reason = _get(fields, "reason") or _get(fields, "description") or _get(fields, "comment")
 
     # Step 1: Find the invoice
     # If we have an invoice_number that looks like an ID, try direct GET first
@@ -3299,6 +3376,25 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
                 # Get the most recent invoice
                 invoice_id = max(invoices, key=lambda inv: inv.get("id", 0))["id"]
 
+        # Try finding customer first, then search invoices by customerId
+        if not invoice_id and customer_name:
+            try:
+                cust = await _find_customer(client, fields, "customer_name")
+                if not cust:
+                    cust = await _find_customer(client, {"customer_name": customer_name}, "customer_name")
+                if cust:
+                    cust_id = cust.get("id")
+                    if cust_id:
+                        invoices = await client.get_invoices({
+                            "customerId": str(cust_id),
+                            "invoiceDateFrom": "2000-01-01",
+                            "invoiceDateTo": "2099-12-31",
+                        })
+                        if invoices:
+                            invoice_id = max(invoices, key=lambda inv: inv.get("id", 0))["id"]
+            except TripletexAPIError:
+                pass
+
     # Last resort: search all recent invoices
     if not invoice_id:
         try:
@@ -3320,7 +3416,14 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
             pass
 
     if not invoice_id:
-        return {"success": False, "error": f"Could not find invoice for customer: {customer_name}"}
+        details = []
+        if invoice_number:
+            details.append(f"invoice_number={invoice_number}")
+        if customer_name:
+            details.append(f"customer={customer_name}")
+        search_desc = ", ".join(details) if details else "no search criteria provided"
+        return {"success": False, "error": f"Could not find invoice to reverse ({search_desc}). "
+                "The invoice may not exist or may have already been deleted."}
 
     # Step 2: Get invoice details with voucher reference
     try:
@@ -3390,7 +3493,7 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
     try:
         credit_params = _clean({
             "date": _today(),
-            "comment": _get(fields, "reason") or "Payment returned by bank",
+            "comment": reason or "Payment returned by bank",
             "sendToCustomer": "false",
         })
         result = await client.create_credit_note(int(invoice_id), credit_params)
@@ -3425,7 +3528,11 @@ async def _exec_delete_product(fields: dict, client: TripletexClient) -> dict:
     except TripletexAPIError as e:
         if e.status_code == 403:
             return {"success": False, "error": "Permission denied: cannot delete product"}
-        raise
+        if e.status_code == 422:
+            return {"success": False, "error": f"Cannot delete product '{product.get('name', '')}': has linked entities (invoices, orders, etc.). {e.detail[:200]}"}
+        if e.status_code == 409:
+            return {"success": False, "error": f"Cannot delete product: conflict — {e.detail[:200]}"}
+        return {"success": False, "error": f"Failed to delete product: {e.detail[:200]}"}
     return {"deleted_id": product["id"], "entity": "product"}
 
 
@@ -3482,7 +3589,9 @@ async def _exec_delete_department(fields: dict, client: TripletexClient) -> dict
     except TripletexAPIError as e:
         if e.status_code in (403, 409):
             return {"success": False, "error": f"Cannot delete department: {e.detail[:200]}"}
-        raise
+        if e.status_code == 422:
+            return {"success": False, "error": f"Cannot delete department '{dept.get('name', '')}': has linked entities (employees, projects, etc.). {e.detail[:200]}"}
+        return {"success": False, "error": f"Failed to delete department: {e.detail[:200]}"}
     return {"deleted_id": dept["id"], "entity": "department"}
 
 
@@ -3502,7 +3611,11 @@ async def _exec_delete_supplier(fields: dict, client: TripletexClient) -> dict:
     except TripletexAPIError as e:
         if e.status_code == 403:
             return {"success": False, "error": "Permission denied: cannot delete supplier"}
-        raise
+        if e.status_code == 422:
+            return {"success": False, "error": f"Cannot delete supplier '{supplier.get('name', '')}': has linked entities (invoices, orders, contacts, etc.). Remove linked entities first. {e.detail[:200]}"}
+        if e.status_code == 409:
+            return {"success": False, "error": f"Cannot delete supplier: conflict — {e.detail[:200]}"}
+        return {"success": False, "error": f"Failed to delete supplier: {e.detail[:200]}"}
     return {"deleted_id": supplier["id"], "entity": "supplier"}
 
 

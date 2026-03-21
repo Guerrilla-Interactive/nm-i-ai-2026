@@ -2,13 +2,20 @@
 NM i AI 2026 — NorgesGruppen Object Detection
 Competition sandbox inference script using ONNX Runtime.
 
+Optimizations over baseline:
+- Per-class NMS (avoids suppressing valid overlapping detections of different classes)
+- Higher NMS IoU threshold (0.65) for densely packed shelves
+- Horizontal flip TTA (2x inference, merges flipped + original detections)
+- Multi-scale inference (640 + dynamic larger scale if model supports it)
+- Tiling fallback for fixed-input models to improve small object detection
+
 NOTE: This is the canonical copy. submission/run.py should be identical.
       train.py --prepare-submission copies this file into submission/.
 """
 import argparse
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 import cv2
 import numpy as np
@@ -16,10 +23,17 @@ import onnxruntime as ort
 
 
 CONF_THRESH = 0.01
-NMS_IOU_THRESH = 0.5
-MAX_DET = 300
+NMS_IOU_THRESH = 0.65  # was 0.5 — higher keeps more overlapping detections on packed shelves
+MAX_DET = 600  # was 300 — allow more detections with TTA/multi-scale
 INPUT_SIZE = 640
 PAD_COLOR = (114, 114, 114)
+# Multi-scale: extra scales to try (only used if model supports dynamic input)
+EXTRA_SCALES = [1280]
+# Tiling: used if model has fixed input and image is large enough
+TILE_OVERLAP = 0.2  # 20% overlap between tiles
+MIN_TILE_RATIO = 1.5  # only tile if image is at least 1.5x the model input size
+# TTA
+ENABLE_FLIP_TTA = True
 
 
 def letterbox(img: np.ndarray, target_size: int) -> tuple:
@@ -55,107 +69,254 @@ def preprocess(img_bgr: np.ndarray, target_size: int) -> tuple:
     return blob, scale, pad_left, pad_top
 
 
-def postprocess(
+def decode_raw_output(
     output: np.ndarray,
-    orig_w: int,
-    orig_h: int,
     scale: float,
     pad_left: int,
     pad_top: int,
-    category_map: Dict[int, int],
     conf_thresh: float = CONF_THRESH,
-    iou_thresh: float = NMS_IOU_THRESH,
-) -> List[Dict[str, Any]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Decode YOLOv8 ONNX output → COCO-format detections.
-
-    Output shape: (1, 4+num_classes, 8400)
-    Transpose to: (8400, 4+num_classes)
-    boxes[:, :4] = cx, cy, w, h  (in model input coords)
-    scores[:, 4:] = class confidence scores
+    Decode YOLOv8 raw output to boxes in original image coords, scores, class_ids.
+    Returns (boxes_xywh_orig, max_scores, class_ids) — all filtered by conf_thresh.
+    boxes_xywh_orig are in original image pixel coordinates (x, y, w, h top-left).
     """
-    # (1, 360, 8400) → (8400, 360)
-    pred = output[0].T
-
+    pred = output[0].T  # (8400, 4+num_classes)
     boxes_cxcywh = pred[:, :4]
     class_scores = pred[:, 4:]
 
-    num_classes = class_scores.shape[1]
-
-    # Best class per detection
     max_scores = np.max(class_scores, axis=1)
     class_ids = np.argmax(class_scores, axis=1)
 
-    # Confidence filter
     mask = max_scores > conf_thresh
     boxes_cxcywh = boxes_cxcywh[mask]
     max_scores = max_scores[mask]
     class_ids = class_ids[mask]
 
     if len(boxes_cxcywh) == 0:
-        return []
+        return np.zeros((0, 4)), np.zeros(0), np.zeros(0, dtype=np.int32)
 
-    # cx,cy,w,h → x1,y1,w,h for NMS (cv2 expects x,y,w,h top-left)
+    # cx,cy,w,h → x1,y1,w,h (top-left) in model input coords
     boxes_xywh = np.copy(boxes_cxcywh)
-    boxes_xywh[:, 0] = boxes_cxcywh[:, 0] - boxes_cxcywh[:, 2] / 2  # x1
-    boxes_xywh[:, 1] = boxes_cxcywh[:, 1] - boxes_cxcywh[:, 3] / 2  # y1
+    boxes_xywh[:, 0] = boxes_cxcywh[:, 0] - boxes_cxcywh[:, 2] / 2
+    boxes_xywh[:, 1] = boxes_cxcywh[:, 1] - boxes_cxcywh[:, 3] / 2
 
-    # NMS per class
-    indices = cv2.dnn.NMSBoxes(
-        boxes_xywh.tolist(),
-        max_scores.tolist(),
-        conf_thresh,
-        iou_thresh,
-    )
+    # Undo letterbox: remove padding, then undo scale → original image coords
+    boxes_xywh[:, 0] = (boxes_xywh[:, 0] - pad_left) / scale
+    boxes_xywh[:, 1] = (boxes_xywh[:, 1] - pad_top) / scale
+    boxes_xywh[:, 2] = boxes_xywh[:, 2] / scale
+    boxes_xywh[:, 3] = boxes_xywh[:, 3] / scale
 
-    if len(indices) == 0:
+    return boxes_xywh, max_scores, class_ids
+
+
+def nms_per_class(
+    boxes_xywh: np.ndarray,
+    scores: np.ndarray,
+    class_ids: np.ndarray,
+    orig_w: int,
+    orig_h: int,
+    category_map: Dict[int, int],
+    iou_thresh: float = NMS_IOU_THRESH,
+    max_det: int = MAX_DET,
+) -> List[Dict[str, Any]]:
+    """Run NMS independently per class to avoid cross-class suppression."""
+    if len(boxes_xywh) == 0:
         return []
 
-    # Flatten indices (cv2 returns nested array in some versions)
-    if isinstance(indices, np.ndarray):
-        indices = indices.flatten()
+    all_dets = []
+    unique_classes = np.unique(class_ids)
 
-    # Limit to top MAX_DET detections by confidence
-    if len(indices) > MAX_DET:
-        top_idx = np.argsort(max_scores[indices])[::-1][:MAX_DET]
-        indices = indices[top_idx]
+    for cls_id in unique_classes:
+        cls_mask = class_ids == cls_id
+        cls_boxes = boxes_xywh[cls_mask]
+        cls_scores = scores[cls_mask]
 
-    detections = []
-    for idx in indices:
-        x, y, w, h = boxes_xywh[idx]
-        score = float(max_scores[idx])
-        yolo_class_id = int(class_ids[idx])
-
-        # Undo letterbox: remove padding, then undo scale
-        x_orig = (float(x) - pad_left) / scale
-        y_orig = (float(y) - pad_top) / scale
-        w_orig = float(w) / scale
-        h_orig = float(h) / scale
-
-        # Clip to image boundaries
-        x_orig = max(0.0, x_orig)
-        y_orig = max(0.0, y_orig)
-        w_orig = min(w_orig, orig_w - x_orig)
-        h_orig = min(h_orig, orig_h - y_orig)
-
-        if w_orig <= 0 or h_orig <= 0:
+        indices = cv2.dnn.NMSBoxes(
+            cls_boxes.tolist(),
+            cls_scores.tolist(),
+            CONF_THRESH,
+            iou_thresh,
+        )
+        if len(indices) == 0:
             continue
+        if isinstance(indices, np.ndarray):
+            indices = indices.flatten()
 
-        # Map YOLO index → COCO category_id
-        coco_cat_id = category_map.get(yolo_class_id, yolo_class_id)
+        for idx in indices:
+            x, y, w, h = cls_boxes[idx]
+            x, y, w, h = float(x), float(y), float(w), float(h)
 
-        detections.append({
-            "category_id": int(coco_cat_id),
-            "bbox": [
-                round(x_orig, 2),
-                round(y_orig, 2),
-                round(w_orig, 2),
-                round(h_orig, 2),
-            ],
-            "score": round(score, 5),
-        })
+            # Clip to image boundaries
+            x = max(0.0, x)
+            y = max(0.0, y)
+            w = min(w, orig_w - x)
+            h = min(h, orig_h - y)
 
-    return detections
+            if w <= 0 or h <= 0:
+                continue
+
+            coco_cat_id = category_map.get(int(cls_id), int(cls_id))
+            all_dets.append({
+                "category_id": int(coco_cat_id),
+                "bbox": [round(x, 2), round(y, 2), round(w, 2), round(h, 2)],
+                "score": round(float(cls_scores[idx]), 5),
+            })
+
+    # Limit to top max_det by confidence
+    if len(all_dets) > max_det:
+        all_dets.sort(key=lambda d: d["score"], reverse=True)
+        all_dets = all_dets[:max_det]
+
+    return all_dets
+
+
+def run_inference(
+    session: ort.InferenceSession,
+    input_name: str,
+    img_bgr: np.ndarray,
+    target_size: int,
+) -> Tuple[np.ndarray, float, int, int]:
+    """Run single inference pass, return (raw_output, scale, pad_left, pad_top)."""
+    blob, scale, pad_left, pad_top = preprocess(img_bgr, target_size)
+    outputs = session.run(None, {input_name: blob})
+    return outputs[0], scale, pad_left, pad_top
+
+
+def flip_boxes_horizontal(boxes_xywh: np.ndarray, img_w: int) -> np.ndarray:
+    """Flip x-coordinates of boxes (x,y,w,h top-left format) horizontally."""
+    flipped = boxes_xywh.copy()
+    # new x = img_w - (x + w)
+    flipped[:, 0] = img_w - (boxes_xywh[:, 0] + boxes_xywh[:, 2])
+    return flipped
+
+
+def get_tile_coords(
+    img_h: int, img_w: int, tile_size: int, overlap: float
+) -> List[Tuple[int, int, int, int]]:
+    """Generate overlapping tile coordinates (x, y, w, h) covering the image."""
+    stride = int(tile_size * (1.0 - overlap))
+    tiles = []
+    for y in range(0, img_h, stride):
+        for x in range(0, img_w, stride):
+            tx = min(x, max(0, img_w - tile_size))
+            ty = min(y, max(0, img_h - tile_size))
+            tw = min(tile_size, img_w - tx)
+            th = min(tile_size, img_h - ty)
+            tile = (tx, ty, tw, th)
+            if tile not in tiles:
+                tiles.append(tile)
+    return tiles
+
+
+def infer_image(
+    session: ort.InferenceSession,
+    input_name: str,
+    img_bgr: np.ndarray,
+    model_input_size: int,
+    supports_dynamic: bool,
+    category_map: Dict[int, int],
+) -> List[Dict[str, Any]]:
+    """Run full inference pipeline on one image with TTA and multi-scale/tiling."""
+    orig_h, orig_w = img_bgr.shape[:2]
+
+    all_boxes = []
+    all_scores = []
+    all_class_ids = []
+
+    # --- Pass 1: Standard inference at model input size ---
+    output, scale, pl, pt = run_inference(session, input_name, img_bgr, model_input_size)
+    boxes, scores, cids = decode_raw_output(output, scale, pl, pt)
+    all_boxes.append(boxes)
+    all_scores.append(scores)
+    all_class_ids.append(cids)
+
+    # --- Pass 2: Horizontal flip TTA ---
+    if ENABLE_FLIP_TTA:
+        flipped = cv2.flip(img_bgr, 1)  # horizontal flip
+        output_f, scale_f, pl_f, pt_f = run_inference(
+            session, input_name, flipped, model_input_size
+        )
+        boxes_f, scores_f, cids_f = decode_raw_output(output_f, scale_f, pl_f, pt_f)
+        if len(boxes_f) > 0:
+            boxes_f = flip_boxes_horizontal(boxes_f, orig_w)
+            all_boxes.append(boxes_f)
+            all_scores.append(scores_f)
+            all_class_ids.append(cids_f)
+
+    # --- Pass 3: Multi-scale (if model supports dynamic input) ---
+    if supports_dynamic:
+        for extra_size in EXTRA_SCALES:
+            if extra_size == model_input_size:
+                continue
+            output_ms, scale_ms, pl_ms, pt_ms = run_inference(
+                session, input_name, img_bgr, extra_size
+            )
+            boxes_ms, scores_ms, cids_ms = decode_raw_output(
+                output_ms, scale_ms, pl_ms, pt_ms
+            )
+            all_boxes.append(boxes_ms)
+            all_scores.append(scores_ms)
+            all_class_ids.append(cids_ms)
+
+            # Flip TTA at extra scale too
+            if ENABLE_FLIP_TTA:
+                flipped = cv2.flip(img_bgr, 1)
+                out_mf, sc_mf, pl_mf, pt_mf = run_inference(
+                    session, input_name, flipped, extra_size
+                )
+                bx_mf, sc_mf2, ci_mf = decode_raw_output(out_mf, sc_mf, pl_mf, pt_mf)
+                if len(bx_mf) > 0:
+                    bx_mf = flip_boxes_horizontal(bx_mf, orig_w)
+                    all_boxes.append(bx_mf)
+                    all_scores.append(sc_mf2)
+                    all_class_ids.append(ci_mf)
+    else:
+        # --- Pass 3 alt: Tiling for fixed-input models on large images ---
+        max_dim = max(orig_h, orig_w)
+        # Tile size in original image pixels that maps to model_input_size
+        # We want tiles that, when letterboxed to model_input_size, give ~1:1 pixel mapping
+        tile_native = model_input_size  # tile at native model resolution in orig coords
+        # Only tile if image is significantly larger than model input
+        if max_dim > model_input_size * MIN_TILE_RATIO:
+            # Use tiles of size proportional to model input, at original resolution
+            # This means each tile gets full model_input_size resolution for a smaller region
+            tile_pixel_size = int(max_dim / 2)  # 2x2 grid roughly
+            tiles = get_tile_coords(orig_h, orig_w, tile_pixel_size, TILE_OVERLAP)
+            for tx, ty, tw, th in tiles:
+                if tw < 32 or th < 32:
+                    continue
+                tile_img = img_bgr[ty:ty + th, tx:tx + tw]
+                output_t, scale_t, pl_t, pt_t = run_inference(
+                    session, input_name, tile_img, model_input_size
+                )
+                boxes_t, scores_t, cids_t = decode_raw_output(
+                    output_t, scale_t, pl_t, pt_t
+                )
+                if len(boxes_t) > 0:
+                    # Offset tile boxes to full image coordinates
+                    boxes_t[:, 0] += tx
+                    boxes_t[:, 1] += ty
+                    all_boxes.append(boxes_t)
+                    all_scores.append(scores_t)
+                    all_class_ids.append(cids_t)
+
+    # Merge all detections
+    if not all_boxes:
+        return []
+
+    merged_boxes = np.concatenate(all_boxes, axis=0)
+    merged_scores = np.concatenate(all_scores, axis=0)
+    merged_cids = np.concatenate(all_class_ids, axis=0)
+
+    if len(merged_boxes) == 0:
+        return []
+
+    # Per-class NMS on merged detections
+    return nms_per_class(
+        merged_boxes, merged_scores, merged_cids,
+        orig_w, orig_h, category_map,
+    )
 
 
 def extract_image_id(filename: str) -> int:
@@ -187,7 +348,6 @@ def main():
     if cat_map_path.exists():
         with open(str(cat_map_path), "r") as f:
             raw = json.load(f)
-        # Handle both list format [cat0, cat1, ...] and dict format {"0": cat0, ...}
         if isinstance(raw, list):
             category_map = {i: int(v) for i, v in enumerate(raw)}
         else:
@@ -219,6 +379,14 @@ def main():
     if input_shape and len(input_shape) == 4 and isinstance(input_shape[2], int):
         model_input_size = input_shape[2]
 
+    # Check if model supports dynamic input (non-fixed dimensions)
+    supports_dynamic = False
+    if input_shape and len(input_shape) == 4:
+        # Dynamic if height/width are strings or None (not fixed ints)
+        h_dim = input_shape[2]
+        w_dim = input_shape[3]
+        supports_dynamic = not (isinstance(h_dim, int) and isinstance(w_dim, int))
+
     # Collect image paths
     image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
     image_paths = sorted(
@@ -233,22 +401,13 @@ def main():
         if img_bgr is None:
             continue
 
-        orig_h, orig_w = img_bgr.shape[:2]
         image_id = extract_image_id(img_path.name)
 
-        # Preprocess
-        blob, scale, pad_left, pad_top = preprocess(img_bgr, model_input_size)
-
-        # Inference
-        outputs = session.run(None, {input_name: blob})
-        output = outputs[0]  # (1, 4+num_classes, 8400)
-
-        # Postprocess
-        dets = postprocess(
-            output, orig_w, orig_h, scale, pad_left, pad_top, category_map,
+        dets = infer_image(
+            session, input_name, img_bgr, model_input_size,
+            supports_dynamic, category_map,
         )
 
-        # Attach image_id
         for det in dets:
             det["image_id"] = image_id
 
