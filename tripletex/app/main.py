@@ -264,13 +264,28 @@ _KEYWORD_MAP = [
     (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\barsavslut\w*\b", r"\baarsavslut\w*\b",
                                    r"\bårsoppgjør\w*\b", r"\barsoppgjor\w*\b", r"\baarsoppgjor\w*\b",
                                    r"\byear.?end\b", r"\bannual.?clos\w*\b",
-                                   r"\bjahresabschluss\w*\b", r"\bclôture\b", r"\bcierre\s+anual\b",
+                                   r"\bjahresabschluss\w*\b", r"\bclôture\b(?!\s*mensuel)", r"\bcierre\s+anual\b",
                                    r"\bencerramento\s+anual\b",
                                    r"\bchiusura\s+(annuale|d[ie]l?\s+esercizio)\b",
                                    r"\b(bokslut|årsbokslut|arsbokslut)\w*\b",
                                    r"\bclôture\s+annuelle\b",
                                    r"\b(fiscal\s+year|accounting\s+year)\b.*\b(clos|end|avslutt)\w*\b",
                                    r"\b(avslutt|close|lukk)\w*\b.*\b(år|year|ar|regnskapsår|regnskapsar)\w*\b"]),
+    (TaskType.MONTH_END_CLOSING, [r"\bmånedsslutt\w*\b", r"\bmanedsslutt\w*\b",
+                                   r"\bmånedsavslut\w*\b", r"\bmanedsavslut\w*\b",
+                                   r"\bmonth.?end.?clos\w*\b", r"\bmonthly.?closing\b",
+                                   r"\bmonatsabschluss\w*\b",
+                                   r"\bclôture\s*mensuel\w*\b", r"\bcloture\s*mensuel\w*\b",
+                                   r"\bcierre\s*mensual\b",
+                                   r"\bperiodisering\w*\b", r"\bperiodifikasjon\w*\b",
+                                   r"\bperiodificación\w*\b",
+                                   r"\bmonthly\s*accrual\w*\b", r"\bperiodenabgrenzung\w*\b",
+                                   r"\bavskrivning\w*\b.*\bmåned\w*\b",
+                                   r"\bmonthly\s*depreciation\b",
+                                   r"\bmonatliche\w*\s*abschreibung\w*\b",
+                                   r"\bamortissement\s*mensuel\w*\b",
+                                   r"\bdepreciación\s*mensual\b",
+                                   r"\b(avslutt|close|lukk)\w*\b.*\b(måned|month|monat|mois|mes)\w*\b"]),
     # --- Travel (after enable_module — "reiseregning" alone should match travel) ---
     # NOTE: "reise" without trailing \b so it matches "reiseregning" as substring
     (TaskType.DELETE_TRAVEL_EXPENSE, [r"\b(slett|delete|remove|fjern|löschen|eliminar|supprimer)\b.*\b(reise|travel|viaje|voyage|reisekostenabrechnung)",
@@ -811,6 +826,51 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         m = re.search(r"\b(20\d{2})\b", text)
         if m:
             fields["year"] = m.group(1)
+
+    if task_type == TaskType.MONTH_END_CLOSING:
+        # Extract year
+        m = re.search(r"\b(20\d{2})\b", text)
+        if m:
+            fields["year"] = m.group(1)
+        # Extract month — Norwegian/English/German/French/Spanish month names or numbers
+        month_map = {
+            "januar": "01", "february": "02", "mars": "03", "april": "04",
+            "mai": "05", "juni": "06", "juli": "07", "august": "08",
+            "september": "09", "oktober": "10", "november": "11", "desember": "12",
+            "january": "01", "february": "02", "march": "03", "may": "05",
+            "june": "06", "july": "07", "october": "10", "december": "12",
+            "januar": "01", "februar": "02", "märz": "03", "marz": "03",
+            "juin": "06", "juillet": "07", "août": "08", "aout": "08",
+            "septembre": "09", "octobre": "10", "novembre": "11", "décembre": "12",
+            "enero": "01", "febrero": "02", "marzo": "03", "mayo": "05",
+            "junio": "06", "julio": "07", "agosto": "08", "septiembre": "09",
+            "octubre": "10", "noviembre": "11", "diciembre": "12",
+        }
+        for name, num in month_map.items():
+            if re.search(rf"\b{name}\b", text, re.I):
+                fields["month"] = num
+                break
+        if "month" not in fields:
+            m = re.search(r"\b(0?[1-9]|1[0-2])\s*[/.-]\s*(20\d{2})\b", text)
+            if m:
+                fields["month"] = f"{int(m.group(1)):02d}"
+                fields["year"] = m.group(2)
+        # Extract account number
+        m = re.search(r"\bkonto\w*\s+(\d{4})\b", text, re.I)
+        if not m:
+            m = re.search(r"\baccount\s+(\d{4})\b", text, re.I)
+        if not m:
+            m = re.search(r"\bkonto\s+(\d{4})\b", text, re.I)
+        if m:
+            fields["account_number"] = m.group(1)
+        # Extract amount
+        m = re.search(r"(\d[\d\s.,]*)\s*(?:kr|NOK|EUR|USD)", text, re.I)
+        if m:
+            amt_str = m.group(1).replace(",", ".").replace(" ", "")
+            try:
+                fields["amount"] = float(amt_str)
+            except ValueError:
+                pass
 
     if task_type == TaskType.ENABLE_MODULE:
         m = re.search(r"(?:modul|module|funksjon|feature)\s+(.+?)(?:\s*[,.]|$)", text, re.I)

@@ -54,6 +54,7 @@ class TaskType(str, Enum):
     BANK_RECONCILIATION = "bank_reconciliation"
     ERROR_CORRECTION = "error_correction"
     YEAR_END_CLOSING = "year_end_closing"
+    MONTH_END_CLOSING = "month_end_closing"
     ENABLE_MODULE = "enable_module"
     REGISTER_SUPPLIER_INVOICE = "register_supplier_invoice"
     CREATE_DIMENSION_VOUCHER = "create_dimension_voucher"
@@ -348,6 +349,13 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
         "required": ["year"],
         "optional": [],
     },
+    TaskType.MONTH_END_CLOSING: {
+        "required": ["month", "year"],
+        "optional": [
+            "accrual_amount", "accrual_from_account", "accrual_to_account",
+            "depreciation_cost", "depreciation_description",
+        ],
+    },
     TaskType.ENABLE_MODULE: {
         "required": ["module_name"],
         "optional": [],
@@ -421,6 +429,7 @@ TASK_TYPE_DESCRIPTIONS: dict[TaskType, str] = {
     TaskType.BANK_RECONCILIATION: "Reconcile bank transactions (often from a CSV file)",
     TaskType.ERROR_CORRECTION: "Correct an error in the ledger (reverse or adjust a voucher)",
     TaskType.YEAR_END_CLOSING: "Perform year-end closing procedures",
+    TaskType.MONTH_END_CLOSING: "Perform month-end closing: create accrual/periodification vouchers and depreciation entries",
     TaskType.ENABLE_MODULE: "Enable a company module or feature in Tripletex",
     TaskType.REGISTER_SUPPLIER_INVOICE: "Register/record an incoming supplier or vendor invoice (leverandørfaktura / Lieferantenrechnung)",
     TaskType.CREATE_DIMENSION_VOUCHER: "Create a custom accounting dimension with values, and optionally post a voucher linked to a dimension value",

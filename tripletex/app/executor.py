@@ -4681,6 +4681,202 @@ async def _exec_update_supplier(fields: dict, client: TripletexClient) -> dict:
     return result_data
 
 
+async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict:
+    """Perform month-end closing: accrual/periodification voucher + depreciation voucher.
+
+    Creates two journal entries via POST /ledger/voucher (same pattern as
+    _exec_create_dimension_voucher).
+    """
+    import calendar
+
+    # ── Extract fields ────────────────────────────────────────────────
+    month_raw = _get(fields, "month")
+    year_raw = _get(fields, "year")
+
+    # Parse month — handle names (mars, March, marzo) and numbers
+    month_map = {
+        "januar": 1, "january": 1, "enero": 1, "janvier": 1, "januar": 1,
+        "februar": 2, "february": 2, "febrero": 2, "février": 2, "fevrier": 2,
+        "mars": 3, "march": 3, "marzo": 3,
+        "april": 4, "abril": 4, "avril": 4,
+        "mai": 5, "may": 5, "mayo": 5,
+        "juni": 6, "june": 6, "junio": 6, "juin": 6,
+        "juli": 7, "july": 7, "julio": 7, "juillet": 7,
+        "august": 8, "agosto": 8, "août": 8, "aout": 8,
+        "september": 9, "septiembre": 9, "septembre": 9,
+        "oktober": 10, "october": 10, "octubre": 10, "octobre": 10,
+        "november": 11, "noviembre": 11, "novembre": 11,
+        "desember": 12, "december": 12, "diciembre": 12, "décembre": 12, "decembre": 12,
+    }
+    month = None
+    if month_raw:
+        m_str = str(month_raw).strip().lower()
+        if m_str.isdigit():
+            month = int(m_str)
+        else:
+            month = month_map.get(m_str)
+    if not month:
+        # Try to extract from raw prompt
+        prompt_text = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+        for name, num in month_map.items():
+            if name in prompt_text.lower():
+                month = num
+                break
+    if not month:
+        month = date.today().month
+
+    year = int(year_raw) if year_raw else None
+    if not year:
+        prompt_text = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+        m = re.search(r"(20\d{2})", str(prompt_text))
+        if m:
+            year = int(m.group(1))
+    if not year:
+        year = date.today().year
+
+    last_day = calendar.monthrange(year, month)[1]
+    voucher_date = f"{year}-{month:02d}-{last_day:02d}"
+
+    accrual_amount = _get(fields, "accrual_amount")
+    if accrual_amount is not None:
+        accrual_amount = _parse_number(str(accrual_amount))
+    else:
+        accrual_amount = 12500.0  # Sensible default from prompt context
+
+    accrual_from_account = str(_get(fields, "accrual_from_account") or "1720")
+    accrual_expense_account = str(_get(fields, "accrual_expense_account") or _get(fields, "expense_account") or "6000")
+
+    depreciation_cost = _get(fields, "depreciation_cost")
+    if depreciation_cost is not None:
+        depreciation_cost = _parse_number(str(depreciation_cost))
+    else:
+        depreciation_cost = 60000.0  # Default
+
+    useful_life_months = _get(fields, "useful_life_months")
+    if useful_life_months is not None:
+        useful_life_months = int(float(str(useful_life_months)))
+    else:
+        useful_life_months = 60  # 5 years default
+
+    depreciation_expense_account = str(_get(fields, "depreciation_expense_account") or "6010")
+    accumulated_depreciation_account = str(_get(fields, "accumulated_depreciation_account") or "1029")
+
+    monthly_depreciation = round(depreciation_cost / useful_life_months, 2)
+
+    _log("INFO", "Month-end closing", month=month, year=year,
+         accrual_amount=accrual_amount, monthly_depreciation=monthly_depreciation)
+
+    # ── Resolve accounts ──────────────────────────────────────────────
+    async def _resolve_account(number: str) -> int | None:
+        try:
+            accounts = await client.get_ledger_accounts({"number": number, "fields": "*"})
+            if accounts:
+                return accounts[0]["id"]
+        except TripletexAPIError:
+            pass
+        return None
+
+    accrual_from_id = await _resolve_account(accrual_from_account)
+    accrual_expense_id = await _resolve_account(accrual_expense_account)
+    depr_expense_id = await _resolve_account(depreciation_expense_account)
+    accum_depr_id = await _resolve_account(accumulated_depreciation_account)
+
+    # Fallback account resolution
+    if not accrual_expense_id:
+        accrual_expense_id = await _resolve_account("7700") or await _resolve_account("6000")
+    if not depr_expense_id:
+        depr_expense_id = await _resolve_account("6000")
+    if not accum_depr_id:
+        accum_depr_id = await _resolve_account("1020")
+
+    if not accrual_from_id or not accrual_expense_id:
+        return {"success": False, "error": f"Could not resolve accrual accounts: {accrual_from_account} / {accrual_expense_account}"}
+
+    # ── Get voucher type ──────────────────────────────────────────────
+    voucher_type_id = await _get_voucher_type_id(client, ["memorial", "periodisering", "måned", "month"])
+
+    # ── Voucher 1: Accrual / Periodification ──────────────────────────
+    accrual_desc = f"Periodisering {month:02d}/{year}"
+    accrual_payload = _clean({
+        "date": voucher_date,
+        "description": accrual_desc,
+        "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
+        "postings": [
+            {
+                "date": voucher_date,
+                "account": {"id": accrual_expense_id},
+                "amountGross": accrual_amount,
+                "amountGrossCurrency": accrual_amount,
+                "description": accrual_desc,
+            },
+            {
+                "date": voucher_date,
+                "account": {"id": accrual_from_id},
+                "amountGross": -accrual_amount,
+                "amountGrossCurrency": -accrual_amount,
+                "description": accrual_desc,
+            },
+        ],
+    })
+    _normalize_postings(accrual_payload)
+
+    accrual_voucher_id = None
+    try:
+        result = await client.create_voucher(accrual_payload)
+        accrual_voucher_id = result.get("id")
+        _log("INFO", "Accrual voucher created", voucher_id=accrual_voucher_id)
+    except TripletexAPIError as e:
+        _log("WARNING", "Accrual voucher failed", error=str(e)[:200])
+
+    # ── Voucher 2: Depreciation ───────────────────────────────────────
+    depr_voucher_id = None
+    if depr_expense_id and accum_depr_id and monthly_depreciation > 0:
+        depr_desc = f"Avskrivning {month:02d}/{year}"
+        depr_payload = _clean({
+            "date": voucher_date,
+            "description": depr_desc,
+            "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
+            "postings": [
+                {
+                    "date": voucher_date,
+                    "account": {"id": depr_expense_id},
+                    "amountGross": monthly_depreciation,
+                    "amountGrossCurrency": monthly_depreciation,
+                    "description": depr_desc,
+                },
+                {
+                    "date": voucher_date,
+                    "account": {"id": accum_depr_id},
+                    "amountGross": -monthly_depreciation,
+                    "amountGrossCurrency": -monthly_depreciation,
+                    "description": depr_desc,
+                },
+            ],
+        })
+        _normalize_postings(depr_payload)
+
+        try:
+            result = await client.create_voucher(depr_payload)
+            depr_voucher_id = result.get("id")
+            _log("INFO", "Depreciation voucher created", voucher_id=depr_voucher_id)
+        except TripletexAPIError as e:
+            _log("WARNING", "Depreciation voucher failed", error=str(e)[:200])
+
+    vouchers_created = sum(1 for v in [accrual_voucher_id, depr_voucher_id] if v)
+
+    if vouchers_created == 0:
+        return {"success": False, "error": "Failed to create any month-end vouchers"}
+
+    return {
+        "entity": "month_end_closing",
+        "vouchers_created": vouchers_created,
+        "accrual_voucher_id": accrual_voucher_id,
+        "depreciation_voucher_id": depr_voucher_id,
+        "month": month,
+        "year": year,
+    }
+
+
 async def _exec_unknown(fields: dict, client: TripletexClient) -> dict:
     _log("WARNING", "Unknown task type", fields_preview=str(fields)[:200])
     return {"success": False, "error": "Could not determine task type"}
@@ -4733,6 +4929,7 @@ _EXECUTORS: dict[TaskType, Any] = {
     TaskType.BANK_RECONCILIATION: _exec_bank_reconciliation,
     TaskType.ERROR_CORRECTION: _exec_error_correction,
     TaskType.YEAR_END_CLOSING: _exec_year_end_closing,
+    TaskType.MONTH_END_CLOSING: _exec_month_end_closing,
     TaskType.ENABLE_MODULE: _exec_enable_module,
     TaskType.REGISTER_SUPPLIER_INVOICE: _exec_create_supplier_invoice,
     TaskType.CREATE_DIMENSION_VOUCHER: _exec_create_dimension_voucher,

@@ -186,6 +186,8 @@ AND mentions payment → invoice_with_payment
 - CRITICAL: "aktiver modul" / "enable module" / "activer le module" / "Modul aktivieren" → enable_module (NOT create_project, NOT create_travel_expense, NOT run_payroll). \
 Even if the module name contains "Reiseregning" / "Travel Expense" / "Prosjekt" / "lønn", classify as enable_module.
 - CRITICAL: "årsavslutning" / "arsavslutning" / "årsoppgjør" / "avslutt år" / "year-end closing" / "Jahresabschluss" / "clôture annuelle" → year_end_closing (NOT unknown)
+- CRITICAL: "månedsslutt" / "maanedsslutt" / "month-end closing" / "Monatsabschluss" / "clôture mensuelle" / "cierre mensual" / "periodisering" → month_end_closing (NOT year_end_closing, NOT unknown). \
+Month-end closing involves accrual/periodification vouchers and depreciation, NOT annual year-end closing.
 - CRITICAL: "leverandørfaktura" / "leverandorfaktura" / "inngående faktura" / "Eingangsrechnung" / "facture fournisseur" / "supplier invoice" → register_supplier_invoice (NOT create_invoice). \
 A supplier/vendor invoice is an INCOMING invoice from a supplier, not an outgoing invoice to a customer.
 - CRITICAL: "lønnskjøring" / "lonnskjoring" / "kjør lønn" / "kjor lonn" / "run payroll" / "salary payment" → run_payroll (NOT unknown)
@@ -497,6 +499,31 @@ Output:
 Input: "Eseguire la chiusura annuale per il 2025"
 Output:
 {{"task_type": "year_end_closing", "confidence": 0.96, "fields": {{"year": "2025"}}}}
+
+### Example 34d — Month-end closing (Spanish)
+Input: "Realice el cierre mensual de marzo de 2026. Registre la periodificación de 15000 NOK de la cuenta 1700 a la cuenta 6300."
+Output:
+{{"task_type": "month_end_closing", "confidence": 0.97, "fields": {{"month": "03", "year": "2026", "accrual_amount": 15000.0, "accrual_from_account": "1700", "accrual_to_account": "6300"}}}}
+
+### Example 34e — Month-end closing (Norwegian)
+Input: "Utfør månedsslutt for mars 2026. Registrer periodisering på 25000 NOK fra konto 1700."
+Output:
+{{"task_type": "month_end_closing", "confidence": 0.97, "fields": {{"month": "03", "year": "2026", "accrual_amount": 25000.0, "accrual_from_account": "1700"}}}}
+
+### Example 34f — Month-end closing (English)
+Input: "Perform month-end closing for March 2026. Record accrual of 10000 NOK and depreciation of 5000 NOK."
+Output:
+{{"task_type": "month_end_closing", "confidence": 0.97, "fields": {{"month": "03", "year": "2026", "accrual_amount": 10000.0, "depreciation_cost": 5000.0}}}}
+
+### Example 34g — Month-end closing (German)
+Input: "Monatsabschluss März 2026 durchführen. Periodenabgrenzung von 20000 NOK buchen."
+Output:
+{{"task_type": "month_end_closing", "confidence": 0.96, "fields": {{"month": "03", "year": "2026", "accrual_amount": 20000.0}}}}
+
+### Example 34h — Month-end closing (French)
+Input: "Effectuer la clôture mensuelle de mars 2026. Enregistrer les écritures de régularisation."
+Output:
+{{"task_type": "month_end_closing", "confidence": 0.96, "fields": {{"month": "03", "year": "2026"}}}}
 
 ### Example 35 — Find supplier (Spanish)
 Input: "Buscar el proveedor NordTech AS por número de organización 987654321"
@@ -1588,6 +1615,28 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "avslutt år", "avslutt aar",
         ],
     },
+    TaskType.MONTH_END_CLOSING: {
+        "keywords": [
+            "månedsslutt", "maanedsslutt", "month-end closing", "month end closing",
+            "month-end close", "monthly closing", "monthly close",
+            "periodisering", "periodenabgrenzung",
+            # German
+            "monatsabschluss", "monatsabschluß",
+            # French
+            "clôture mensuelle", "cloture mensuelle",
+            # Spanish
+            "cierre mensual",
+            # Portuguese
+            "fechamento mensal", "encerramento mensal",
+            # Italian
+            "chiusura mensile",
+            # Swedish / Danish
+            "månadsavslut", "månedsafslutning",
+            # ASCII variants
+            "maanedsslutt", "maanedslutt",
+        ],
+        "anti_keywords": ["årsavslutning", "arsavslutning", "year-end", "year end", "årsoppgjør", "annual"],
+    },
     TaskType.ENABLE_MODULE: {
         "keywords": [
             "aktiver modul", "aktivere modul", "enable module", "slå på modul", "activate module",
@@ -2476,6 +2525,52 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
             if any_year:
                 fields["year"] = any_year.group(1)
 
+    elif task_type == TaskType.MONTH_END_CLOSING:
+        # Extract month + year: "mars 2026" / "March 2026" / "März 2026" / "marzo 2026"
+        month_names = {
+            "januar": "01", "february": "02", "mars": "03", "april": "04",
+            "mai": "05", "juni": "06", "juli": "07", "august": "08",
+            "september": "09", "oktober": "10", "november": "11", "desember": "12",
+            "january": "01", "february": "02", "march": "03", "may": "05",
+            "june": "06", "july": "07", "october": "10", "december": "12",
+            "enero": "01", "febrero": "02", "marzo": "03", "abril": "04",
+            "mayo": "05", "junio": "06", "julio": "07", "agosto": "08",
+            "septiembre": "09", "octubre": "10", "noviembre": "11", "diciembre": "12",
+            "janvier": "01", "février": "02", "mars": "03", "avril": "04",
+            "juin": "06", "juillet": "07", "août": "08",
+            "octobre": "10", "décembre": "12",
+            "januar": "01", "februar": "02", "märz": "03",
+            "mai": "05", "juni": "06", "juli": "07",
+            "setembro": "09", "outubro": "10", "novembro": "11", "dezembro": "12",
+        }
+        prompt_lower = prompt.lower()
+        for mname, mnum in month_names.items():
+            if mname in prompt_lower:
+                fields["month"] = mnum
+                break
+        # Numeric month: "måned 3" / "month 03"
+        if "month" not in fields:
+            num_month = re.search(r"(?:måned|month|mois|mes|monat|mese)\s*(\d{1,2})", prompt, re.IGNORECASE)
+            if num_month:
+                fields["month"] = num_month.group(1).zfill(2)
+        # Year
+        year_match = re.search(r"\b(20\d{2})\b", prompt)
+        if year_match:
+            fields["year"] = year_match.group(1)
+        # Accrual amount
+        if amounts:
+            fields["accrual_amount"] = amounts[0]
+        # Account numbers: "konto 1700" / "account 6300" / "Konto 1700"
+        acct_matches = re.findall(r"(?:konto|account|compte|cuenta|Konto)\s+(\d{4})", prompt, re.IGNORECASE)
+        if len(acct_matches) >= 1:
+            fields["accrual_from_account"] = acct_matches[0]
+        if len(acct_matches) >= 2:
+            fields["accrual_to_account"] = acct_matches[1]
+        # Depreciation cost
+        depr_match = re.search(r"(?:avskrivning|depreciation|Abschreibung|amortissement|depreciación|ammortamento)\w*\s+(?:av\s+|of\s+|von\s+|de\s+)?(\d[\d\s,.]*)", prompt, re.IGNORECASE)
+        if depr_match:
+            fields["depreciation_cost"] = _parse_amount(depr_match.group(1))
+
     elif task_type == TaskType.ENABLE_MODULE:
         # Extract module name: "modulen X" / "modul X" / "module X"
         mod_match = re.search(
@@ -2595,6 +2690,7 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         (["timer", "hours", "stunden", "heures", "horas", "timesheet", "timeliste", "timefør", "logg"], TaskType.LOG_HOURS),
         # Bank/year-end/error
         (["bankavstem", "reconcil", "abgleich", "rapprochement"], TaskType.BANK_RECONCILIATION),
+        (["månedsslutt", "maanedsslutt", "month-end", "month end clos", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodenabgrenzung"], TaskType.MONTH_END_CLOSING),
         (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture", "avslutt år"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct", "feil", "error correction"], TaskType.ERROR_CORRECTION),
         (["aktiver modul", "aktiver modulen", "enable module", "slå på", "slaa paa", "slaa paa modul", "activate module"], TaskType.ENABLE_MODULE),
@@ -2709,6 +2805,7 @@ def _classify_with_keywords(
             (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung"], TaskType.REGISTER_SUPPLIER_INVOICE),
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["reverser", "reverse payment", "tilbakefør", "stornere", "bounced", "rückbuchung", "returnert av banken"], TaskType.REVERSE_PAYMENT),
+            (["månedsslutt", "maanedsslutt", "month-end", "month end", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering"], TaskType.MONTH_END_CLOSING),
             (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "year-end", "year.end", "arsslutt", "jahresabschluss"], TaskType.YEAR_END_CLOSING),
             (["aktiver modul", "enable module", "slaa paa modul", "activate module", "aktiver modul"], TaskType.ENABLE_MODULE),
             (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
