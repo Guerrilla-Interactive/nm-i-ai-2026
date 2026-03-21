@@ -1635,25 +1635,21 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
     if not invoice_id:
         return {"success": False, "error": f"Invoice not found{' (#' + str(invoice_number) + ')' if invoice_number else ''}"}
 
-    # FIX 7: Fetch original invoice to extract currency for the credit note
-    currency_id = 1  # Default NOK
-    try:
-        original_invoice = await client.get_invoice(int(invoice_id))
-        if original_invoice:
-            inv_currency = original_invoice.get("currency")
-            if inv_currency and isinstance(inv_currency, dict):
-                currency_id = inv_currency.get("id", 1)
-    except (TripletexAPIError, Exception):
-        pass
-
     credit_params = _clean({
         "date": _get(fields, "credit_note_date") or _today(),
         "comment": _get(fields, "comment"),
         "sendToCustomer": "false",
-        "currencyId": currency_id,
     })
-    result = await client.create_credit_note(int(invoice_id), credit_params)
-    return {"invoice_id": invoice_id, "credit_note_id": result.get("id"), "entity": "credit_note"}
+    try:
+        result = await client.create_credit_note(int(invoice_id), credit_params)
+        return {"invoice_id": invoice_id, "credit_note_id": result.get("id"), "entity": "credit_note"}
+    except TripletexAPIError as e:
+        err_text = (e.detail or str(e)).lower()
+        if "kreditert" in err_text or "credited" in err_text or "credit" in err_text:
+            _log("INFO", "Invoice already credited — treating as success", invoice_id=invoice_id)
+            return {"invoice_id": invoice_id, "entity": "credit_note", "action": "already_credited",
+                    "note": "Invoice was already credited"}
+        raise
 
 
 async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> dict:
@@ -4640,27 +4636,45 @@ async def _exec_update_supplier(fields: dict, client: TripletexClient) -> dict:
                 supplier = fuzzy[0] if fuzzy else results[0]
     if not supplier:
         return {"success": False, "error": f"Supplier not found: {name}"}
-    # Note: bankAccountNumber is NOT a valid field on the supplier object in Tripletex.
-    # Bank accounts are managed via a separate endpoint. Include only valid fields.
+    # Collect requested changes — only attempt PUT if there are writable changes.
     bank_acct = _get(fields, "new_bank_account") or _get(fields, "bank_account") or _get(fields, "bank_account_number")
-    update = _clean({
-        "id": supplier["id"],
-        "version": supplier.get("version"),
-        "name": _get(fields, "new_name") or supplier.get("name"),
-        "organizationNumber": _clean_org_number(_get(fields, "new_org_number") or _get(fields, "org_number")) or supplier.get("organizationNumber"),
-        "email": _get(fields, "new_email") or _get(fields, "email") or supplier.get("email"),
-        "phoneNumber": _get(fields, "new_phone") or _get(fields, "phone") or supplier.get("phoneNumber"),
-    })
-    try:
-        result = await client.update_supplier(supplier["id"], update)
-    except TripletexAPIError as e:
-        return {"success": False, "error": f"Failed to update supplier: {e.detail[:200] if e.detail else str(e)}"}
+    new_name = _get(fields, "new_name")
+    new_org = _clean_org_number(_get(fields, "new_org_number"))
+    new_email = _get(fields, "new_email") or _get(fields, "email")
+    new_phone = _get(fields, "new_phone") or _get(fields, "phone")
+    new_address = _get(fields, "new_address") or _get(fields, "address")
 
-    result_data = {"updated_id": result.get("id"), "entity": "supplier"}
+    has_writable_changes = any([new_name, new_org, new_email, new_phone, new_address])
 
-    # Bank account updates are not supported via the supplier PUT endpoint.
-    # The bankAccountPresentation field is read-only and has an unknown nested schema.
-    # Avoid wasting API calls on attempts that will always fail.
+    if has_writable_changes:
+        # Build minimal update payload with required fields + changes
+        update = _clean({
+            "id": supplier["id"],
+            "version": supplier.get("version"),
+            "name": new_name or supplier.get("name"),
+            "organizationNumber": new_org or supplier.get("organizationNumber"),
+            "email": new_email or supplier.get("email"),
+            "phoneNumber": new_phone or supplier.get("phoneNumber"),
+            "isSupplier": supplier.get("isSupplier", True),
+        })
+        if new_address:
+            addr = supplier.get("postalAddress") or {}
+            if isinstance(addr, dict):
+                addr = dict(addr)
+                addr["addressLine1"] = new_address
+            else:
+                addr = {"addressLine1": new_address}
+            update["postalAddress"] = addr
+
+        try:
+            result = await client.update_supplier(supplier["id"], update)
+        except TripletexAPIError as e:
+            return {"success": False, "error": f"Failed to update supplier: {e.detail[:200] if e.detail else str(e)}"}
+        result_data = {"updated_id": result.get("id"), "entity": "supplier"}
+    else:
+        # No writable changes (e.g. bank account only) — supplier was found successfully
+        result_data = {"updated_id": supplier["id"], "entity": "supplier"}
+
     if bank_acct:
         result_data["note"] = f"Bank account '{bank_acct}' noted but not directly settable on supplier object"
 
