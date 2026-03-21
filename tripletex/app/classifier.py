@@ -195,6 +195,13 @@ A supplier/vendor invoice is an INCOMING invoice from a supplier, not an outgoin
 - CRITICAL: "lønnskjøring" / "lonnskjoring" / "kjør lønn" / "kjor lonn" / "run payroll" / "salary payment" → run_payroll (NOT unknown)
 - CRITICAL: If the prompt contains compound words ending in '-modulen' or '-modul' (e.g., 'prosjektmodulen', 'lønnsmodulen', 'reisemodulen', 'personalmodulen'), this is ALWAYS enable_module. The first part of the compound word is the MODULE NAME, not a separate entity. Do NOT classify as create_project, run_payroll, or create_travel_expense.
 - CRITICAL: 'Kontoabstimmung' / 'rapprochement bancaire' / 'conciliación bancaria' / 'conciliação bancária' / 'riconciliazione bancaria' → bank_reconciliation (NOT unknown)
+- CRITICAL: If the prompt mentions a bank statement ('relevé bancaire', 'Kontoauszug', 'extracto bancario', 'extrato bancário', 'kontoutskrift'), \
+initial balance ('solde initial', 'Anfangssaldo', 'saldo inicial'), or CSV bank data → bank_reconciliation (NOT register_supplier_invoice, NOT unknown). \
+'Rapprochez le relevé bancaire' = bank_reconciliation. Bank reconciliation is about matching bank transactions, NOT about invoices.
+- CRITICAL: 'Rechnung vom Lieferanten' / 'Rechnung des Lieferanten' / 'factura del proveedor' / 'factura de proveedor' / 'facture du fournisseur' → register_supplier_invoice (NOT create_invoice). \
+Any invoice FROM a supplier/vendor is register_supplier_invoice. CREATE_INVOICE is ONLY for outgoing invoices TO customers.
+- CRITICAL: 'Registre X horas' / 'Enregistrer X heures' / 'Erfassen Sie X Stunden' / 'Registrer X timer' + person name → log_hours (NOT invoice_existing_customer). \
+Logging hours/time on a project for an employee is log_hours, NOT an invoice operation.
 - CRITICAL: 'Korrigieren...Buchung' / 'corriger écriture' / 'corregir comprobante' / 'corrigir lançamento' / 'correggere registrazione' → error_correction (NOT unknown)
 - CRITICAL: 'encerramento anual' / 'chiusura annuale' / 'cierre anual' / 'cierre del ejercicio' → year_end_closing (NOT unknown)
 - CRITICAL: 'lønnsdimensjon' / 'prosjektdimensjon' / any Norwegian compound ending in '-dimensjon' → create_dimension_voucher. The compound word describes the dimension name.
@@ -1546,8 +1553,10 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "incoming invoice", "received invoice", "supplier invoice registration",
             # German
             "lieferantenrechnung", "eingangsrechnung",
+            "rechnung vom lieferanten", "rechnung des lieferanten",
+            "rechnung von lieferanten", "rechnung vom zulieferer",
             # French
-            "facture fournisseur",
+            "facture fournisseur", "facture du fournisseur", "facture de fournisseur",
             # Spanish
             "factura proveedor", "factura de proveedor", "factura del proveedor",
             # Portuguese
@@ -1687,6 +1696,8 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             # German / French / Portuguese
             "bankabstimmung", "kontoabstimmung", "rapprochement bancaire",
             "reconciliação bancária", "conciliação bancária",
+            # French verb forms / bank statement
+            "rapprocher", "rapprochez", "relevé bancaire", "releve bancaire",
             # Italian
             "riconciliazione bancaria",
             # Swedish / Danish

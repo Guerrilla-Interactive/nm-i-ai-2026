@@ -243,7 +243,7 @@ _KEYWORD_MAP = [
     (TaskType.BANK_RECONCILIATION, [r"\bbankavstem\w*\b",
                                      r"\bbank\w*\b.*\bavstem\w*\b",
                                      r"\bavstem\w*\b.*\bbank\w*\b",
-                                     r"\b(reconcil|abgleich|rapprochement)\w*\b",
+                                     r"\b(reconcil|abgleich|rapproch)\w*\b",
                                      r"\b(kontoabstimmung|kontenaustimmung)\w*\b",
                                      r"\bconciliaci[oó]n\s+bancaria\b",
                                      r"\bconcilia[çc][aã]o\s+banc[aá]ria\b",
@@ -252,7 +252,20 @@ _KEYWORD_MAP = [
                                      r"\b(afstemming|bankafstemming|bankabstimmung)\w*\b",
                                      r"\bbankavstämning\w*\b",
                                      r"\breconciliaci[oó]n\s+bancaria\b",
-                                     r"\breconcilia[çc][aã]o\s+banc[aá]ria\b"]),
+                                     r"\breconcilia[çc][aã]o\s+banc[aá]ria\b",
+                                     # French: "relevé bancaire" = bank statement
+                                     r"\brelev[eé]\s+bancaire\b",
+                                     # German: "Kontoauszug" = bank statement
+                                     r"\bkontoauszug\w*\b",
+                                     # Spanish: "extracto bancario" / "estado de cuenta"
+                                     r"\bextracto\s+bancario\b",
+                                     r"\bestado\s+de\s+cuenta\b.*\bbanco\b",
+                                     # Portuguese: "extrato bancário"
+                                     r"\bextrato\s+banc[aá]rio\b",
+                                     # Norwegian: "kontoutskrift" = bank statement
+                                     r"\bkontoutskrift\w*\b",
+                                     # "solde initial" / "Anfangssaldo" / "saldo inicial" = initial balance
+                                     r"\b(solde\s+initial|anfangssaldo|saldo\s+inicial)\b"]),
     # --- Payment returned / bounced / reversed → reverse_payment (before error correction) ---
     (TaskType.REVERSE_PAYMENT, [r"\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b.*\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b",
                                  r"\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b.*\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b",
@@ -312,9 +325,15 @@ _KEYWORD_MAP = [
                                     r"\b(administrator|admin|kontoadministrator)\b.*\b(ansatt|employee|mitarbeiter|tilsett)\b",
                                     r"\b(ansatt|employee|mitarbeiter|tilsett)\b.*\b(administrator|admin|kontoadministrator)\b"]),
     # --- Log Hours / Timesheet (MUST come before CREATE_EMPLOYEE — "Registrer timer for ansatt" matches both) ---
-    (TaskType.LOG_HOURS, [r"\b(log|logg|registrer|register|føre?|enter|erfassen|enregistrer)\b.*\b(timer|hours?|stunden|heures|horas|tid|time)\b",
+    (TaskType.LOG_HOURS, [r"\b(log|logg|registrer|register|føre?|enter|erfassen|enregistrer|registre)\b.*\b(timer|hours?|stunden|heures|horas|tid|time)\b",
                            r"\b(timer|hours?|timesheet|timefør\w*|tidregistrering|timeliste)\b.*\b(prosjekt|project|projekt|projet)\b",
-                           r"\b(timesheet|timeliste|timefør\w*|tidregistrering|stundenzettel|feuille.de.temps)\b"]),
+                           r"\b(timesheet|timeliste|timefør\w*|tidregistrering|stundenzettel|feuille.de.temps)\b",
+                           # Spanish: "Registre X horas para..." / "X horas para..."
+                           r"\b\d+[\.,]?\d*\s+(horas|heures|stunden|timer)\b.*\b(para|pour|für|for)\b",
+                           # "horas para <Name>" / "heures pour <Name>" / "Stunden für <Name>"
+                           r"\b(horas|heures|stunden)\b.*\b(para|pour|für)\s+[A-ZÆØÅ\u00C0-\u024F]",
+                           # verb forms: registre/enregistrez/erfassen Sie/anotar
+                           r"\b(registre|enregistrez|anotar|registrar|erfassen)\w*\b.*\b(horas|heures|stunden|timer|hours)\b"]),
     (TaskType.UPDATE_EMPLOYEE, [r"\b(oppdater|endre|update|modify|ändra|aktualisieren|ändern|actualizar|modificar|modifier|atualizar)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|empregado)\b",
                                  r"\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b.*\b(ansatt|tilsett|employee)\b",
                                  r"\b(ansatt|tilsett|employee)\b.*\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b"]),
@@ -359,6 +378,19 @@ _KEYWORD_MAP = [
         r"registrar\s+factura\s+de\s+proveedor",
         r"registrar\s+fatura\s+de\s+fornecedor",
         r"registrere\s+leverandørfaktura",
+        # German: "Rechnung vom/des Lieferanten" = invoice FROM supplier
+        r"\brechnung\b.*\b(vom|des|von)\s+(lieferant|zulieferer)\w*\b",
+        r"\b(lieferant|zulieferer)\w*\b.*\brechnung\b",
+        # French: "facture du/de fournisseur"
+        r"\bfacture\b.*\b(du|de)\s+fournisseur\b",
+        # Spanish: "factura del/de proveedor"
+        r"\bfactura\b.*\b(del|de)\s+proveedor\b",
+        # Portuguese: "fatura do/de fornecedor"
+        r"\bfatura\b.*\b(do|de)\s+fornecedor\b",
+        # English: "invoice from supplier/vendor"
+        r"\binvoice\b.*\bfrom\b.*\b(supplier|vendor)\b",
+        # "vendor invoice" / "supplier invoice" (already above but ensure word boundary)
+        r"\bvendor\s+invoice\b",
     ]),
     # --- Credit Note (MUST come before CREATE_SUPPLIER_INVOICE to avoid "invoice" matching supplier invoice) ---
     (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b",
@@ -586,8 +618,10 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
     if m:
         fields["email"] = m.group(0)
 
-    # --- Phone ---
-    m = re.search(r"(?:telefon|phone|tlf|mobil)\s*:?\s*([\d\s\+\-]+)", text, re.I)
+    # --- Phone (multilingual) ---
+    m = re.search(r"(?:telefon(?:nummer)?|phone(?:\s*number)?|tlf|mobil|téléphone|teléfono|Telefon|"
+                  r"celular|cellulare|numer\s*telefonu|Handynummer|numéro\s*(?:de\s*)?téléphone|"
+                  r"número\s*(?:de\s*)?teléfono)\s*:?\s*([\d\s\+\-()]+)", text, re.I)
     if m:
         fields["phone"] = m.group(1).strip()
 
@@ -704,15 +738,72 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             fields["user_type"] = "STANDARD"
 
     # --- Address ---
-    if task_type in (TaskType.CREATE_CUSTOMER, TaskType.CREATE_EMPLOYEE, TaskType.UPDATE_CUSTOMER):
+    if task_type in (TaskType.CREATE_CUSTOMER, TaskType.CREATE_EMPLOYEE, TaskType.UPDATE_CUSTOMER,
+                     TaskType.CREATE_SUPPLIER, TaskType.UPDATE_SUPPLIER, TaskType.CREATE_CONTACT):
         # "adresse Storgata 5, 3015 Drammen" / "address 123 Main St, 0001 Oslo"
-        m = re.search(r"(?:adresse|address|Adresse|dirección|endereço|adresse)\s*:?\s*(.+?)(?:\s*[.,]\s*(\d{4,5})\s+(\S+(?:\s+\S+)?))?(?:\s*[.,]|$)", text, re.I)
+        m = re.search(r"(?:adresse|address|Adresse|dirección|endereço|adresse|indirizzo|Anschrift)\s*:?\s*(.+?)(?:\s*[.,]\s*(\d{4,5})\s+(\S+(?:\s+\S+)?))?(?:\s*[.,]|$)", text, re.I)
         if m:
             fields["address_line1"] = m.group(1).strip().rstrip(".,")
             if m.group(2):
                 fields["postal_code"] = m.group(2)
             if m.group(3):
                 fields["city"] = m.group(3).strip().rstrip(".,")
+
+    # --- Contact-specific: customer name + contact name extraction ---
+    if task_type == TaskType.CREATE_CONTACT:
+        # "kontaktperson X Y for/hos/bei kunde/customer Z"
+        m = re.search(
+            r"(?:kontaktperson|kontakt|contact|Ansprechpartner|contacto|contato)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F]\S+)\s+([A-ZÆØÅ\u00C0-\u024F]\S+)"
+            r"(?:\s+(?:for|hos|bei|für|pour|para|per|at|chez)\s+(?:kund(?:e|en)|customer|client|cliente|Kunde)?\s*(.+?))?(?:\s*[.,]|$)",
+            text, re.I,
+        )
+        if m:
+            if "first_name" not in fields:
+                fields["first_name"] = m.group(1).rstrip(",.")
+            if "last_name" not in fields:
+                fields["last_name"] = m.group(2).rstrip(",.")
+            if m.group(3) and "customer_name" not in fields:
+                fields["customer_name"] = m.group(3).strip().rstrip(",.")
+        # Fallback: "legg til X Y som kontakt" / "add X Y as contact"
+        if "first_name" not in fields:
+            m = re.search(
+                r"(?:legg\s+til|add|créer|crear|erstelle|cria[r]?)\s+"
+                r"([A-ZÆØÅ\u00C0-\u024F]\S+)\s+([A-ZÆØÅ\u00C0-\u024F]\S+)"
+                r"\s+(?:som\s+)?(?:kontakt|contact|Kontakt|contacto|contato)",
+                text, re.I,
+            )
+            if m:
+                fields["first_name"] = m.group(1).rstrip(",.")
+                fields["last_name"] = m.group(2).rstrip(",.")
+        # Customer name: "for/hos kunde X" / "for customer X"
+        if "customer_name" not in fields:
+            m = re.search(
+                r"(?:for|hos|bei|für|pour|para|per|at|chez)\s+"
+                r"(?:kund(?:e|en)|customer|client|cliente|Kunde|Client)?\s*"
+                r"([A-ZÆØÅ\u00C0-\u024F][\w\s&-]+?)(?:\s*[.,]|\s+(?:med|with|og|and|e-post|email|telefon|phone)\b|$)",
+                text, re.I,
+            )
+            if m:
+                fields["customer_name"] = m.group(1).strip().rstrip(",.")
+        # Title/role: "med rolle X" / "title X" / "stilling X"
+        m = re.search(
+            r"(?:rolle|role|stilling|title|tittel|position|Titel|título|titre|cargo)\s*:?\s*"
+            r"(.+?)(?:\s*[.,]|\s+(?:for|hos|bei|med|with|og|and)\b|$)",
+            text, re.I,
+        )
+        if m:
+            fields["title"] = m.group(1).strip().rstrip(",.")
+
+    # --- Website ---
+    m = re.search(r"(?:nettside|website|webside|hjemmeside|Webseite|sitio\s*web|site\s*web|sito\s*web)\s*:?\s*(https?://\S+|www\.\S+|\S+\.\w{2,4})", text, re.I)
+    if m:
+        fields["website"] = m.group(1).strip()
+
+    # --- Description ---
+    m = re.search(r"(?:beskrivelse|description|Beschreibung|descripción|descrição|descrizione)\s*:?\s*(.+?)(?:\s*[.,]|$)", text, re.I)
+    if m and "description" not in fields:
+        fields["description"] = m.group(1).strip().rstrip(",.")
 
     # --- Customer name for invoices ---
     if task_type in (TaskType.CREATE_INVOICE, TaskType.INVOICE_EXISTING_CUSTOMER,
@@ -1224,6 +1315,52 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 if m:
                     fields["travel_expense_id"] = m.group(1)
 
+    # --- General date extraction (invoice_date, start_date, etc.) ---
+    # ISO dates: "dato/date 2026-03-21" or "fakturadato 2026-03-21"
+    if "invoice_date" not in fields and task_type in (
+        TaskType.CREATE_INVOICE, TaskType.INVOICE_EXISTING_CUSTOMER, TaskType.INVOICE_WITH_PAYMENT,
+    ):
+        m = re.search(r"(?:fakturadato|invoice\s*date|Rechnungsdatum|fecha\s*(?:de\s*)?factura|date\s*(?:de\s*)?facture|data\s*(?:da\s*)?fatura)\s*:?\s*(\d{4}-\d{2}-\d{2})", text, re.I)
+        if m:
+            fields["invoice_date"] = m.group(1)
+        else:
+            # European text date: "21. mars 2026", "21 de marzo de 2026", "21 März 2026"
+            _MONTH_MAP_GENERAL = {
+                "januar": "01", "january": "01", "janvier": "01", "enero": "01", "janeiro": "01",
+                "februar": "02", "february": "02", "février": "02", "febrero": "02", "fevereiro": "02",
+                "mars": "03", "march": "03", "marzo": "03", "março": "03", "märz": "03", "marz": "03",
+                "april": "04", "avril": "04", "abril": "04",
+                "mai": "05", "may": "05", "mayo": "05", "maio": "05",
+                "juni": "06", "june": "06", "juin": "06", "junio": "06", "junho": "06",
+                "juli": "07", "july": "07", "juillet": "07", "julio": "07", "julho": "07",
+                "august": "08", "août": "08", "aout": "08", "agosto": "08",
+                "september": "09", "septembre": "09", "septiembre": "09", "setembro": "09",
+                "oktober": "10", "october": "10", "octobre": "10", "octubre": "10", "outubro": "10",
+                "november": "11", "novembre": "11", "noviembre": "11", "novembro": "11",
+                "desember": "12", "december": "12", "décembre": "12", "decembre": "12",
+                "diciembre": "12", "dezembro": "12", "dezember": "12",
+            }
+            m = re.search(r"(\d{1,2})\.?\s+(?:de\s+)?([A-Za-zÀ-ÿ]+)\s+(?:de\s+)?(\d{4})", text, re.I)
+            if m:
+                day = int(m.group(1))
+                month_str = m.group(2).lower()
+                year = m.group(3)
+                month_num = _MONTH_MAP_GENERAL.get(month_str)
+                if month_num:
+                    fields["invoice_date"] = f"{year}-{month_num}-{day:02d}"
+
+    # --- Bank account number ---
+    if "bank_account_number" not in fields:
+        m = re.search(r"(?:bankkonto|bank\s*account|kontonummer|Bankverbindung|cuenta\s*bancaria|compte\s*bancaire)\s*(?:nummer|number|nr\.?)?\s*:?\s*([\d\s.-]{6,})", text, re.I)
+        if m:
+            fields["bank_account_number"] = m.group(1).replace(" ", "").replace("-", "").replace(".", "")
+
+    # --- National identity number (personnummer) ---
+    if "national_identity_number" not in fields and task_type in (TaskType.CREATE_EMPLOYEE, TaskType.UPDATE_EMPLOYEE):
+        m = re.search(r"(?:personnummer|fødselsnummer|national\s*(?:identity|id)\s*(?:number)?|SSN|DNI|CPF|NIF)\s*:?\s*(\d{11})", text, re.I)
+        if m:
+            fields["national_identity_number"] = m.group(1)
+
     return fields
 
 
@@ -1363,7 +1500,7 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
     _LAST_RESORT_WORDS = [
         (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "salary"], TaskType.RUN_PAYROLL),
         (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension", "dimensión", "dimensão", "dimensione", "lønnsdimensjon", "lonnsdimensjon"], TaskType.CREATE_DIMENSION_VOUCHER),
-        (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
+        (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung", "facture fournisseur", "factura de proveedor", "fatura de fornecedor"], TaskType.CREATE_SUPPLIER_INVOICE),
         (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
         (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário"], TaskType.CREATE_EMPLOYEE),
@@ -1372,7 +1509,7 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
         (["modul", "module", "aktiver", "activate", "activar", "ativar", "attivare", "activer", "aktivieren"], TaskType.ENABLE_MODULE),
         (["prosjekt", "project", "projekt", "projet", "proyecto"], TaskType.CREATE_PROJECT),
         (["produkt", "product", "produit", "producto", "produto"], TaskType.CREATE_PRODUCT),
-        (["timer", "hours", "timesheet", "timeliste", "stunden", "heures"], TaskType.LOG_HOURS),
+        (["timer", "hours", "timesheet", "timeliste", "stunden", "heures", "horas"], TaskType.LOG_HOURS),
         (["reiseregning", "reiserekning", "travel expense", "reisekosten", "frais de voyage"], TaskType.CREATE_TRAVEL_EXPENSE),
         (["kontaktperson", "contact", "contacto", "contato"], TaskType.CREATE_CONTACT),
         (["betaling", "payment", "innbetaling", "pago", "zahlung", "paiement"], TaskType.REGISTER_PAYMENT),
@@ -1402,9 +1539,52 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
 async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClassification:
     """Route to the appropriate classifier based on LLM_MODE.
 
-    Flow: rule-based first (instant) → if confident, skip LLM → else LLM.
+    Flow: hard overrides → rule-based first (instant) → if confident, skip LLM → else LLM.
     """
-    from classifier import _post_process_fields, _normalize_fields
+    from classifier import _post_process_fields, _normalize_fields, _extract_fields_generic
+
+    # STEP 0: Hard overrides for known T3 misclassifications
+    p_lower = prompt.lower()
+    has_csv = False
+    if files:
+        for f in files:
+            fname = (f.get("name") or f.get("filename") or "").lower()
+            mime = (f.get("mime_type") or "").lower()
+            if fname.endswith(".csv") or "csv" in mime:
+                has_csv = True
+                break
+    if not has_csv and ("csv" in p_lower or ".csv" in p_lower):
+        has_csv = True
+
+    override_type = None
+    # CSV + bank signals → BANK_RECONCILIATION (fixes French bank recon misclassification)
+    bank_signals = ["banque", "bancaire", "bank", "konto", "compte", "relevé",
+                    "releve", "solde", "transact", "kontoutskrift", "kontoauszug",
+                    "rapproch", "reconcil", "avstem", "abgleich"]
+    if has_csv and any(sig in p_lower for sig in bank_signals):
+        override_type = TaskType.BANK_RECONCILIATION
+    # German: "Rechnung" + supplier signal → REGISTER_SUPPLIER_INVOICE
+    elif "rechnung" in p_lower and any(s in p_lower for s in [
+        "lieferant", "zulieferer", "vom lieferant", "des lieferant",
+        "von lieferant", "eingang",
+    ]):
+        override_type = TaskType.REGISTER_SUPPLIER_INVOICE
+    # French: "facture" + "fournisseur" → REGISTER_SUPPLIER_INVOICE
+    elif "facture" in p_lower and "fournisseur" in p_lower:
+        override_type = TaskType.REGISTER_SUPPLIER_INVOICE
+
+    if override_type:
+        fields = _extract_fields_generic(prompt, override_type)
+        fields = _post_process_fields(override_type, fields)
+        fields = _normalize_fields(override_type, fields)
+        log("INFO", "Hard override classification",
+            task_type=str(override_type), trigger="misclassification_fix")
+        return TaskClassification(
+            task_type=override_type,
+            confidence=0.95,
+            fields=fields,
+            raw_prompt=prompt,
+        )
 
     # STEP 1: Always run rule-based first (instant, <1ms)
     rule_result = await _classify_rule_based(prompt, files)

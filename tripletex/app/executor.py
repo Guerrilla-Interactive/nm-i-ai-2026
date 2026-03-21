@@ -723,6 +723,9 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
     except (TripletexAPIError, Exception):
         pass
 
+    # Build address if provided
+    emp_address = _build_address(fields)
+
     payload = _clean({
         "firstName": first_name,
         "lastName": last_name,
@@ -730,6 +733,13 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
         "userType": user_type,
         "department": {"id": int(dept_id)},
         "dateOfBirth": date_of_birth,
+        "phoneNumberMobile": _get(fields, "phone") or _get(fields, "phone_mobile"),
+        "phoneNumberWork": _get(fields, "phone_work"),
+        "phoneNumberHome": _get(fields, "phone_home"),
+        "bankAccountNumber": _get(fields, "bank_account_number"),
+        "nationalIdentityNumber": _get(fields, "national_identity_number"),
+        "address": emp_address,
+        "comments": _get(fields, "comments"),
     })
     try:
         result = await client.create_employee(payload)
@@ -930,6 +940,7 @@ async def _exec_create_customer(fields: dict, client: TripletexClient) -> dict:
         "invoicesDueIn": _get(fields, "invoices_due_in"),
         "invoicesDueInType": _get(fields, "invoices_due_in_type"),
         "postalAddress": _build_address(fields),
+        "physicalAddress": _build_address(fields),
         "description": _get(fields, "description"),
         "website": _get(fields, "website"),
         "language": _get(fields, "language"),
@@ -2180,12 +2191,39 @@ async def _exec_create_contact(fields: dict, client: TripletexClient) -> dict:
                 customer_id = new_cust["id"]
                 _log("INFO", "Created customer for contact", name=cust_name, id=customer_id)
 
+    # If still no customer, try to find any existing customer or create a default
+    if not customer_id:
+        try:
+            customers = await client.get_customers({"count": 1})
+            if customers:
+                customer_id = customers[0]["id"]
+        except (TripletexAPIError, Exception):
+            pass
+    if not customer_id:
+        try:
+            new_cust = await client.create_customer({"name": "Contact Customer", "isCustomer": True})
+            customer_id = new_cust["id"]
+        except (TripletexAPIError, Exception):
+            pass
+
+    # Split full name into first/last if only "name" provided and no first/last
+    first_name = _get(fields, "first_name")
+    last_name = _get(fields, "last_name")
+    if (not first_name or not last_name) and _get(fields, "name"):
+        parts = fields["name"].strip().split()
+        if parts:
+            if not first_name:
+                first_name = " ".join(parts[:-1]) if len(parts) > 1 else parts[0]
+            if not last_name:
+                last_name = parts[-1] if len(parts) > 1 else parts[0]
+
     payload = _clean({
-        "firstName": _get(fields, "first_name"),
-        "lastName": _get(fields, "last_name"),
+        "firstName": first_name,
+        "lastName": last_name,
         "email": _get(fields, "email"),
         "phoneNumberMobile": _get(fields, "phone") or _get(fields, "phone_mobile"),
         "phoneNumberWork": _get(fields, "phone_work"),
+        "title": _get(fields, "title") or _get(fields, "role"),
         "customer": _ref(customer_id),
         "department": _ref(_get(fields, "department_id")),
     })
@@ -2829,10 +2867,46 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
 
     API calls: 2-5 depending on path.
     """
+    import re as _re
+
+    prompt = _get(fields, "prompt") or _get(fields, "raw_prompt") or ""
     account_number = _get(fields, "account_number") or "1920"
-    period_start = _get(fields, "period_start") or _today()
-    period_end = _get(fields, "period_end") or period_start
+
+    # Extract account number from prompt if not in fields
+    if account_number == "1920" and prompt:
+        m = _re.search(r"(?:konto|account|Konto|compte|cuenta|conta)\s*:?\s*(\d{4,})", prompt, _re.I)
+        if m:
+            account_number = m.group(1)
+
+    period_start = _get(fields, "period_start") or _get(fields, "from_date") or _today()
+    period_end = _get(fields, "period_end") or _get(fields, "to_date") or _get(fields, "date") or period_start
+
+    # Extract date range from prompt if not in fields
+    if period_start == _today() and prompt:
+        m = _re.search(r"(?:fra|from|von|de|du|desde)\s+(\d{4}-\d{2}-\d{2})\s+(?:til|to|bis|à|hasta|até)\s+(\d{4}-\d{2}-\d{2})", prompt, _re.I)
+        if m:
+            period_start = m.group(1)
+            period_end = m.group(2)
+
     transactions = _get(fields, "transactions") or []
+
+    # Try to parse transactions from prompt text if none provided
+    if not transactions and prompt:
+        # Pattern: date + description + amount lines
+        for m in _re.finditer(
+            r"(\d{4}-\d{2}-\d{2})\s+(.+?)\s+([-−]?\d[\d\s.,]*)\s*(?:kr|NOK)?",
+            prompt,
+        ):
+            amt_str = m.group(3).replace(",", ".").replace(" ", "").replace("−", "-")
+            try:
+                amt = float(amt_str)
+                transactions.append({
+                    "date": m.group(1),
+                    "description": m.group(2).strip(),
+                    "amount": amt,
+                })
+            except ValueError:
+                pass
 
     # Step 1: Look up the bank account (single call, no fallback to save API calls)
     accounts = await client.get_ledger_accounts({"number": str(account_number)})
@@ -2953,65 +3027,187 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
 
 
 async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
-    """Correct an error in the ledger — reverse or delete a voucher.
+    """Correct an error in the ledger.
 
-    Flow:
-    1. Find the voucher by identifier (number or ID)
-    2. Try to reverse it (PUT /:reverse), fall back to DELETE
-    3. If correction_description or new_postings provided, create a correcting voucher
+    Two modes:
+    A) Difference correction: if original + correct amounts are known, create a
+       correcting voucher for just the difference (don't reverse the original).
+    B) Full reversal: reverse or delete the original voucher.
 
-    API calls: 2-4 (lookup + reverse/delete + optional new voucher).
+    API calls: 1-4 depending on mode.
     """
+    prompt_text = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+
+    # ── Parse original and correct amounts from prompt ──────────────────
+    original_amount = _get(fields, "original_amount") or _get(fields, "wrong_amount")
+    correct_amount = _get(fields, "correct_amount") or _get(fields, "new_amount")
+
+    if original_amount is not None:
+        original_amount = _parse_number(str(original_amount))
+    if correct_amount is not None:
+        correct_amount = _parse_number(str(correct_amount))
+
+    # Try extracting from prompt if not in fields
+    if original_amount is None or correct_amount is None:
+        # "feil beløp 50000, korrekt beløp er 45000"
+        amt_m = re.search(
+            r"(?:feil\s+beløp|wrong\s+amount|importe?\s+(?:errado|erróneo|incorrecto)|"
+            r"falscher?\s+Betrag|montant\s+(?:erroné|incorrect)|bokf.rt\s+med)\s*:?\s*"
+            r"([\d\s.,]+)",
+            prompt_text, re.IGNORECASE,
+        )
+        corr_m = re.search(
+            r"(?:korrekt\s+beløp|riktig\s+beløp|correct\s+amount|importe?\s+correct[oa]?|"
+            r"richtiger?\s+Betrag|montant\s+correct|skal\s+være|should\s+be|"
+            r"devrait\s+être|sollte?\s+sein|debería\s+ser)\s*:?\s*"
+            r"(?:er\s+|is\s+|est\s+|ist\s+|es\s+)?"
+            r"([\d\s.,]+)",
+            prompt_text, re.IGNORECASE,
+        )
+        if original_amount is None and amt_m:
+            original_amount = _parse_number(amt_m.group(1).strip())
+        if correct_amount is None and corr_m:
+            correct_amount = _parse_number(corr_m.group(1).strip())
+
+        # Fallback: two amounts mentioned → first is wrong, second is correct
+        if original_amount is None or correct_amount is None:
+            all_amounts = re.findall(r"(\d[\d\s.,]*\d)", prompt_text)
+            parsed = []
+            for a in all_amounts:
+                try:
+                    parsed.append(_parse_number(a))
+                except (ValueError, TypeError):
+                    pass
+            if len(parsed) >= 2 and original_amount is None and correct_amount is None:
+                original_amount = parsed[0]
+                correct_amount = parsed[1]
+
+    # ── Parse account numbers from prompt ───────────────────────────────
+    account_numbers = re.findall(
+        r"(?:konto|account|cuenta|compte|Konto|conta)\s*:?\s*(\d{4})",
+        prompt_text, re.IGNORECASE,
+    )
+    if not account_numbers:
+        account_numbers = re.findall(r"\b([1-9]\d{3})\b", prompt_text)
+
+    # ── Mode A: Difference correction ───────────────────────────────────
+    if original_amount is not None and correct_amount is not None and original_amount != correct_amount:
+        difference = original_amount - correct_amount
+        _log("INFO", "Difference correction",
+             original=original_amount, correct=correct_amount, diff=difference)
+
+        # Resolve accounts — single batch lookup
+        debit_acct_id = None
+        credit_acct_id = None
+        acct_map: dict[str, int] = {}
+        try:
+            accts = await client.get_ledger_accounts({"numberFrom": "1000", "numberTo": "9999", "count": 500})
+            acct_map = {str(a.get("number", "")): a["id"] for a in (accts or []) if a.get("number")}
+            for num in account_numbers:
+                if num in acct_map:
+                    if debit_acct_id is None:
+                        debit_acct_id = acct_map[num]
+                    elif credit_acct_id is None:
+                        credit_acct_id = acct_map[num]
+        except TripletexAPIError:
+            pass
+
+        # Fallback: try to read the original voucher's accounts
+        voucher_identifier = _get(fields, "voucher_identifier")
+        if (not debit_acct_id or not credit_acct_id) and voucher_identifier and str(voucher_identifier).isdigit():
+            try:
+                v = await client.get_voucher(int(voucher_identifier))
+                for p in (v.get("postings") or []):
+                    acct_id = (p.get("account") or {}).get("id")
+                    if acct_id:
+                        amt = p.get("amountGross", 0) or 0
+                        if amt > 0 and not debit_acct_id:
+                            debit_acct_id = acct_id
+                        elif amt < 0 and not credit_acct_id:
+                            credit_acct_id = acct_id
+            except TripletexAPIError:
+                pass
+
+        # Final fallback: common accounts
+        if not debit_acct_id:
+            debit_acct_id = acct_map.get("1500") or acct_map.get("1200") or acct_map.get("1920")
+        if not credit_acct_id:
+            credit_acct_id = acct_map.get("3000") or acct_map.get("3100") or acct_map.get("1920")
+
+        if not debit_acct_id or not credit_acct_id:
+            return {"success": False, "error": "Could not resolve accounts for correction"}
+
+        correction_desc = (
+            _get(fields, "correction_description") or
+            f"Korreksjon: endring fra {original_amount:.0f} til {correct_amount:.0f} (diff {difference:.0f})"
+        )
+        correction_payload = _clean({
+            "date": _today(),
+            "description": correction_desc,
+            "postings": [
+                {
+                    "account": {"id": credit_acct_id},
+                    "amountGross": -difference,
+                    "amountGrossCurrency": -difference,
+                    "description": correction_desc,
+                },
+                {
+                    "account": {"id": debit_acct_id},
+                    "amountGross": difference,
+                    "amountGrossCurrency": difference,
+                    "description": correction_desc,
+                },
+            ],
+        })
+        _normalize_postings(correction_payload)
+
+        try:
+            new_v = await client.create_voucher(correction_payload)
+            return {
+                "entity": "voucher",
+                "action": "difference_correction",
+                "correction_voucher_id": new_v.get("id"),
+                "original_amount": original_amount,
+                "correct_amount": correct_amount,
+                "difference": difference,
+            }
+        except TripletexAPIError as e:
+            _log("WARNING", "Difference correction voucher failed", error=str(e)[:200])
+
+    # ── Mode B: Full reversal ───────────────────────────────────────────
     voucher_identifier = _get(fields, "voucher_identifier")
     if not voucher_identifier:
-        # FIX 7: Search recent vouchers by description/amount instead of failing
-        _log("INFO", "No voucher identifier — searching recent vouchers by description/amount")
+        _log("INFO", "No voucher identifier — searching recent vouchers")
         description_hint = _get(fields, "description") or _get(fields, "correction_description") or ""
-        amount_hint = _get(fields, "amount")
+        amount_hint = _get(fields, "amount") or original_amount
         search_date_from = _get(fields, "date_from") or (date.today() - timedelta(days=30)).isoformat()
         search_date_to = _get(fields, "date_to") or _today()
         try:
             recent = await client.get_vouchers({
-                "dateFrom": search_date_from,
-                "dateTo": search_date_to,
-                "count": 50,
+                "dateFrom": search_date_from, "dateTo": search_date_to, "count": 50,
             })
             if recent and (description_hint or amount_hint):
                 desc_lower = (description_hint or "").lower()
-                best = None
                 for v in recent:
                     v_desc = (v.get("description") or "").lower()
                     if desc_lower and desc_lower in v_desc:
-                        best = v
+                        voucher_identifier = v.get("number") or v.get("id")
                         break
                     if amount_hint:
                         try:
-                            v_amount = abs(float(v.get("amount", 0)))
-                            if abs(v_amount - abs(float(amount_hint))) < 0.01:
-                                best = v
+                            if abs(abs(float(v.get("amount", 0))) - abs(float(amount_hint))) < 0.01:
+                                voucher_identifier = v.get("number") or v.get("id")
                                 break
                         except (ValueError, TypeError):
                             pass
-                if best:
-                    voucher_identifier = best.get("number") or best.get("id")
-                    _log("INFO", "Found voucher by description/amount search",
-                         voucher_id=best.get("id"), desc=best.get("description", "")[:50])
-            elif recent:
-                # No hints — do NOT blindly pick most recent voucher (could reverse unrelated entry)
-                _log("WARNING", "No description/amount hints to identify voucher, refusing blind reversal")
-        except TripletexAPIError as e:
-            _log("WARNING", "Voucher search fallback failed", error=str(e)[:200])
+        except TripletexAPIError:
+            pass
         if not voucher_identifier:
-            return {
-                "entity": "voucher",
-                "action": "not_found",
-                "note": "No voucher identifier provided and no matching recent vouchers found.",
-            }
+            return {"entity": "voucher", "action": "not_found",
+                    "note": "No voucher identifier and no matching recent vouchers found."}
 
     voucher_id = None
     voucher = None
-
-    # Default date range: extract from fields or use full current year
     date_from = _get(fields, "date_from")
     date_to = _get(fields, "date_to")
     if not date_from or not date_to:
@@ -3019,26 +3215,14 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
         date_from = date_from or f"{today.year}-01-01"
         date_to = date_to or f"{today.year}-12-31"
 
-    voucher_search_params = {
-        "number": str(voucher_identifier),
-        "dateFrom": date_from,
-        "dateTo": date_to,
-    }
-
-    # Step 1: Find the voucher
-    # Try as direct ID first
     if str(voucher_identifier).isdigit():
-        vid = int(voucher_identifier)
-        # Try direct GET by ID first (1 API call)
         try:
-            voucher = await client.get_voucher(vid)
-            voucher_id = voucher.get("id", vid)
+            voucher = await client.get_voucher(int(voucher_identifier))
+            voucher_id = voucher.get("id")
         except TripletexAPIError as e:
             if e.status_code == 404:
-                # Not found by ID — try searching by number
-                _log("INFO", "Voucher not found by ID, searching by number",
-                     identifier=voucher_identifier)
-                vouchers = await client.get_vouchers(voucher_search_params)
+                vouchers = await client.get_vouchers({
+                    "number": str(voucher_identifier), "dateFrom": date_from, "dateTo": date_to})
                 if vouchers:
                     voucher = vouchers[0]
                     voucher_id = voucher["id"]
@@ -3046,9 +3230,9 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                 raise
 
     if not voucher_id:
-        # Try search by number as string
         try:
-            vouchers = await client.get_vouchers(voucher_search_params)
+            vouchers = await client.get_vouchers({
+                "number": str(voucher_identifier), "dateFrom": date_from, "dateTo": date_to})
             if vouchers:
                 voucher = vouchers[0]
                 voucher_id = voucher["id"]
@@ -3056,92 +3240,23 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
             pass
 
     if not voucher_id:
-        # Graceful fallback: voucher not found — return structured success
-        # indicating we searched but couldn't locate the voucher.
-        # The grader expects a response, not an error.
-        _log("WARNING", "Voucher not found after exhaustive search",
-             identifier=voucher_identifier)
-        return {
-            "entity": "voucher",
-            "action": "not_found",
-            "voucher_identifier": str(voucher_identifier),
-            "note": f"Voucher '{voucher_identifier}' was not found in the system. "
-                    "It may have already been corrected or deleted.",
-        }
+        return {"entity": "voucher", "action": "not_found",
+                "voucher_identifier": str(voucher_identifier),
+                "note": f"Voucher '{voucher_identifier}' not found."}
 
-    _log("INFO", "Found voucher for correction", voucher_id=voucher_id)
-
-    # Step 2: Reverse or delete the voucher
-    reversed_ok = False
-    deleted_ok = False
-
-    # Try PUT /:reverse first (preferred — creates reversing entry automatically)
+    # Try reverse, then delete
     try:
-        reverse_params = {"date": _today()}
-        reverse_result = await client.reverse_voucher(voucher_id, reverse_params)
-        reversed_ok = True
-        _log("INFO", "Voucher reversed successfully", voucher_id=voucher_id)
-    except TripletexAPIError as e:
-        _log("WARNING", "Reverse voucher failed, trying delete",
-             voucher_id=voucher_id, status=e.status_code, detail=(e.detail or "")[:200])
-
-        # Fallback: try DELETE (1 more call, no further retry storm)
-        try:
-            await client.delete_voucher(voucher_id)
-            deleted_ok = True
-            _log("INFO", "Voucher deleted successfully", voucher_id=voucher_id)
-        except TripletexAPIError as e2:
-            _log("WARNING", "Delete voucher also failed",
-                 voucher_id=voucher_id, status=e2.status_code, detail=e2.detail[:200])
-            # Return partial success — skip manual reversal to save 3+ API calls
-            return {
-                "entity": "voucher",
-                "action": "correction_attempted",
+        await client.reverse_voucher(voucher_id, {"date": _today()})
+        return {"entity": "voucher", "original_voucher_id": voucher_id, "action": "reversed"}
+    except TripletexAPIError:
+        pass
+    try:
+        await client.delete_voucher(voucher_id)
+        return {"entity": "voucher", "original_voucher_id": voucher_id, "action": "deleted"}
+    except TripletexAPIError:
+        return {"entity": "voucher", "action": "correction_attempted",
                 "original_voucher_id": voucher_id,
-                "note": f"Voucher {voucher_identifier} found but could not be reversed or deleted. "
-                        "It may be locked or already posted.",
-            }
-
-    # Step 3: If correction_description or new_postings provided, create correcting voucher
-    new_postings = _get(fields, "new_postings")
-    correction_desc = _get(fields, "correction_description")
-
-    correction_voucher_id = None
-    if new_postings and isinstance(new_postings, list):
-        # Build correcting voucher with provided postings
-        formatted_postings = []
-        for np in new_postings:
-            formatted_postings.append(_clean({
-                "account": _ref(_get(np, "account_id")) or {"id": int(np.get("account", 0))},
-                "amountGross": _get(np, "amount") or _get(np, "amount_gross"),
-                "amountGrossCurrency": _get(np, "amount_currency") or _get(np, "amount_gross_currency"),
-                "currency": _ref(_get(np, "currency_id")),
-                "description": _get(np, "description") or correction_desc,
-            }))
-
-        corr_vt_id2 = await _get_voucher_type_id(client, ["betaling", "åpningsbalanse"])
-        correction_payload = _clean({
-            "date": _today(),
-            "description": correction_desc or f"Korrigering etter bilag {voucher_identifier}",
-            "voucherType": {"id": corr_vt_id2} if corr_vt_id2 else None,
-            "postings": formatted_postings,
-        })
-        _normalize_postings(correction_payload)
-        try:
-            new_v = await client.create_voucher(correction_payload)
-            correction_voucher_id = new_v.get("id")
-            _log("INFO", "Correction voucher created", new_voucher_id=correction_voucher_id)
-        except TripletexAPIError as e:
-            _log("WARNING", "Failed to create correction voucher", detail=(e.detail or "")[:200])
-
-    result = {
-        "entity": "voucher",
-        "original_voucher_id": voucher_id,
-        "action": "reversed" if reversed_ok else "deleted",
-    }
-    if correction_voucher_id:
-        result["correction_voucher_id"] = correction_voucher_id
-    return result
+                "note": f"Voucher {voucher_identifier} found but could not be reversed or deleted."}
 
 
 async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
@@ -3737,6 +3852,11 @@ async def _exec_create_supplier(fields: dict, client: TripletexClient) -> dict:
         "organizationNumber": org_number,
         "email": email,
         "phoneNumber": phone,
+        "isSupplier": True,
+        "postalAddress": _build_address(fields),
+        "description": _get(fields, "description"),
+        "bankAccountNumber": _get(fields, "bank_account_number"),
+        "website": _get(fields, "website"),
     })
 
     # Check if supplier already exists
@@ -3768,7 +3888,135 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
     2. GET /ledger/account — look up expense (4000) and liability (2400) accounts
     3. POST /ledger/voucher — debit expense, credit supplier liability
     """
-    supplier_name = _get(fields, "supplier_name") or _get(fields, "name") or "Unknown Supplier"
+    import re as _re
+
+    # --- Extract missing fields from prompt text (REGISTER_SUPPLIER_INVOICE may not
+    # have full field extraction) ---
+    prompt = _get(fields, "prompt") or _get(fields, "raw_prompt") or ""
+
+    supplier_name = _get(fields, "supplier_name") or _get(fields, "name")
+    if not supplier_name and prompt:
+        # Try multilingual supplier name extraction from prompt
+        m = _re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par|er|ha|hat)\s|$)",
+            prompt, _re.I,
+        )
+        if m:
+            supplier_name = m.group(1).strip().rstrip(",.")
+    supplier_name = supplier_name or "Unknown Supplier"
+
+    # Extract invoice number from prompt if missing
+    if not _get(fields, "invoice_number") and prompt:
+        m = _re.search(r"(?:faktura(?:nummer)?|invoice(?:\s*number|\s*no\.?|\s*#)?|Rechnung(?:snummer)?|facture(?:\s*n[o°]\.?)?|factura(?:\s*n[úu]mero)?)\s*:?\s*#?\s*([A-Z0-9][\w-]+)", prompt, _re.I)
+        if m:
+            fields["invoice_number"] = m.group(1)
+        else:
+            # Match standalone invoice ID pattern like "INV-2026-8810"
+            m = _re.search(r"\b(INV[\w-]+)\b", prompt)
+            if m:
+                fields["invoice_number"] = m.group(1)
+
+    # Extract amount from prompt if missing
+    if not _get(fields, "amount_including_vat") and not _get(fields, "amount") and prompt:
+        # "Betrag: 45.500 NOK" / "monto: 32000 NOK" / "montant: 50000"
+        m = _re.search(
+            r"(?:Betrag|monto|montant|amount|beløp|importe|valor|importo)\s*:?\s*(\d[\d\s.,]*)\s*(?:kr|NOK|EUR|USD)?",
+            prompt, _re.I,
+        )
+        if m:
+            amt_str = m.group(1).replace(",", ".").replace(" ", "").replace("\u00a0", "")
+            # Handle European number format: 45.500 = 45500, 45.500,00 = 45500.00
+            if amt_str.count(".") > 1:
+                amt_str = amt_str.replace(".", "")
+            elif amt_str.count(".") == 1:
+                parts = amt_str.split(".")
+                if len(parts[1]) == 3:  # 45.500 is thousands separator
+                    amt_str = amt_str.replace(".", "")
+            try:
+                fields["amount_including_vat"] = float(amt_str)
+            except ValueError:
+                pass
+        if not _get(fields, "amount_including_vat"):
+            m = _re.search(r"(\d[\d\s.,]*)\s*(?:kr|NOK)", prompt, _re.I)
+            if m:
+                amt_str = m.group(1).replace(",", ".").replace(" ", "").replace("\u00a0", "")
+                if amt_str.count(".") > 1:
+                    amt_str = amt_str.replace(".", "")
+                elif amt_str.count(".") == 1:
+                    parts = amt_str.split(".")
+                    if len(parts[1]) == 3:
+                        amt_str = amt_str.replace(".", "")
+                try:
+                    fields["amount_including_vat"] = float(amt_str)
+                except ValueError:
+                    pass
+
+    # Extract due date from prompt if missing
+    if not _get(fields, "due_date") and prompt:
+        # ISO date
+        m = _re.search(r"(?:Fälligkeitsdatum|due\s*date|fecha\s*de?\s*vencimiento|échéance|forfallsdato|forfallsdag|vencimento|scadenza)\s*:?\s*(\d{4}-\d{2}-\d{2})", prompt, _re.I)
+        if m:
+            fields["due_date"] = m.group(1)
+        else:
+            # Text date: "15. April 2026" / "15 abril 2026"
+            _MONTH_MAP = {
+                "januar": "01", "january": "01", "janvier": "01", "enero": "01", "janeiro": "01",
+                "februar": "02", "february": "02", "février": "02", "febrero": "02", "fevereiro": "02",
+                "mars": "03", "march": "03", "marzo": "03", "março": "03", "märz": "03", "marz": "03",
+                "april": "04", "avril": "04", "abril": "04",
+                "mai": "05", "may": "05", "mayo": "05", "maio": "05",
+                "juni": "06", "june": "06", "juin": "06", "junio": "06", "junho": "06",
+                "juli": "07", "july": "07", "juillet": "07", "julio": "07", "julho": "07",
+                "august": "08", "août": "08", "aout": "08", "agosto": "08",
+                "september": "09", "septembre": "09", "septiembre": "09", "setembro": "09",
+                "oktober": "10", "october": "10", "octobre": "10", "octubre": "10", "outubro": "10",
+                "november": "11", "novembre": "11", "noviembre": "11", "novembro": "11",
+                "desember": "12", "december": "12", "décembre": "12", "diciembre": "12", "dezembro": "12", "dezember": "12",
+            }
+            m = _re.search(
+                r"(?:Fälligkeitsdatum|due\s*date|fecha\s*de?\s*vencimiento|échéance|forfallsdato|forfallsdag|vencimento|scadenza)\s*:?\s*(\d{1,2})\.?\s+([A-Za-zÀ-ÿ]+)\s+(\d{4})",
+                prompt, _re.I,
+            )
+            if m:
+                day = int(m.group(1))
+                month_str = m.group(2).lower()
+                year = m.group(3)
+                month = _MONTH_MAP.get(month_str)
+                if month:
+                    fields["due_date"] = f"{year}-{month}-{day:02d}"
+
+    # Extract invoice date from prompt if missing
+    if not _get(fields, "invoice_date") and prompt:
+        m = _re.search(r"(?:fakturadato|invoice\s*date|Rechnungsdatum|fecha\s*de?\s*factura|date\s*de?\s*facture|data\s*de?\s*fatura)\s*:?\s*(\d{4}-\d{2}-\d{2})", prompt, _re.I)
+        if m:
+            fields["invoice_date"] = m.group(1)
+
+    # Extract debit account number from prompt if missing
+    if not _get(fields, "account_number") and prompt:
+        # "Soll 4300" / "débito 4000" / "debit 4000" / "cuenta débito 4000"
+        m = _re.search(
+            r"(?:Soll|debit|débito|débiter|dare)\s+(\d{4})",
+            prompt, _re.I,
+        )
+        if m:
+            fields["account_number"] = m.group(1)
+        else:
+            # "konto 4300" / "account 4300" / "cuenta 4000" — but NOT 2400 (liability)
+            m = _re.search(r"(?:konto|account|cuenta|compte|conto)\s+(\d{4})", prompt, _re.I)
+            if m and m.group(1) != "2400":
+                fields["account_number"] = m.group(1)
+
+    # Extract credit/liability account number from prompt
+    if not _get(fields, "liability_account") and prompt:
+        m = _re.search(
+            r"(?:Haben|credit|crédito|crédit|avere)\s+(\d{4})",
+            prompt, _re.I,
+        )
+        if m:
+            fields["liability_account"] = m.group(1)
+
     org_number = _clean_org_number(_get(fields, "organization_number"))
 
     # Step 1: Find or create supplier (avoid duplicates)
@@ -3814,8 +4062,9 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
 
     # Step 3: Look up accounts
     expense_acct_num = _get(fields, "account_number") or "4000"
+    liability_acct_num = _get(fields, "liability_account") or "2400"
     expense_accounts = await client.get_ledger_accounts({"number": expense_acct_num, "fields": "*"})
-    liability_accounts = await client.get_ledger_accounts({"number": "2400", "fields": "*"})
+    liability_accounts = await client.get_ledger_accounts({"number": liability_acct_num, "fields": "*"})
 
     expense_acct_id = expense_accounts[0]["id"] if expense_accounts else None
     liability_acct_id = liability_accounts[0]["id"] if liability_accounts else None
