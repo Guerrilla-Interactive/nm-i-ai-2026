@@ -342,8 +342,8 @@ async def _find_employee(client: TripletexClient, fields: dict) -> dict | None:
             if matches:
                 return matches[0]
 
-    # Only return first employee if we didn't have a last_name to filter by
-    if not last_name:
+    # Only return first result if we had meaningful API-level search criteria
+    if not last_name and (first_name or email):
         return employees[0]
     return None
 
@@ -848,7 +848,7 @@ async def _exec_update_customer(fields: dict, client: TripletexClient) -> dict:
         "email": _get(fields, "new_email") or _get(fields, "email") or cust.get("email"),
         "invoiceEmail": _get(fields, "new_invoice_email") or _get(fields, "invoice_email"),
         "phoneNumber": _get(fields, "new_phone") or _get(fields, "phone"),
-        "organizationNumber": _get(fields, "new_org_number") or _get(fields, "org_number"),
+        "organizationNumber": _clean_org_number(_get(fields, "new_org_number") or _get(fields, "org_number")),
         "isPrivateIndividual": _get(fields, "is_private_individual"),
         "postalAddress": _build_address(fields, "new_") or _build_address(fields) or cust.get("postalAddress"),
         "description": _get(fields, "new_description") or _get(fields, "description"),
@@ -1270,7 +1270,7 @@ async def _exec_create_invoice(fields: dict, client: TripletexClient) -> dict:
                 cust_payload = _clean({
                     "name": customer_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
                     "email": _get(fields, "email") or _get(fields, "customer_email"),
                     "postalAddress": _build_address(fields),
                 })
@@ -1328,7 +1328,7 @@ async def _exec_invoice_existing_customer(fields: dict, client: TripletexClient)
         cust_payload = _clean({
             "name": customer_name,
             "isCustomer": True,
-            "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+            "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
         })
         cust = await client.create_customer(cust_payload)
         _log("INFO", "Created customer for invoice", name=customer_name, id=cust.get("id"))
@@ -1413,7 +1413,7 @@ async def _auto_create_invoice(client: TripletexClient, fields: dict) -> int | N
         await _ensure_bank_account(client)
 
         # 3. Create order with one line
-        amount = _get(fields, "amount") or _get(fields, "payment_amount") or _get(fields, "paid_amount") or 1000
+        amount = _get(fields, "amount") or _get(fields, "payment_amount") or _get(fields, "paid_amount") or 100
         order_payload = {
             "customer": {"id": customer_id},
             "orderDate": _today(),
@@ -1466,7 +1466,7 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
     # Fallback: if no invoice ID yet, try to find by customer
     if not invoice_id:
         customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
-        org_number = _get(fields, "organization_number")
+        org_number = _clean_org_number(_get(fields, "organization_number"))
         if customer_name or org_number:
             try:
                 search_params = {"fields": "*"}
@@ -1591,7 +1591,7 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
     # Fallback: search by customer name → get their invoices
     if not invoice_id:
         customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
-        org_number = _get(fields, "organization_number")
+        org_number = _clean_org_number(_get(fields, "organization_number"))
         if customer_name or org_number:
             try:
                 search_params = {"fields": "*"}
@@ -1669,7 +1669,7 @@ async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> d
                 cust_payload = _clean({
                     "name": customer_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number")),
                     "email": _get(fields, "email"),
                     "postalAddress": _build_address(fields),
                 })
@@ -2027,7 +2027,7 @@ async def _exec_create_contact(fields: dict, client: TripletexClient) -> dict:
                 cust_payload = _clean({
                     "name": cust_name,
                     "isCustomer": True,
-                    "organizationNumber": _get(fields, "organization_number") or _get(fields, "org_number"),
+                    "organizationNumber": _clean_org_number(_get(fields, "organization_number") or _get(fields, "org_number")),
                 })
                 new_cust = await client.create_customer(cust_payload)
                 customer_id = new_cust["id"]
@@ -2061,7 +2061,7 @@ async def _exec_project_with_customer(fields: dict, client: TripletexClient) -> 
         cust_payload = _clean({
             "name": cust_name,
             "isCustomer": True,
-            "organizationNumber": _get(fields, "organization_number"),
+            "organizationNumber": _clean_org_number(_get(fields, "organization_number")),
             "email": _get(fields, "customer_email"),
         })
         cust = await client.create_customer(cust_payload)
@@ -2084,7 +2084,7 @@ async def _exec_find_customer(fields: dict, client: TripletexClient) -> dict:
     if _get(fields, "email"):
         params["email"] = fields["email"]
     if _get(fields, "org_number") or _get(fields, "organization_number"):
-        params["organizationNumber"] = _get(fields, "org_number") or _get(fields, "organization_number")
+        params["organizationNumber"] = _clean_org_number(_get(fields, "org_number") or _get(fields, "organization_number"))
 
     results = await client.get_customers(params)
     return {"entity": "customer", "count": len(results), "results": results}
@@ -2610,7 +2610,10 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
 
     # Step 4: If transactions provided, create journal vouchers
     voucher_ids = []
+    account_cache = {}
+    bank_vt_id = None
     if transactions:
+        bank_vt_id = await _get_voucher_type_id(client, ["bank", "bankavstemming", "reconciliation", "innbetaling"])
         for txn in transactions:
             txn_date = txn.get("date") or period_start
             txn_amount = txn.get("amount")
@@ -2624,8 +2627,11 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
             if not counter_account:
                 counter_account = "3000" if amount >= 0 else "6300"
 
-            counter_accounts = await client.get_ledger_accounts({"number": str(counter_account)})
-            counter_account_id = counter_accounts[0]["id"] if counter_accounts else None
+            ca_key = str(counter_account)
+            if ca_key not in account_cache:
+                counter_accounts = await client.get_ledger_accounts({"number": ca_key})
+                account_cache[ca_key] = counter_accounts[0]["id"] if counter_accounts else None
+            counter_account_id = account_cache[ca_key]
 
             abs_amount = abs(amount)
 
@@ -2645,11 +2651,10 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
                 ]
 
             try:
-                vt_id = await _get_voucher_type_id(client, ["bank", "bankavstemming", "reconciliation", "innbetaling"])
                 voucher_data = {
                     "date": txn_date,
                     "description": f"Bank reconciliation: {txn_description}",
-                    "voucherType": {"id": vt_id} if vt_id else None,
+                    "voucherType": {"id": bank_vt_id} if bank_vt_id else None,
                     "postings": postings,
                 }
                 _normalize_postings(voucher_data)
@@ -2751,10 +2756,8 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                     _log("INFO", "Found voucher by description/amount search",
                          voucher_id=best.get("id"), desc=best.get("description", "")[:50])
             elif recent:
-                # No hints — use most recent voucher
-                best = recent[0]
-                voucher_identifier = best.get("number") or best.get("id")
-                _log("INFO", "Using most recent voucher (no hints)", voucher_id=best.get("id"))
+                # No hints — do NOT blindly pick most recent voucher (could reverse unrelated entry)
+                _log("WARNING", "No description/amount hints to identify voucher, refusing blind reversal")
         except TripletexAPIError as e:
             _log("WARNING", "Voucher search fallback failed", error=str(e)[:200])
         if not voucher_identifier:
@@ -3001,7 +3004,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     try:
         annual_accounts = await client.get_annual_accounts({
             "yearFrom": str(year),
-            "yearTo": str(year + 1),
+            "yearTo": str(year),
         })
 
         if annual_accounts:
@@ -3098,7 +3101,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
                 "accountNumberTo": "8999",
             })
             if postings:
-                total_result = sum(p.get("amount", 0) for p in postings)
+                total_result = sum((p.get("amountGross", p.get("amount", 0)) or 0) for p in postings)
         except TripletexAPIError:
             _log("WARNING", "Could not fetch P&L postings, using zero-amount closing entry")
 
@@ -3611,7 +3614,7 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
 async def _exec_create_supplier(fields: dict, client: TripletexClient) -> dict:
     """Register a new supplier via POST /supplier."""
     name = _get(fields, "name") or _get(fields, "supplier_name") or "Unknown Supplier"
-    org_number = _get(fields, "organization_number")
+    org_number = _clean_org_number(_get(fields, "organization_number"))
     email = _get(fields, "email")
     phone = _get(fields, "phone")
 
@@ -3652,7 +3655,7 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
     3. POST /ledger/voucher — debit expense, credit supplier liability
     """
     supplier_name = _get(fields, "supplier_name") or _get(fields, "name") or "Unknown Supplier"
-    org_number = _get(fields, "organization_number")
+    org_number = _clean_org_number(_get(fields, "organization_number"))
 
     # Step 1: Find or create supplier (avoid duplicates)
     # Try name param first (may work in competition proxy), then filter client-side
@@ -4737,20 +4740,35 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
     last_day = calendar.monthrange(year, month)[1]
     voucher_date = f"{year}-{month:02d}-{last_day:02d}"
 
-    accrual_amount = _get(fields, "accrual_amount")
+    accrual_amount = _get(fields, "accrual_amount") or _get(fields, "amount")
     if accrual_amount is not None:
         accrual_amount = _parse_number(str(accrual_amount))
     else:
-        accrual_amount = 12500.0  # Sensible default from prompt context
+        # Try to extract amount from prompt text
+        prompt_text = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+        amt_match = re.search(r"(\d[\d\s.,]*\d)\s*(?:kr|NOK|,-)", prompt_text)
+        if not amt_match:
+            # Try plain large number pattern
+            amt_match = re.search(r"(?:beløp|amount|sum|periodiser(?:ing|e))\D{0,20}(\d[\d\s.,]*\d)", prompt_text, re.IGNORECASE)
+        if amt_match:
+            accrual_amount = _parse_number(amt_match.group(1))
+        else:
+            accrual_amount = 12500.0  # Fallback default
 
     accrual_from_account = str(_get(fields, "accrual_from_account") or "1720")
     accrual_expense_account = str(_get(fields, "accrual_expense_account") or _get(fields, "expense_account") or "6000")
 
-    depreciation_cost = _get(fields, "depreciation_cost")
+    depreciation_cost = _get(fields, "depreciation_cost") or _get(fields, "asset_cost") or _get(fields, "cost")
     if depreciation_cost is not None:
         depreciation_cost = _parse_number(str(depreciation_cost))
     else:
-        depreciation_cost = 60000.0  # Default
+        # Try to extract depreciation/asset cost from prompt
+        prompt_text2 = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+        dep_match = re.search(r"(?:avskri(?:vning|ve)|depreciat|kostpris|anskaffelse|innkjøpspris)\D{0,30}(\d[\d\s.,]*\d)", prompt_text2, re.IGNORECASE)
+        if dep_match:
+            depreciation_cost = _parse_number(dep_match.group(1))
+        else:
+            depreciation_cost = 60000.0  # Fallback default
 
     useful_life_months = _get(fields, "useful_life_months")
     if useful_life_months is not None:

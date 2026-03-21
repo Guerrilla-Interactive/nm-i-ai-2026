@@ -1442,7 +1442,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "leverandørfaktura", "innkomande faktura", "motteke faktura",
             # English
             "supplier invoice", "vendor invoice", "register supplier invoice",
-            "incoming invoice", "received invoice",
+            "incoming invoice", "received invoice", "supplier invoice registration",
             # German
             "lieferantenrechnung", "eingangsrechnung",
             # French
@@ -1451,6 +1451,8 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "factura proveedor", "factura de proveedor", "factura del proveedor",
             # Portuguese
             "fatura de fornecedor", "fatura do fornecedor",
+            # Italian
+            "fattura fornitore", "fattura del fornitore",
             # ASCII variants
             "leverandorfaktura", "inngaaende faktura",
             "faktura fra leverandor", "registrer faktura fra",
@@ -1579,11 +1581,13 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
     },
     TaskType.BANK_RECONCILIATION: {
         "keywords": [
-            "bankavsteming", "bankavstemming", "bank reconciliation",
-            "reconcile bank", "avstem bank", "reconciliación bancaria",
+            "bankavsteming", "bankavstemming", "bankavstemmning", "bank reconciliation",
+            "reconcile bank", "avstem bank", "reconciliación bancaria", "conciliación bancaria",
             # German / French / Portuguese
             "bankabstimmung", "kontoabstimmung", "rapprochement bancaire",
             "reconciliação bancária", "conciliação bancária",
+            # Italian
+            "riconciliazione bancaria",
             # Swedish / Danish
             "bankavstämning", "bankafstemning",
         ],
@@ -1595,6 +1599,8 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             # German / French / Spanish / Portuguese
             "fehlerkorrektur", "buchungskorrektur", "correction d'erreur",
             "corriger écriture", "corrección de error", "correção de erro",
+            # Italian
+            "correzione", "correggere registrazione",
             # Additional Norwegian
             "korrigere bilag", "endre bilag", "rett opp feil",
         ],
@@ -1602,9 +1608,11 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
     TaskType.YEAR_END_CLOSING: {
         "keywords": [
             "årsavslutning", "årsoppgjør", "year-end", "year end closing",
-            "annual closing", "cierre anual",
+            "annual closing", "cierre anual", "cierre del ejercicio",
             # German / French / Portuguese
             "jahresabschluss", "clôture annuelle", "encerramento anual",
+            # Italian
+            "chiusura annuale",
             # Swedish / Danish
             "årsbokslut", "årsafslutning",
             # ASCII variants (no special chars)
@@ -1617,7 +1625,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
     },
     TaskType.MONTH_END_CLOSING: {
         "keywords": [
-            "månedsslutt", "maanedsslutt", "month-end closing", "month end closing",
+            "månedsslutt", "maanedsslutt", "månedsavslutning", "month-end closing", "month end closing",
             "month-end close", "monthly closing", "monthly close",
             "periodisering", "periodenabgrenzung",
             # German
@@ -1633,7 +1641,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             # Swedish / Danish
             "månadsavslut", "månedsafslutning",
             # ASCII variants
-            "maanedsslutt", "maanedslutt",
+            "maanedsslutt", "maanedslutt", "maanedsavslutning",
         ],
         "anti_keywords": ["årsavslutning", "arsavslutning", "year-end", "year end", "årsoppgjør", "annual"],
     },
@@ -1643,6 +1651,8 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "activar módulo", "activer module", "activer le module",
             # German / Portuguese
             "modul aktivieren", "ativar módulo",
+            # Italian
+            "attivare modulo", "attivare il modulo",
             # Swedish / Danish
             "aktivera modul", "aktiver modul",
             # ASCII variants
@@ -1684,6 +1694,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "kostsenter", "kostenstelle", "cost center", "centre de coût",
             "centro de costo", "centro de custo",
             "dimensjonsverdier", "dimensionswert",
+            "dimensjonsbilag", "dimension voucher",
+            # Spanish / Portuguese / Italian
+            "dimensión", "dimensão", "dimensione",
             # Norwegian accounting: "bokfør bilag" / "bokför bilag" (Swe spelling)
             "bokfør bilag", "bokför bilag", "bokfør et bilag",
             "bokför ett bilag",
