@@ -323,11 +323,15 @@ _KEYWORD_MAP = [
         r"(registrer|register)\w*\s+faktura\w*\s+.*\b(leverandør|leverandor|supplier|fournisseur)\b",
         r"supplier.*invoice|Eingangsrechnung|facture.*fournisseur",
     ]),
+    # --- Credit Note (MUST come before CREATE_SUPPLIER_INVOICE to avoid "invoice" matching supplier invoice) ---
+    (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b",
+                                    r"\bkreditere?\b.*\b(faktura|invoice)\b",
+                                    r"\bkrediter\w*\s+faktura\b"]),
     (TaskType.CREATE_SUPPLIER_INVOICE, [
         r"leverandør.*faktura|faktura.*leverandør",
         r"leverandorfaktura|leverandørfaktura",
         r"leverandor.*faktura|faktura.*leverandor",
-        r"(inngående|inngaaende|incoming|mottatt|motteke|received).*faktura|invoice",
+        r"(inngående|inngaaende|incoming|mottatt|motteke|received).*(faktura|invoice)",
         r"(registrer|register)\w*\s+faktura\w*\s+.*\b(leverandør|leverandor|supplier|fournisseur)\b",
         r"supplier.*invoice|Eingangsrechnung|facture.*fournisseur",
     ]),
@@ -336,10 +340,6 @@ _KEYWORD_MAP = [
         r"\b(?:registrer|opprett|create|register|add|erstellen|registrieren|créer|crear|criar|enregistre)\w*\b.*\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b",
         r"\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b.*\b(?:registrer|opprett|create|register|add|ny|new|erstellen|registrieren|enregistre)\w*\b",
     ]),
-    # --- Invoice (MUST come before customer to avoid "opprett faktura for kunde" → CREATE_CUSTOMER) ---
-    (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b",
-                                    r"\bkreditere?\b.*\b(faktura|invoice)\b",
-                                    r"\bkrediter\w*\s+faktura\b"]),
     (TaskType.INVOICE_WITH_PAYMENT, [r"\b(faktura|invoice|factura|rechnung|facture)\b.*\b(betaling|payment|betalt|paid|pago|zahlung|paiement)\b",
                                      r"\b(facture|faktura|invoice|rechnung)\s+impayée?\b",
                                      r"\b(unbezahlte|impayée?|unpaid)\b.*\b(rechnung|facture|invoice|faktura)\b",
