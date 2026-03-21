@@ -230,6 +230,47 @@ async def _classify_with_claude(prompt: str, files: Optional[list[dict]] = None)
 # ---------------------------------------------------------------------------
 
 _KEYWORD_MAP = [
+    # ============================================================================
+    # HARD OVERRIDES — compound/lifecycle prompts that would false-match simpler types
+    # These MUST come first to prevent "facture fournisseur" or "horas" from winning.
+    # ============================================================================
+    # Project lifecycle: "cycle de vie du projet" / "Projektzyklus" / "ciclo de vida del proyecto"
+    # These are T3 compound tasks: create project + supplier invoice + bill customer + payment
+    (TaskType.PROJECT_WITH_CUSTOMER, [
+        r"\bcycle\s+de\s+vie\b.*\bprojet\b",
+        r"\bprojet\b.*\bcycle\s+de\s+vie\b",
+        r"\bProjektzyklus\b",
+        r"\bvollständig\w*\s+Projektzyklus\b",
+        r"\bciclo\s+de\s+vida\b.*\bproyecto\b",
+        r"\bproyecto\b.*\bciclo\s+de\s+vida\b",
+        r"\bproject\s+lifecycle\b",
+        r"\bfull\s+project\s+cycle\b",
+    ]),
+    # Project billing compound: "registre horas...factura al cliente" / "hours...invoice client"
+    (TaskType.PROJECT_BILLING, [
+        # Spanish: "horas...factura...cliente" = log hours + invoice client for project
+        r"\bhoras\b.*\bfactura\b.*\bcliente\b",
+        r"\bhoras\b.*\bcree?\s+una\s+factura\b",
+        # "fakturere prosjekt" / "bill project" / "facturez le projet"
+        r"\bfacture[rz]\w*\b.*\b(prosjekt|project|proyecto|projet|projekt)\b",
+        r"\b(prosjekt|project|proyecto|projet|projekt)\b.*\bfacture[rz]\w*\b",
+        # "bill the client for the project" / "facture al cliente por el proyecto"
+        r"\bfactur\w*\b.*\bcliente?\b.*\b(prosjekt|project|proyecto|projet|projekt)\b",
+        r"\b(prosjekt|project|proyecto|projet|projekt)\b.*\bfactur\w*\b.*\bcliente?\b",
+    ]),
+    # German dunning/reminder fee: "Mahngebühr" / "Mahnung" = reminder on existing invoice
+    (TaskType.INVOICE_EXISTING_CUSTOMER, [
+        r"\bMahngeb[uü]hr\b",
+        r"\bMahnung\b",
+        r"\b[üu]berf[aä]llig\w*\b.*\bRechnung\b.*\bMahn",
+    ]),
+    # French expense receipt: "dépense...reçu" = supplier invoice from receipt
+    (TaskType.REGISTER_SUPPLIER_INVOICE, [
+        r"\bd[eé]pense\b.*\bre[cç]u\b",
+        r"\bre[cç]u\b.*\bd[eé]pense\b",
+        r"\bd[eé]pense\b.*\benregistr[eé]\w*\b.*\bd[eé]partement\b",
+    ]),
+    # ============================================================================
     # --- Enable Module (MUST come before travel — "Aktiver modul Reiseregning" must not match travel) ---
     (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare|habilitar)\w*\b.*\b(modul|module|módulo)\w*\b",
                                r"\w*(modul|module|módulo)\w*\b.*\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare|habilitar)\w*\b",
@@ -463,8 +504,9 @@ _KEYWORD_MAP = [
                                      # French: "en retard" = overdue
                                      r"\b(facture|invoice)\b.*\ben\s+retard\b",
                                      r"\ben\s+retard\b.*\b(facture|invoice)\b",
-                                     # German: "überfällige Rechnung" = overdue invoice
-                                     r"\b(überfällig|ueberfaellig)\w*\b.*\b(rechnung|invoice)\b"]),
+                                     # German: "überfällige Rechnung" WITHOUT Mahngebühr = overdue invoice + payment
+                                     # Note: "Mahngebühr" (reminder fee) is handled by hard override → INVOICE_EXISTING_CUSTOMER
+                                     r"\b(überfällig|ueberfaellig)\w*\b.*\b(rechnung|invoice)\b.*\b(bezahl|zahl|payment|paid)\b"]),
     (TaskType.REGISTER_PAYMENT, [r"\b(registrer|register|registreer|registrar|registe)\w*\b.*\b(betaling|innbetaling|payment|pago|zahlung|paiement|pagamento)\b",
                                   r"\b(betaling|payment|pago|zahlung|paiement|pagamento)\b.*\b(faktura|invoice|factuur|factura|rechnung|facture|fatura)\b",
                                   r"\bbetal\w*\s+faktura\b",

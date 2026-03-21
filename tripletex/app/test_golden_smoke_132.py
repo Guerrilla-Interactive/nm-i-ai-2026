@@ -180,7 +180,7 @@ SMOKE_CASES: list[dict] = [
             "2) Asigne a Carlos García (carlos.garcia@example.org) como jefe de proyecto. "
             "3) Facture al cliente por el proyecto."
         ),
-        "expected_type": "project_billing",
+        "expected_type": "project_with_customer",  # "ciclo de vida del proyecto" = project lifecycle
         "file_count": 0,
     },
     # 13. PT register_supplier_invoice (with receipt) — rev 00132
