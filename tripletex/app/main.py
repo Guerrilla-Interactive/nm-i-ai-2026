@@ -304,6 +304,8 @@ _KEYWORD_MAP = [
                                    r"\banalyser?\b.*\bhovedbok\w*\b"]),
     (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\barsavslut\w*\b", r"\baarsavslut\w*\b",
                                    r"\bårsoppgjør\w*\b", r"\barsoppgjor\w*\b", r"\baarsoppgjor\w*\b",
+                                   # Nynorsk: "årsoppgjer"
+                                   r"\bårsoppgjer\w*\b", r"\barsoppgjer\w*\b",
                                    r"\byear.?end\b", r"\bannual.?clos\w*\b",
                                    r"\bjahresabschluss\w*\b", r"\bclôture\b(?!\s*mensuel)", r"\bcierre\s+anual\b",
                                    r"\bencerramento\s+anual\b",
@@ -315,6 +317,8 @@ _KEYWORD_MAP = [
                                    r"\b(avslutt|close|lukk)\w*\b.*\b(år|year|ar|regnskapsår|regnskapsar)\w*\b"]),
     (TaskType.MONTH_END_CLOSING, [r"\bmånedsslutt\w*\b", r"\bmanedsslutt\w*\b",
                                    r"\bmånedsavslut\w*\b", r"\bmanedsavslut\w*\b",
+                                   # Nynorsk: "månavslutninga", "månadsslutt"
+                                   r"\bmånavslut\w*\b", r"\bmånadsslutt\w*\b",
                                    r"\bmonth.?end.?clos\w*\b", r"\bmonthly.?closing\b",
                                    r"\bmonatsabschluss\w*\b",
                                    r"\bclôture\s*mensuel\w*\b", r"\bcloture\s*mensuel\w*\b",
@@ -357,10 +361,13 @@ _KEYWORD_MAP = [
     (TaskType.UPDATE_EMPLOYEE, [r"\b(oppdater|endre|update|modify|ändra|aktualisieren|ändern|actualizar|modificar|modifier|atualizar)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|empregado)\b",
                                  r"\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b.*\b(ansatt|tilsett|employee)\b",
                                  r"\b(ansatt|tilsett|employee)\b.*\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b"]),
-    (TaskType.CREATE_EMPLOYEE, [r"\b(opprett?|lag|create|add|erstellen|créer|crear|criar|register|registrer|legg\s+til)\b.*\b(ansatt?e?|anstt|tilsett|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b",
-                                r"\bny\w?\b.*\b(ansatt?e?|anstt|tilsett|employee|empleado|mitarbeiter|employé)\b",
-                                r"\b(ansatt?e?|tilsett|employee)\b.*\b(som\s+heter|named?|called)\b",
-                                r"\b(ansatt?e?|tilsett|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b",
+    (TaskType.CREATE_EMPLOYEE, [r"\b(opprett?|lag|create|add|erstellen|créer|crear|criar|register|registrer|legg\s+til)\b.*\b(ansatt?e?|anstt|tilsett\w*|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b",
+                                r"\bny\w?\b.*\b(ansatt?e?|anstt|tilsett\w*|employee|empleado|mitarbeiter|employé)\b",
+                                r"\b(ansatt?e?|tilsett\w*|employee)\b.*\b(som\s+heter|named?|called)\b",
+                                r"\b(ansatt?e?|tilsett\w*|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b",
+                                # Nynorsk: "opprett den tilsette" / "motteke arbeidskontrakt"
+                                r"\barbeidskontrakt\b.*\b(opprett|registrer)",
+                                r"\b(opprett|registrer)\b.*\barbeidskontrakt\b",
                                 r"\boppre\w*\b.*\b(ansatt?|anstt)\b.*\b(e-?post|epost|email)\b"]),
     # --- Payroll (MUST come before employee patterns — "paie de X" should not match employee) ---
     (TaskType.RUN_PAYROLL, [
@@ -424,7 +431,11 @@ _KEYWORD_MAP = [
     # --- Credit Note (MUST come before CREATE_SUPPLIER_INVOICE to avoid "invoice" matching supplier invoice) ---
     (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b",
                                     r"\bkreditere?\b.*\b(faktura|invoice)\b",
-                                    r"\bkrediter\w*\s+faktura\b"]),
+                                    r"\bkrediter\w*\s+faktura\b",
+                                    # French: "note de crédit" / "note de credit"
+                                    r"\bnote\s+de\s+cr[eé]dit\b",
+                                    # "réclamé...facture" = complaint about invoice → credit note
+                                    r"\br[eé]clam[eé]\w*\b.*\bfacture\b"]),
     (TaskType.CREATE_SUPPLIER_INVOICE, [
         r"leverandør.*faktura|faktura.*leverandør",
         r"leverandorfaktura|leverandørfaktura",
@@ -440,6 +451,9 @@ _KEYWORD_MAP = [
         r"\b(?:ny|new|neu|nouveau|nuevo|novo)\s+(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\b",
     ]),
     (TaskType.INVOICE_WITH_PAYMENT, [r"\b(faktura|invoice|factura|rechnung|facture)\b.*\b(betaling|payment|betalt|paid|pago|zahlung|paiement)\b",
+                                     # "fakturer...betaling" (verb form) = invoice + payment
+                                     r"\bfakturer\w*\b.*\bbetaling\b",
+                                     r"\bordre\b.*\bfakturer\w*\b",
                                      r"\b(facture|faktura|invoice|rechnung)\s+impayée?\b",
                                      r"\b(unbezahlte|impayée?|unpaid)\b.*\b(rechnung|facture|invoice|faktura)\b",
                                      r"\bclient\w*\b.*\bfacture\b.*\bimpayée?\b",
@@ -449,16 +463,17 @@ _KEYWORD_MAP = [
                                      # French: "en retard" = overdue
                                      r"\b(facture|invoice)\b.*\ben\s+retard\b",
                                      r"\ben\s+retard\b.*\b(facture|invoice)\b",
-                                     # Portuguese: "fatura vencida/pendente" = overdue/pending
-                                     r"\bfatura\s+(vencida|pendente)\b",
                                      # German: "überfällige Rechnung" = overdue invoice
                                      r"\b(überfällig|ueberfaellig)\w*\b.*\b(rechnung|invoice)\b"]),
-    (TaskType.REGISTER_PAYMENT, [r"\b(registrer|register|registreer|registrar)\w*\b.*\b(betaling|innbetaling|payment|pago|zahlung|paiement|pagamento)\b",
+    (TaskType.REGISTER_PAYMENT, [r"\b(registrer|register|registreer|registrar|registe)\w*\b.*\b(betaling|innbetaling|payment|pago|zahlung|paiement|pagamento)\b",
                                   r"\b(betaling|payment|pago|zahlung|paiement|pagamento)\b.*\b(faktura|invoice|factuur|factura|rechnung|facture|fatura)\b",
                                   r"\bbetal\w*\s+faktura\b",
                                   r"\bpay\w*\s+invoice\b",
                                   r"\binnbetaling\b.*\b(faktura|invoice)\b",
-                                  r"\bregister\s+payment\s+of\b"]),
+                                  r"\bregister\s+payment\s+of\b",
+                                  # Portuguese: "fatura vencida" = overdue invoice (pay/register)
+                                  r"\bfatura\s+(vencida|pendente)\b",
+                                  r"\btaxa\s+de\s+lembrete\b"]),
     (TaskType.INVOICE_EXISTING_CUSTOMER, [r"\b(faktura|invoice|factura|rechnung)\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
                                           r"\b(faktura|invoice)\b\s+(?:til|to|for|an)\s+[A-ZÆØÅ]",
                                           r"\bfaktur\w*\b.*\b(kund(?:e|en)|customer|client|cliente)\b"]),
