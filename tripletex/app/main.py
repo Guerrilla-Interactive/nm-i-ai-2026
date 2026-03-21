@@ -888,22 +888,25 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             if m:
                 fields["month"] = f"{int(m.group(1)):02d}"
                 fields["year"] = m.group(2)
-        # Extract account number
-        m = re.search(r"\bkonto\w*\s+(\d{4})\b", text, re.I)
-        if not m:
-            m = re.search(r"\baccount\s+(\d{4})\b", text, re.I)
-        if not m:
-            m = re.search(r"\bkonto\s+(\d{4})\b", text, re.I)
+        # Extract account number (multilingual: konto, account, cuenta, compte, Konto)
+        m = re.search(r"\b(?:konto|account|cuenta|compte|Konto)\w*\s+(\d{4})\b", text, re.I)
         if m:
             fields["account_number"] = m.group(1)
-        # Extract amount
-        m = re.search(r"(\d[\d\s.,]*)\s*(?:kr|NOK|EUR|USD)", text, re.I)
-        if m:
-            amt_str = m.group(1).replace(",", ".").replace(" ", "")
-            try:
-                fields["amount"] = float(amt_str)
-            except ValueError:
-                pass
+            fields["accrual_from_account"] = m.group(1)
+        # Extract amounts — try to get accrual and depreciation separately
+        amounts = re.findall(r"(\d[\d\s.,]*\d)\s*(?:kr|NOK|EUR|USD)", text, re.I)
+        if amounts:
+            fields["amount"] = float(amounts[0].replace(",", ".").replace(" ", ""))
+            if len(amounts) >= 2:
+                fields["accrual_amount"] = float(amounts[0].replace(",", ".").replace(" ", ""))
+        # Extract annual depreciation (e.g. "depreciación anual de 10000 NOK")
+        dep_ann = re.search(r"(?:avskrivning|depreci\w*|abschreibung)\w*\s*(?:anual|annual|årlig|arlig|annuel\w*|jährlich\w*|jahrlich\w*)\D{0,20}(\d[\d\s.,]*\d)", text, re.I)
+        if dep_ann:
+            fields["annual_depreciation"] = float(dep_ann.group(1).replace(",", ".").replace(" ", ""))
+        # Extract acquisition cost (e.g. "costo de adquisición 61000 NOK")
+        cost_match = re.search(r"(?:kostpris|anskaffelse|innkjøpspris|costo\s+de\s+adquisici[oó]n|acquisition\s+cost|anschaffungskosten)\D{0,20}(\d[\d\s.,]*\d)", text, re.I)
+        if cost_match:
+            fields["depreciation_cost"] = float(cost_match.group(1).replace(",", ".").replace(" ", ""))
 
     if task_type == TaskType.ENABLE_MODULE:
         m = re.search(r"(?:modul|module|funksjon|feature)\s+(.+?)(?:\s*[,.]|$)", text, re.I)
@@ -1585,7 +1588,7 @@ async def solve(request: Request):
             any_success = any(r.get("success", False) for r in results if isinstance(r, dict))
             result = {"success": any_success, "batch_results": results, "batch_count": len(results)}
         else:
-            task_type = str(classification.task_type)
+            task_type = classification.task_type.value if hasattr(classification.task_type, 'value') else str(classification.task_type)
             log("INFO", "Classified task",
                 task_type=task_type,
                 confidence=getattr(classification, "confidence", None),
