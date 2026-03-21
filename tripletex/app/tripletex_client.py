@@ -64,6 +64,25 @@ class TripletexClient:
         self._customer_search_cache: dict[str, dict | None] = {}  # name -> customer or None
         self._employee_search_cache: dict[str, dict | None] = {}  # name -> employee or None
         self._empty_collections: set[str] = set()  # entity types known to be empty (e.g. "customers", "employees")
+        self._session_employee_id: int | None = None  # cached session owner employee ID
+
+    async def get_session_employee_id(self) -> int | None:
+        """Get the employee ID of the session token owner (admin/company owner).
+
+        Uses GET /token/session/>whoAmI — a free GET call.
+        Cached after first call.
+        """
+        if self._session_employee_id is not None:
+            return self._session_employee_id
+        try:
+            result = await self._request("GET", "/token/session/%3EwhoAmI")
+            emp_id = result.get("value", result).get("employeeId")
+            if emp_id:
+                self._session_employee_id = int(emp_id)
+                return self._session_employee_id
+        except (TripletexAPIError, Exception):
+            pass
+        return None
 
     async def close(self):
         await self._client.aclose()

@@ -1010,6 +1010,13 @@ async def _exec_create_project(fields: dict, client: TripletexClient) -> dict:
             _log("INFO", "Created project manager employee", name=mgr_name, id=manager_id)
 
     if not manager_id:
+        # Try session owner (admin) — always has PM access in fresh accounts
+        session_emp = await client.get_session_employee_id()
+        if session_emp:
+            manager_id = session_emp
+            _log("INFO", "Using session owner as PM", pm_id=manager_id)
+
+    if not manager_id:
         # Try to find a known-working project manager from existing projects
         try:
             existing_projects = await client.get_projects({"count": 1, "fields": "projectManager"})
@@ -1053,8 +1060,18 @@ async def _exec_create_project(fields: dict, client: TripletexClient) -> dict:
         return {"created_id": result.get("id"), "entity": "project"}
     except TripletexAPIError as e:
         if e.status_code == 422 and "prosjektleder" in (e.detail or "").lower():
-            # PM doesn't have access — try finding a working PM from existing projects
-            _log("WARNING", "PM rejected, trying PM from existing projects", original_pm=manager_id)
+            # PM doesn't have access — try session owner first, then existing projects
+            _log("WARNING", "PM rejected, trying fallbacks", original_pm=manager_id)
+            # Try session owner (admin)
+            session_emp = await client.get_session_employee_id()
+            if session_emp and session_emp != int(manager_id):
+                try:
+                    payload["projectManager"] = {"id": int(session_emp)}
+                    result = await client.create_project(payload)
+                    return {"created_id": result.get("id"), "entity": "project"}
+                except TripletexAPIError:
+                    pass
+            # Try PM from existing projects
             try:
                 existing = await client.get_projects({"count": 1, "fields": "projectManager"})
                 if existing:
@@ -2391,57 +2408,57 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                 project_id = projects[0]["id"]
             else:
                 # Create project if not found (fresh sandbox)
-                proj = await client.create_project(_clean({
-                    "name": proj_name,
-                    "projectManager": {"id": int(employee_id)},
-                    "startDate": _today(),
-                }))
-                project_id = proj["id"]
-                _log("INFO", "Created project for timesheet", name=proj_name, id=project_id)
+                # Use session owner as PM (they have project manager access)
+                pm_id = await client.get_session_employee_id()
+                if not pm_id:
+                    pm_id = employee_id  # fallback to target employee
+                try:
+                    proj = await client.create_project(_clean({
+                        "name": proj_name,
+                        "projectManager": {"id": int(pm_id)},
+                        "startDate": _today(),
+                    }))
+                    project_id = proj["id"]
+                    _log("INFO", "Created project for timesheet", name=proj_name, id=project_id)
+                except TripletexAPIError as e:
+                    if e.status_code == 422 and "prosjektleder" in (e.detail or "").lower() and pm_id != employee_id:
+                        # Session owner also rejected — try with employee
+                        proj = await client.create_project(_clean({
+                            "name": proj_name,
+                            "projectManager": {"id": int(employee_id)},
+                            "startDate": _today(),
+                        }))
+                        project_id = proj["id"]
+                    else:
+                        raise
 
     if not project_id:
         return {"success": False, "error": "No project specified for hour logging"}
 
-    # 3. Resolve activity
+    # 3. Resolve activity — MUST use isProjectActivity=true for timesheet on projects
     activity_id = _get(fields, "activity_id")
     activity_name = _get(fields, "activity_name")
     if not activity_id:
-        activities = await client.get_activities({"projectId": str(project_id)} if project_id else None)
-        if activities and activity_name:
-            # Try to match by name
-            match = next(
-                (a for a in activities if a.get("name", "").lower() == activity_name.lower()),
-                None,
-            )
-            if not match:
-                match = next(
-                    (a for a in activities if activity_name.lower() in a.get("name", "").lower()),
-                    None,
-                )
-            if match:
-                activity_id = match["id"]
-        if not activity_id and activities:
-            activity_id = activities[0]["id"]
-
-    if not activity_id:
-        # Try getting all activities without project filter
-        # (projectId param is not reliably supported by Tripletex API)
         activities = await client.get_activities({})
         if activities:
+            # Filter to project-eligible activities first
+            proj_activities = [a for a in activities if a.get("isProjectActivity") and not a.get("isDisabled")]
+            all_eligible = proj_activities if proj_activities else [a for a in activities if not a.get("isDisabled")]
             if activity_name:
+                # Try to match by name within project activities
                 match = next(
-                    (a for a in activities if activity_name.lower() in a.get("name", "").lower()),
+                    (a for a in all_eligible if a.get("name", "").lower() == activity_name.lower()),
                     None,
                 )
+                if not match:
+                    match = next(
+                        (a for a in all_eligible if activity_name.lower() in a.get("name", "").lower()),
+                        None,
+                    )
                 if match:
                     activity_id = match["id"]
-            if not activity_id:
-                # Prefer project activities (isProjectActivity=true) over general
-                proj_activities = [a for a in activities if a.get("isProjectActivity")]
-                if proj_activities:
-                    activity_id = proj_activities[0]["id"]
-                else:
-                    activity_id = activities[0]["id"]
+            if not activity_id and all_eligible:
+                activity_id = all_eligible[0]["id"]
 
     if not activity_id:
         # Last resort: create a default activity for the project
@@ -2457,16 +2474,12 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
     if not activity_id:
         return {"success": False, "error": "No activity found for hour logging"}
 
-    # Collect all known activity IDs for retry fallback
+    # Collect fallback activity IDs from already-fetched activities (no extra API call)
     _all_activity_ids = []
-    try:
-        _all_acts = await client.get_activities({})
-        # Prefer project activities, then any
-        proj_acts = [a for a in _all_acts if a.get("isProjectActivity")]
-        other_acts = [a for a in _all_acts if not a.get("isProjectActivity")]
+    if activities:
+        proj_acts = [a for a in activities if a.get("isProjectActivity") and not a.get("isDisabled")]
+        other_acts = [a for a in activities if not a.get("isProjectActivity") and not a.get("isDisabled")]
         _all_activity_ids = [a["id"] for a in proj_acts + other_acts if a.get("id") != activity_id]
-    except (TripletexAPIError, Exception):
-        pass
 
     # 4. Create timesheet entry
     hours = _get(fields, "hours") or _get(fields, "hours_worked") or _get(fields, "hoursWorked")
