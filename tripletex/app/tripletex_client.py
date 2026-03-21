@@ -73,21 +73,52 @@ class TripletexClient:
     # ------------------------------------------------------------------
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
-        """Make an API request. Retries once on 5xx. Never retries 4xx."""
+        """Make an API request. Retries once on 5xx/429. Never retries 4xx."""
         url = f"{self.base_url}{path}"
         self.api_call_count += 1
         call_num = self.api_call_count
         _log("INFO", f"API #{call_num}: {method} {path}",
              api_call_number=call_num)
 
-        response = await self._client.request(method, url, **kwargs)
+        try:
+            response = await self._client.request(method, url, **kwargs)
+        except httpx.TimeoutException:
+            self.error_count += 1
+            _log("ERROR", "Request timeout", path=path)
+            raise TripletexAPIError(504, "Request timed out", url)
+        except httpx.ConnectError as e:
+            self.error_count += 1
+            _log("ERROR", "Connection error", path=path, error=str(e)[:200])
+            raise TripletexAPIError(502, f"Connection error: {e}", url)
+        except httpx.HTTPError as e:
+            self.error_count += 1
+            _log("ERROR", "HTTP error", path=path, error=str(e)[:200])
+            raise TripletexAPIError(500, f"HTTP error: {e}", url)
+
+        # 429 (rate limit) — retry once after backoff
+        if response.status_code == 429:
+            retry_after = float(response.headers.get("Retry-After", "2"))
+            retry_after = min(retry_after, 10.0)  # cap backoff
+            _log("WARNING", "Rate limited (429), backing off",
+                 path=path, retry_after=retry_after)
+            await asyncio.sleep(retry_after)
+            self.api_call_count += 1
+            try:
+                response = await self._client.request(method, url, **kwargs)
+            except httpx.HTTPError as e:
+                self.error_count += 1
+                raise TripletexAPIError(429, f"Rate limit retry failed: {e}", url)
 
         # 5xx — retry once after 1s
         if response.status_code >= 500:
             _log("WARNING", f"5xx error, retrying", status=response.status_code, path=path)
             await asyncio.sleep(1)
             self.api_call_count += 1
-            response = await self._client.request(method, url, **kwargs)
+            try:
+                response = await self._client.request(method, url, **kwargs)
+            except httpx.HTTPError as e:
+                self.error_count += 1
+                raise TripletexAPIError(500, f"5xx retry failed: {e}", url)
 
         if response.status_code >= 400:
             self.error_count += 1
@@ -100,7 +131,13 @@ class TripletexClient:
         if response.status_code == 204 or not response.content:
             return {}
 
-        data = response.json()
+        try:
+            data = response.json()
+        except (json.JSONDecodeError, ValueError):
+            _log("WARNING", "Non-JSON response body", path=path,
+                 content_type=response.headers.get("content-type", ""),
+                 body_preview=response.text[:200])
+            return {}
         _log("DEBUG", f"API #{call_num} response OK", status=response.status_code, path=path)
         return data
 

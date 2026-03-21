@@ -22,8 +22,6 @@ from task_types import (
 
 logger = logging.getLogger("tripletex-agent.classifier")
 
-_claude_available = True
-
 # ---------------------------------------------------------------------------
 # SDK import — try new unified SDK first, fall back to older one
 # ---------------------------------------------------------------------------
@@ -49,6 +47,13 @@ except ImportError:
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 TEMPERATURE = 0.0
 MAX_RETRIES = 3
+
+# Claude fallback — disable after first failure to avoid wasting round-trips
+_claude_disabled = False
+
+def _set_claude_disabled():
+    global _claude_disabled
+    _claude_disabled = True
 
 # ---------------------------------------------------------------------------
 # System prompt — comprehensive, multilingual, with few-shot examples
@@ -93,6 +98,7 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 {_build_task_type_block()}
 
 ## FIELD FORMATTING RULES
+- ONLY extract fields explicitly stated in the prompt. NEVER fabricate emails, phones, addresses, or websites that are not present in the input text.
 - Dates → YYYY-MM-DD (convert from any format: "15. mars 2026" → "2026-03-15")
 - Numbers → plain decimals, no thousand separators ("1 200,50" → 1200.50)
 - Currency amounts → assume NOK unless explicitly stated otherwise
@@ -115,6 +121,8 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 | credit note | kreditnota | kreditnota | credit note | nota de crédito | nota de crédito | Gutschrift | avoir |
 | payment | betaling/innbetaling | betaling | payment | pago | pagamento | Zahlung | paiement |
 | contact | kontaktperson | kontaktperson | contact | contacto | contato | Kontakt | contact |
+| dimension | dimensjon | dimensjon | dimension | dimensión | dimensão | Dimension/Buchhaltungsdimension | dimension |
+| voucher/posting | bilag/postering | bilag/postering | voucher/posting | asiento | lançamento | Beleg/Buchung | écriture |
 | delete | slett/fjern | slett/fjern | delete/remove | eliminar/borrar | excluir/remover | löschen/entfernen | supprimer |
 | update | oppdater/endre | oppdater/endre | update/modify | actualizar/modificar | atualizar/modificar | aktualisieren/ändern | mettre à jour/modifier |
 
@@ -129,25 +137,30 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 - If unsure between create_invoice and invoice_existing_customer, prefer invoice_existing_customer \
 when the prompt implies the customer already exists in the system.
 - Travel expense keywords: "reiseregning", "reise", "diett", "kjøregodtgjørelse", "utlegg"
+- leverandør/supplier + faktura/invoice → create_supplier_invoice (NOT create_invoice)
+- "inngående faktura", "mottatt faktura", "leverandørfaktura", "Eingangsrechnung", "facture fournisseur" → create_supplier_invoice
+- CRITICAL: "Registrieren Sie den Lieferanten" / "registrer leverandør" / "register supplier" → create_supplier (NOT create_customer)
+- CRITICAL: "Exécutez la paie" / "kjør lønn" / "run payroll" / "Gehaltsabrechnung" / "ejecutar nómina" → run_payroll
+- CRITICAL: "reverser betaling" / "payment returned/bounced by bank" / "Zahlung rückerstattet" → reverse_payment (NOT create_credit_note or error_correction). \
+The goal is to reverse the payment voucher so the invoice is outstanding again.
+- paie/salaire/lønn/Gehalt/nómina + employee name + amount → run_payroll (salary payment)
+- Lieferant/leverandør/supplier WITHOUT faktura/invoice keywords → create_supplier (register the supplier entity)
+- "oppdater produkt" / "endre produkt" / "update product" / "modify product" → update_product
+- "slett produkt" / "fjern produkt" / "delete product" / "remove product" → delete_product
+- "oppdater leverandør" / "endre leverandør" / "update supplier" → update_supplier
+- "slett leverandør" / "fjern leverandør" / "delete supplier" → delete_supplier
+- "finn leverandør" / "søk leverandør" / "find supplier" / "search supplier" → find_supplier
+- "slett avdeling" / "fjern avdeling" / "delete department" → delete_department
 - When a prompt mentions both creating a project AND linking it to a customer → project_with_customer
 - "Legg til rolle" / "set role" / "set access" → set_employee_roles
-- CRITICAL distinction between register_payment and invoice_with_payment:
-  * register_payment: The invoice ALREADY EXISTS in the system. Keywords: "outstanding invoice", \
-"existing invoice", "has an invoice", "utestående faktura", "betale fakturaen", "register payment ON this invoice". \
-The prompt refers to an invoice that was previously created and needs payment registered.
-  * invoice_with_payment: The invoice does NOT exist yet — create it AND register payment in one go. \
-Keywords: "create invoice and register payment", "unpaid invoice" with NEW customer/product details, \
-"facture impayée" with full invoice line details that need to be created.
-  * KEY TEST: If the prompt says the customer "has" an invoice or the invoice is "outstanding"/"utestående", \
-it means the invoice already exists → register_payment. If the prompt asks to CREATE a new invoice and pay it → invoice_with_payment.
+- CRITICAL: If the prompt describes a customer with an unpaid invoice and asks to register payment, \
+this is invoice_with_payment (create customer + invoice + payment in one flow), NOT register_payment. \
+register_payment is ONLY for registering payment on an ALREADY EXISTING invoice in the system.
 - "facture impayée" / "unbezahlte Rechnung" / "unpaid invoice" + customer details → invoice_with_payment
 - If the prompt gives customer details (name, org number) AND invoice details (amount, description) \
 AND mentions payment → invoice_with_payment
-- CRITICAL: "reverser betaling" / "payment returned/bounced by bank" / "Zahlung rückerstattet" → reverse_payment (NOT create_credit_note or error_correction). \
-The goal is to reverse the payment voucher so the invoice is outstanding again.
-- CRITICAL: "Setting a fixed price for a project" / "Festpreis festlegen" / "fast pris" on an existing project \
-is ONLY update_project (with is_fixed_price=true and fixed_price=<amount>). It is NOT a batch with an invoice. \
-Do NOT split this into multiple tasks. The update_project task type supports is_fixed_price and fixed_price fields.
+- dimension/Buchhaltungsdimension/dimensjon + values/voucher/Beleg → create_dimension_voucher
+- "fri dimensjon", "custom dimension", "Kostsenter", "Kostenstelle", "cost center" → create_dimension_voucher
 
 ## FEW-SHOT EXAMPLES
 
@@ -226,19 +239,6 @@ Input: "Registrer innbetaling på faktura 10042 med beløp 15000 kr, dato 15.03.
 Output:
 {{"task_type": "register_payment", "confidence": 0.97, "fields": {{"invoice_identifier": "10042", "amount": 15000.0, "payment_date": "2026-03-15"}}}}
 
-### Example 11b — Register payment on outstanding invoice (English)
-Input: "The customer Windmill Ltd (org no. 830362894) has an outstanding invoice for 32200 NOK excluding VAT for System Development. Register full payment on this invoice."
-Output:
-{{"task_type": "register_payment", "confidence": 0.99, "fields": {{"invoice_identifier": "Windmill Ltd", "amount": 32200.0}}}}
-NOTE: This is register_payment because the invoice ALREADY EXISTS ("has an outstanding invoice"). \
-Do NOT use invoice_with_payment here — that would create a duplicate invoice.
-
-### Example 11c — Error correction / payment reversal (Bokmål)
-Input: "Betalingen fra Havbris AS for fakturaen Programvarelisens ble returnert av banken. Reverser betalingen slik at fakturaen igjen viser utestående beløp."
-Output:
-{{"task_type": "error_correction", "confidence": 0.97, "fields": {{"voucher_identifier": "Betaling for Programvarelisens fra Havbris AS", "correction_description": "Betalingen ble returnert av banken. Reverser betalingen."}}}}
-NOTE: Payment reversal = error_correction, NOT register_payment. The payment was already registered; now reverse it.
-
 ### Example 12 — Create travel expense (Bokmål)
 Input: "Opprett reiseregning for ansatt Per Hansen, dagsreise fra Bergen til Oslo 19. mars 2026, formål: kundemøte"
 Output:
@@ -263,27 +263,6 @@ Output:
 Input: "Opprett kreditnota for faktura 10055"
 Output:
 {{"task_type": "create_credit_note", "confidence": 0.97, "fields": {{"invoice_identifier": "10055"}}}}
-
-### Example 16b — Credit note for bounced payment (Bokmål)
-Input: "Betalingen fra Havbris AS for fakturaen Programvarelisens ble returnert av banken. Reverser betalingen slik at fakturaen igjen viser utestående beløp."
-Output:
-{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Havbris AS"}}}}
-NOTE: Bounced/returned bank payment → reverse_payment, NOT create_credit_note or error_correction. The goal is to reverse the payment voucher so the invoice is outstanding again.
-
-### Example 16c — Reverse payment for bounced payment (Portuguese)
-Input: "O pagamento de Empresa Verde Lda para a fatura de Serviços de Consultoria foi devolvido pelo banco. Reverter o pagamento."
-Output:
-{{"task_type": "reverse_payment", "confidence": 0.96, "fields": {{"customer_name": "Empresa Verde Lda"}}}}
-
-### Example 16d — Reverse payment for bounced payment (English)
-Input: "The payment from Acme Corp for invoice Software License was returned by the bank. Reverse the payment so the invoice shows outstanding amount again."
-Output:
-{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Acme Corp"}}}}
-
-### Example 25b — Reverse payment (Norwegian)
-Input: "Betalingen fra Tindra AS ble returnert av banken. Reverser betalingen slik at fakturaen igjen vises som utestående."
-Output:
-{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Tindra AS"}}}}
 
 ### Example 17 — Project with customer (Bokmål)
 Input: "Opprett prosjekt 'Nettside' for kunde Digitalbyrå AS, start 01.04.2026, fast pris 50000 kr"
@@ -310,59 +289,65 @@ Input: "Finn kunde med org.nr 912345678"
 Output:
 {{"task_type": "find_customer", "confidence": 0.96, "fields": {{"search_query": "912345678", "search_field": "organization_number"}}}}
 
+### Example 19b — Supplier invoice (Nynorsk)
+Input: "Me har motteke faktura frå leverandøren Vestfjord AS (org.nr 923456789) på 45000 kr inkl. mva for konsulenttjenester"
+Output:
+{{"task_type": "create_supplier_invoice", "confidence": 0.97, "fields": {{"supplier_name": "Vestfjord AS", "organization_number": "923456789", "amount_including_vat": 45000.0, "description": "konsulenttjenester"}}}}
+
 ### Example 20 — Set employee roles (English)
 Input: "Set employee John Doe as a standard user with no access"
 Output:
 {{"task_type": "set_employee_roles", "confidence": 0.94, "fields": {{"employee_identifier": "John Doe", "user_type": "NO_ACCESS"}}}}
 
-### Example 20b — Set fixed price on existing project (German)
-Input: "Legen Sie einen Festpreis von 473250 NOK für das Projekt 'Datensicherheit' für Windkraft GmbH fest"
+### Example 22 — Create dimension + voucher (German)
+Input: "Erstellen Sie eine benutzerdefinierte Buchhaltungsdimension 'Kostsenter' mit den Werten 'IT' und 'Innkjøp'. Buchen Sie dann einen Beleg auf Konto 7000 über 19450 NOK, verknüpft mit dem Dimensionswert 'IT'."
 Output:
-{{"task_type": "update_project", "confidence": 0.97, "fields": {{"project_identifier": "Datensicherheit", "is_fixed_price": true, "fixed_price": 473250.0}}}}
+{{"task_type": "create_dimension_voucher", "confidence": 0.97, "fields": {{"dimension_name": "Kostsenter", "dimension_values": ["IT", "Innkjøp"], "account_number": "7000", "amount": 19450.0, "linked_dimension_value": "IT"}}}}
+
+### Example 22b — Create dimension (Norwegian)
+Input: "Opprett en fri dimensjon 'Kostsenter' med verdiene 'Salg' og 'Drift', og bokfør et bilag på konto 6000 for 5000 NOK knyttet til 'Salg'"
+Output:
+{{"task_type": "create_dimension_voucher", "confidence": 0.96, "fields": {{"dimension_name": "Kostsenter", "dimension_values": ["Salg", "Drift"], "account_number": "6000", "amount": 5000.0, "linked_dimension_value": "Salg"}}}}
+
+### Example 23 — Register supplier (German)
+Input: "Registrieren Sie den Lieferanten Nordlicht GmbH mit der Organisationsnummer 922976457. E-Mail: faktura@nordlichtgmbh.no."
+Output:
+{{"task_type": "create_supplier", "confidence": 0.97, "fields": {{"name": "Nordlicht GmbH", "organization_number": "922976457", "email": "faktura@nordlichtgmbh.no"}}}}
+
+### Example 23b — Register supplier (Norwegian)
+Input: "Registrer leverandøren Havbris AS med org.nr. 987654321 og e-post: post@havbris.no"
+Output:
+{{"task_type": "create_supplier", "confidence": 0.96, "fields": {{"name": "Havbris AS", "organization_number": "987654321", "email": "post@havbris.no"}}}}
+
+### Example 24 — Run payroll (French)
+Input: "Exécutez la paie de Jules Leroy (jules.leroy@example.org) pour ce mois. Le salaire de base est de 56950 NOK. Ajoutez une prime unique de 9350 NOK en plus du salaire de base."
+Output:
+{{"task_type": "run_payroll", "confidence": 0.97, "fields": {{"employee_identifier": "Jules Leroy", "first_name": "Jules", "last_name": "Leroy", "email": "jules.leroy@example.org", "base_salary": 56950.0, "bonus": 9350.0}}}}
+
+### Example 24b — Run payroll (Norwegian)
+Input: "Kjør lønn for ansatt Kari Hansen (kari@example.no) for mars 2026. Grunnlønn 45000 NOK."
+Output:
+{{"task_type": "run_payroll", "confidence": 0.96, "fields": {{"employee_identifier": "Kari Hansen", "first_name": "Kari", "last_name": "Hansen", "email": "kari@example.no", "base_salary": 45000.0, "month": "03", "year": "2026"}}}}
+
+### Example 25 — Payment returned / bounced (Portuguese)
+Input: "O pagamento de Cascata Lda (org. nº 844279892) referente à fatura 'Horas de consultoria' (41350 NOK sem IVA) foi devolvido pelo banco. Reverta o pagamento para reabrir a fatura."
+Output:
+{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Cascata Lda", "organization_number": "844279892"}}}}
+
+### Example 25b — Reverse payment (Norwegian)
+Input: "Betalingen fra Tindra AS ble returnert av banken. Reverser betalingen slik at fakturaen igjen vises som utestående."
+Output:
+{{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Tindra AS"}}}}
 
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
 return a JSON object with a "batch" array containing one classification per entity:
 {{"batch": [{{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "X"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Y"}}}}, ...]}}
 
-CRITICAL: Only use batch mode when the prompt EXPLICITLY asks to create MULTIPLE separate entities. \
-Do NOT split a single task into multiple tasks. For example, "set a fixed price for a project" is ONE \
-update_project task, NOT a batch of update_project + invoice_existing_customer.
-
 ### Example 21 — Batch departments
 Input: "Create three departments in Tripletex: Utvikling, Innkjøp, and Salg."
 Output:
 {{"batch": [{{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Utvikling"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Innkjøp"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Salg"}}}}]}}
-
-### Example 22 — Create supplier (Norwegian)
-Input: "Opprett leverandør Renhald AS med org.nr 912345678, e-post faktura@renhald.no"
-Output:
-{{"task_type": "create_supplier", "confidence": 0.97, "fields": {{"name": "Renhald AS", "organization_number": "912345678", "email": "faktura@renhald.no"}}}}
-
-### Example 22b — Create supplier (Nynorsk)
-Input: "Registrer ny leverandør Elektro Vest AS"
-Output:
-{{"task_type": "create_supplier", "confidence": 0.96, "fields": {{"name": "Elektro Vest AS"}}}}
-
-### Example 23 — Register supplier invoice (Norwegian)
-Input: "Registrer leverandørfaktura frå Elektro AS på 15000 kr eks. mva for Elektrisk arbeid"
-Output:
-{{"task_type": "register_supplier_invoice", "confidence": 0.97, "fields": {{"supplier_identifier": "Elektro AS", "amount_excl_vat": 15000.0, "description": "Elektrisk arbeid"}}}}
-
-### Example 23b — Register supplier invoice (German)
-Input: "Eingangsrechnung von Müller Elektrik GmbH über 8500 NOK für Wartungsarbeiten buchen"
-Output:
-{{"task_type": "register_supplier_invoice", "confidence": 0.96, "fields": {{"supplier_identifier": "Müller Elektrik GmbH", "amount_excl_vat": 8500.0, "description": "Wartungsarbeiten"}}}}
-
-### Example 24 — Run payroll (Norwegian)
-Input: "Kjør lønn for ansatt Erik Berg med grunnlønn 45000 kr og bonus 5000 kr for mars 2026"
-Output:
-{{"task_type": "run_payroll", "confidence": 0.97, "fields": {{"employee_identifier": "Erik Berg", "base_salary": 45000.0, "bonus": 5000.0, "month": 3, "year": 2026}}}}
-
-### Example 24b — Run payroll (French)
-Input: "Exécuter la paie pour l'employé Jean Dupont avec un salaire de base de 38000 NOK"
-Output:
-{{"task_type": "run_payroll", "confidence": 0.96, "fields": {{"employee_identifier": "Jean Dupont", "base_salary": 38000.0}}}}
 
 ## EMPLOYEE USER TYPE / ROLE
 When the prompt mentions administrator, admin, kontoadministrator → set user_type to "ADMINISTRATOR"
@@ -379,12 +364,6 @@ Respond with ONLY a JSON object (no markdown, no explanation) with exactly these
 For batch operations, use the batch format described above.
 
 If you cannot determine the task type, use "unknown" with confidence 0.0 and empty fields.
-
-## CRITICAL RULES
-- NEVER fabricate or invent information not present in the prompt.
-- If the prompt does not mention an email address, phone number, or website, do NOT include them in fields.
-- Only extract information that is EXPLICITLY stated in the input text.
-- Do NOT guess or infer contact details — only extract what is literally written.
 """
 
 
@@ -446,38 +425,7 @@ def _get_anthropic_client():
     return _anthropic_client
 
 
-def _build_claude_system_prompt() -> str:
-    """Build a concise classifier system prompt for Claude."""
-    lines = []
-    for tt in TaskType:
-        desc = TASK_TYPE_DESCRIPTIONS.get(tt, "")
-        spec = TASK_FIELD_SPECS.get(tt, {})
-        required = spec.get("required", [])
-        optional = spec.get("optional", [])
-        lines.append(f"- {tt.value}: {desc}")
-        if required:
-            lines.append(f"  Required: {', '.join(required)}")
-        if optional:
-            lines.append(f"  Optional: {', '.join(optional)}")
-    return "\n".join(lines)
-
-
-_CLAUDE_SYSTEM = f"""\
-You are an accounting task classifier for Tripletex ERP.
-Given a task description in ANY language (nb, nn, en, es, pt, de, fr), output JSON with:
-- task_type: one of the values below
-- confidence: 0.0-1.0
-- fields: extracted field values
-
-TASK TYPES:
-{_build_claude_system_prompt()}
-
-RULES:
-- Dates → YYYY-MM-DD
-- Numbers → plain decimals, no thousand separators
-- If unsure, use "unknown" with confidence 0.0
-
-Respond with ONLY a JSON object, no markdown."""
+_CLAUDE_SYSTEM = SYSTEM_PROMPT
 
 
 async def _classify_with_claude(
@@ -533,7 +481,7 @@ async def classify_task(
     """
     def _post_process_result(r):
         r.fields = _post_process_fields(r.task_type, r.fields)
-        r.fields = _strip_hallucinated_fields(r.raw_prompt, r.fields)
+        r.fields = _strip_hallucinated_fields(r.fields, prompt)
         return r
 
     def _post_process_any(r):
@@ -554,17 +502,16 @@ async def classify_task(
         except Exception as e:
             logger.warning("Gemini classification failed: %s — trying next fallback", e)
 
-    # --- Try Claude second ---
-    global _claude_available
-    if _claude_available and os.environ.get("ANTHROPIC_API_KEY"):
+    # --- Try Claude second (skip if previously failed) ---
+    if os.environ.get("ANTHROPIC_API_KEY") and not _claude_disabled:
         try:
             result = await _classify_with_claude(prompt, files)
             if result.task_type != TaskType.UNKNOWN or result.confidence > 0.5:
                 return _post_process_result(result)
             logger.info("Claude returned UNKNOWN, trying keyword fallback")
         except Exception as e:
-            logger.warning("Claude classification failed: %s — disabling for this session", e)
-            _claude_available = False
+            logger.warning("Claude classification failed: %s — disabling Claude fallback", e)
+            _set_claude_disabled()
 
     # --- Keyword fallback (always available) ---
     result = _classify_with_keywords(prompt, files)
@@ -613,6 +560,9 @@ async def _classify_with_gemini(
         try:
             raw_text = await _call_gemini(client, content_parts)
             result = _parse_response(raw_text, prompt)
+            # _parse_response may return a list for batch operations
+            if isinstance(result, list):
+                return result
             # If Gemini returned UNKNOWN on first try, retry before giving up
             if result.task_type == TaskType.UNKNOWN and attempt < MAX_RETRIES:
                 logger.warning("Gemini returned UNKNOWN (attempt %d), retrying...", attempt + 1)
@@ -676,36 +626,6 @@ async def _call_gemini(client: Any, user_message: str | list) -> str:
 # ---------------------------------------------------------------------------
 # Response parsing
 # ---------------------------------------------------------------------------
-
-
-def _strip_hallucinated_fields(raw_prompt: str, fields: dict) -> dict:
-    """Remove field values that were fabricated by the LLM and don't appear in the original prompt.
-
-    LLMs sometimes hallucinate email addresses, phone numbers, and websites
-    that aren't present in the input text. This safety net catches those.
-    """
-    _CHECKABLE_FIELDS = ["email", "phone", "website", "invoice_email", "phone_mobile"]
-    prompt_lower = raw_prompt.lower()
-
-    for field_name in _CHECKABLE_FIELDS:
-        value = fields.get(field_name)
-        if not value or not isinstance(value, str):
-            continue
-        # Check if the value (or a significant portion) appears in the original prompt
-        value_lower = value.lower().strip()
-        if value_lower not in prompt_lower:
-            # For email, also check just the local part (before @)
-            if "@" in value_lower:
-                local_part = value_lower.split("@")[0]
-                domain = value_lower.split("@")[1] if "@" in value_lower else ""
-                if local_part not in prompt_lower and domain not in prompt_lower:
-                    logger.warning("Stripped hallucinated %s: %s (not found in prompt)", field_name, value)
-                    del fields[field_name]
-            else:
-                logger.warning("Stripped hallucinated %s: %s (not found in prompt)", field_name, value)
-                del fields[field_name]
-
-    return fields
 
 
 def _post_process_fields(task_type: TaskType, fields: dict) -> dict:
@@ -882,6 +802,21 @@ def _normalize_fields(task_type: TaskType, fields: dict) -> dict:
     return f
 
 
+def _strip_hallucinated_fields(fields: dict, original_prompt: str) -> dict:
+    """Remove email, phone, website fields whose values don't appear in the original prompt.
+
+    LLMs sometimes fabricate contact info that isn't in the input text.
+    """
+    f = dict(fields)
+    prompt_lower = original_prompt.lower()
+    for key in ("email", "phone", "website"):
+        val = f.get(key)
+        if val and isinstance(val, str) and val.lower() not in prompt_lower:
+            logger.info("Stripping hallucinated %s: %s", key, val)
+            f.pop(key)
+    return f
+
+
 def _parse_single(data: dict, original_prompt: str) -> TaskClassification:
     """Parse a single classification dict into TaskClassification."""
     if not isinstance(data, dict):
@@ -902,6 +837,7 @@ def _parse_single(data: dict, original_prompt: str) -> TaskClassification:
         fields = {}
 
     fields = _normalize_fields(task_type, fields)
+    fields = _strip_hallucinated_fields(fields, original_prompt)
 
     return TaskClassification(
         task_type=task_type,
@@ -963,6 +899,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "slett ansatt", "fjern ansatt", "delete employee", "remove employee",
             "eliminar empleado", "löschen mitarbeiter", "supprimer employé",
             "excluir funcionário", "slett tilsett", "fjern tilsett",
+            # Swedish / Danish / Dutch / Finnish
+            "ta bort anställd", "radera anställd", "slet medarbejder", "fjern medarbejder",
+            "verwijder medewerker", "poista työntekijä",
         ],
     },
     TaskType.UPDATE_EMPLOYEE: {
@@ -971,6 +910,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "change employee", "edit employee", "rediger ansatt",
             "actualizar empleado", "modifier employé", "ändern mitarbeiter",
             "atualizar funcionário", "oppdater tilsett", "endre tilsett",
+            # Swedish / Danish / Dutch / Finnish
+            "uppdatera anställd", "ändra anställd", "opdater medarbejder", "ændr medarbejder",
+            "wijzig medewerker", "päivitä työntekijä", "muokkaa työntekijä",
         ],
     },
     TaskType.SET_EMPLOYEE_ROLES: {
@@ -991,15 +933,20 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "criar funcionário", "criar um funcionário",
             "opprett tilsett", "opprett ein tilsett", "ny tilsett",
             "legg til tilsett",
+            # Swedish / Danish / Dutch / Finnish
+            "skapa anställd", "ny anställd", "opret medarbejder", "ny medarbejder",
+            "maak medewerker", "nieuwe medewerker", "luo työntekijä", "uusi työntekijä",
         ],
-        "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change", "rolle", "role", "tilgang",
-                          "lønn", "lønns", "salary", "payroll", "paie", "nómina", "gehalt", "grunnlønn", "fastlønn", "base salary"],
+        "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change", "rolle", "role", "tilgang"],
     },
     TaskType.UPDATE_CUSTOMER: {
         "keywords": [
             "oppdater kunde", "endre kunde", "update customer", "modify customer",
             "change customer", "edit customer", "rediger kunde",
             "actualizar cliente", "modifier client", "ändern kunde",
+            # Swedish / Danish / Dutch / Finnish
+            "uppdatera kund", "ändra kund", "opdater kunde", "ændr kunde",
+            "wijzig klant", "päivitä asiakas",
         ],
     },
     TaskType.CREATE_CUSTOMER: {
@@ -1012,6 +959,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "erstellen kunde", "erstellen sie einen kunden", "einen kunden",
             "créer client", "créer un client",
             "criar cliente", "criar um cliente", "neuer kunde",
+            # Swedish / Danish / Dutch / Finnish
+            "skapa kund", "ny kund", "opret kunde", "ny kunde",
+            "maak klant", "nieuwe klant", "luo asiakas", "uusi asiakas",
         ],
         "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change"],
     },
@@ -1020,18 +970,10 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "finn kunde", "søk kunde", "søk etter kunde", "find customer",
             "search customer", "look up customer", "buscar cliente",
             "chercher client", "suche kunde", "kunde suchen", "kunde finden",
-        ],
-    },
-    TaskType.REVERSE_PAYMENT: {
-        "keywords": [
-            # Bounced/returned payment → reverse payment (NOT error correction or credit note)
-            "returnert av banken", "returned by bank", "returned by the bank",
-            "bounced payment", "betaling returnert", "payment returned",
-            "rückerstattet", "devolvido", "devuelto",
-            "betaling avvist", "payment rejected", "payment bounced",
-            "paiement retourné", "paiement rejeté",
-            "reverser betaling", "reverse payment", "undo payment",
-            "tilbakefør betaling",
+            # Portuguese / French
+            "procurar cliente", "rechercher client", "trouver client",
+            # Swedish / Danish
+            "hitta kund", "sök kund", "find kunde", "søg kunde",
         ],
     },
     TaskType.CREATE_CREDIT_NOTE: {
@@ -1073,6 +1015,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "créer facture", "créer une facture",
             "criar fatura", "criar uma fatura",
             "fakturer",
+            # Swedish / Danish / Dutch / Finnish
+            "skapa faktura", "ny faktura", "opret faktura",
+            "maak factuur", "nieuwe factuur", "luo lasku", "uusi lasku",
         ],
         "anti_keywords": ["betalt", "paid", "innbetaling", "payment", "kreditnota", "credit note"],
     },
@@ -1086,6 +1031,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "erstellen produkt", "ein produkt",
             "créer produit", "créer un produit",
             "criar produto", "criar um produto",
+            # Swedish / Danish / Dutch / Finnish
+            "skapa produkt", "ny produkt", "opret produkt", "nyt produkt",
+            "maak product", "nieuw product", "luo tuote", "uusi tuote",
         ],
     },
     TaskType.CREATE_DEPARTMENT: {
@@ -1098,6 +1046,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "erstellen abteilung", "eine abteilung",
             "créer département", "créer un département",
             "criar departamento", "criar um departamento",
+            # Swedish / Danish / Dutch / Finnish
+            "skapa avdelning", "ny avdelning", "opret afdeling", "ny afdeling",
+            "maak afdeling", "nieuwe afdeling", "luo osasto", "uusi osasto",
         ],
     },
     TaskType.DELETE_PROJECT: {
@@ -1124,6 +1075,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "opprett prosjekt", "opprett eit prosjekt", "opprett ein prosjekt",
             "nytt prosjekt", "create project", "new project",
             "crear proyecto", "erstellen projekt", "créer projet", "criar projeto",
+            # Swedish / Danish / Dutch / Finnish
+            "skapa projekt", "nytt projekt", "opret projekt", "nyt projekt",
+            "maak project", "nieuw project", "luo projekti", "uusi projekti",
         ],
         "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change"],
     },
@@ -1139,6 +1093,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "reisekostnad", "gastos de viaje", "reisekosten",
             "frais de voyage", "note de frais", "despesas de viagem",
             "opprett reise", "create travel",
+            # Swedish / Danish / Dutch / Finnish
+            "reseräkning", "resa", "rejseafregning", "rejse",
+            "reisdeclaratie", "reis", "matkakulut", "matka", "matkalasku",
         ],
         "anti_keywords": ["slett", "delete", "fjern", "remove"],
     },
@@ -1149,6 +1106,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "kontaktperson", "contact person", "add contact", "legg til kontakt",
             "crear contacto", "créer contact", "créer un contact", "kontakt erstellen",
             "contact pour", "contato para", "contacto para",
+            # Swedish / Danish / Dutch / Finnish
+            "skapa kontakt", "ny kontakt", "opret kontakt",
+            "maak contact", "nieuw contact", "luo yhteyshenkilö",
         ],
     },
     TaskType.PROJECT_BILLING: {
@@ -1161,24 +1121,42 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
         "keywords": [
             "bankavsteming", "bankavstemming", "bank reconciliation",
             "reconcile bank", "avstem bank", "reconciliación bancaria",
+            # German / French / Portuguese
+            "bankabstimmung", "kontoabstimmung", "rapprochement bancaire",
+            "reconciliação bancária", "conciliação bancária",
+            # Swedish / Danish
+            "bankavstämning", "bankafstemning",
         ],
     },
     TaskType.ERROR_CORRECTION: {
         "keywords": [
             "korriger", "rett feil", "correct error", "error correction",
             "reverser bilag", "reverse voucher", "feilretting",
+            # German / French / Spanish / Portuguese
+            "fehlerkorrektur", "buchungskorrektur", "correction d'erreur",
+            "corriger écriture", "corrección de error", "correção de erro",
+            # Additional Norwegian
+            "korrigere bilag", "endre bilag", "rett opp feil",
         ],
     },
     TaskType.YEAR_END_CLOSING: {
         "keywords": [
             "årsavslutning", "årsoppgjør", "year-end", "year end closing",
             "annual closing", "cierre anual",
+            # German / French / Portuguese
+            "jahresabschluss", "clôture annuelle", "encerramento anual",
+            # Swedish / Danish
+            "årsbokslut", "årsafslutning",
         ],
     },
     TaskType.ENABLE_MODULE: {
         "keywords": [
             "aktiver modul", "enable module", "slå på modul", "activate module",
             "activar módulo", "activer module",
+            # German / Portuguese
+            "modul aktivieren", "ativar módulo",
+            # Swedish / Danish
+            "aktivera modul", "aktiver modul",
         ],
     },
     TaskType.UPDATE_CONTACT: {
@@ -1196,107 +1174,6 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "excluir cliente", "remover cliente",
         ],
     },
-    TaskType.UPDATE_PRODUCT: {
-        "keywords": [
-            "oppdater produkt", "endre produkt", "update product", "modify product",
-            "change product", "edit product", "rediger produkt",
-            "actualizar producto", "modifier produit", "ändern produkt",
-            "atualizar produto",
-        ],
-    },
-    TaskType.DELETE_PRODUCT: {
-        "keywords": [
-            "slett produkt", "fjern produkt", "delete product", "remove product",
-            "eliminar producto", "supprimer produit", "löschen produkt",
-            "excluir produto", "remover produto",
-        ],
-    },
-    TaskType.CREATE_SUPPLIER: {
-        "keywords": [
-            "opprett leverandør", "opprett en leverandør", "ny leverandør",
-            "create supplier", "create a supplier", "new supplier",
-            "legg til leverandør", "registrer leverandør", "register supplier",
-            "crear proveedor", "erstellen lieferant", "créer fournisseur",
-            "criar fornecedor",
-        ],
-        "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change", "finn", "find", "søk", "search"],
-    },
-    TaskType.UPDATE_SUPPLIER: {
-        "keywords": [
-            "oppdater leverandør", "endre leverandør", "update supplier", "modify supplier",
-            "change supplier", "edit supplier", "rediger leverandør",
-            "actualizar proveedor", "modifier fournisseur", "ändern lieferant",
-            "atualizar fornecedor",
-        ],
-    },
-    TaskType.DELETE_SUPPLIER: {
-        "keywords": [
-            "slett leverandør", "fjern leverandør", "delete supplier", "remove supplier",
-            "eliminar proveedor", "supprimer fournisseur", "löschen lieferant",
-            "excluir fornecedor", "remover fornecedor",
-        ],
-    },
-    TaskType.FIND_SUPPLIER: {
-        "keywords": [
-            "finn leverandør", "søk leverandør", "søk etter leverandør",
-            "find supplier", "search supplier", "look up supplier",
-            "buscar proveedor", "chercher fournisseur", "suche lieferant",
-            "lieferant finden",
-        ],
-    },
-    TaskType.DELETE_DEPARTMENT: {
-        "keywords": [
-            "slett avdeling", "fjern avdeling", "delete department", "remove department",
-            "eliminar departamento", "supprimer département", "löschen abteilung",
-            "excluir departamento", "remover departamento",
-        ],
-    },
-    TaskType.UPDATE_TRAVEL_EXPENSE: {
-        "keywords": [
-            "oppdater reiseregning", "endre reiseregning", "update travel expense",
-            "modify travel expense", "change travel expense", "edit travel expense",
-            "oppdater reiserekning", "endre reiserekning",
-            "modifier note de frais", "actualizar gasto de viaje",
-            "ändern reisekostenabrechnung", "atualizar despesa de viagem",
-        ],
-    },
-    TaskType.DELETE_CONTACT: {
-        "keywords": [
-            "slett kontakt", "fjern kontakt", "delete contact", "remove contact",
-            "slett kontaktperson", "fjern kontaktperson",
-            "eliminar contacto", "supprimer contact", "löschen kontakt",
-            "excluir contato", "remover contato",
-        ],
-    },
-    TaskType.CREATE_DIMENSION_AND_VOUCHER: {
-        "keywords": [
-            "regnskapsdimensjon", "accounting dimension", "free dimension",
-            "fri dimensjon", "frie dimensjoner", "konteringsdimensjon",
-            "dimensjon og bilag", "dimension and voucher",
-            "opprett dimensjon", "create dimension",
-        ],
-    },
-    TaskType.RUN_PAYROLL: {
-        "keywords": [
-            "kjør lønn", "kjøre lønn", "lønnskjøring", "lønnsutbetaling",
-            "run payroll", "execute payroll", "process payroll",
-            "grunnlønn", "fastlønn", "base salary", "salaire de base",
-            "exécuter la paie", "exécutez la paie",
-            "ejecutar nómina", "gehalt auszahlen", "gehaltslauf",
-            "lønn for ansatt", "payroll for employee",
-            "lønnsslipp", "payslip",
-        ],
-    },
-    TaskType.REGISTER_SUPPLIER_INVOICE: {
-        "keywords": [
-            "leverandørfaktura", "supplier invoice", "incoming invoice",
-            "inngående faktura", "inngåande faktura",
-            "registrer leverandørfaktura", "register supplier invoice",
-            "book supplier invoice", "bokfør leverandørfaktura",
-            "eingangsrechnung", "facture fournisseur", "factura proveedor",
-            "mottatt faktura fra leverandør", "received invoice from supplier",
-        ],
-    },
     TaskType.UPDATE_DEPARTMENT: {
         "keywords": [
             "oppdater avdeling", "endre avdeling", "update department", "modify department",
@@ -1305,12 +1182,191 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "atualizar departamento",
         ],
     },
+    TaskType.CREATE_DIMENSION_VOUCHER: {
+        "keywords": [
+            "dimensjon", "dimension", "buchhaltungsdimension", "fri dimensjon",
+            "custom dimension", "benutzerdefinierte dimension",
+            "kostsenter", "kostenstelle", "cost center", "centre de coût",
+            "centro de costo", "centro de custo",
+            "dimensjonsverdier", "dimensionswert",
+            # Norwegian accounting: "bokfør bilag" / "bokför bilag" (Swe spelling)
+            "bokfør bilag", "bokför bilag", "bokfør et bilag",
+            "bokför ett bilag",
+            # Swedish
+            "bokföringsdimension", "anpassad dimension",
+            # Danish
+            "bogføringsdimension", "brugerdefineret dimension",
+        ],
+    },
+    TaskType.RUN_PAYROLL: {
+        "keywords": [
+            "kjør lønn", "utbetal lønn", "lønnskjøring", "lønnsslipp",
+            "run payroll", "execute payroll", "process payroll", "salary payment",
+            "paie", "exécutez la paie", "exécuter la paie", "fiche de paie", "bulletin de paie",
+            "gehalt", "gehaltsabrechnung", "lohnabrechnung", "lohn auszahlen",
+            "nómina", "ejecutar nómina", "procesar nómina",
+            "folha de pagamento", "processar folha",
+            "lønn", "lønnsutbetaling",
+            "salaire", "salaire de base",
+            # Swedish / Danish / Dutch / Finnish
+            "kör lön", "löneutbetalning", "lön", "kør løn", "lønudbetaling", "løn",
+            "salaris uitbetalen", "salarisverwerking", "salaris",
+            "palkka", "palkanmaksu", "suorita palkanmaksu",
+        ],
+    },
+    TaskType.CREATE_SUPPLIER: {
+        "keywords": [
+            "registrer leverandør", "opprett leverandør", "ny leverandør",
+            "create supplier", "register supplier", "new supplier",
+            "add supplier", "legg til leverandør",
+            "registrieren lieferant", "lieferanten registrieren",
+            "erstellen lieferant", "neuer lieferant", "einen lieferanten",
+            "créer fournisseur", "enregistrer fournisseur", "nouveau fournisseur",
+            "crear proveedor", "registrar proveedor", "nuevo proveedor",
+            "criar fornecedor", "registrar fornecedor", "novo fornecedor",
+            # Swedish / Danish / Dutch / Finnish
+            "skapa leverantör", "ny leverantör", "registrera leverantör",
+            "opret leverandør", "ny leverandør", "registrer leverandør",
+            "maak leverancier", "nieuwe leverancier",
+            "luo toimittaja", "uusi toimittaja", "rekisteröi toimittaja",
+        ],
+        "anti_keywords": ["faktura", "invoice", "rechnung", "facture", "factura"],
+    },
+    TaskType.CREATE_SUPPLIER_INVOICE: {
+        "keywords": [
+            "leverandørfaktura", "inngående faktura", "supplier invoice",
+            "eingangsrechnung", "facture fournisseur", "factura proveedor",
+            "faktura fra leverandør", "mottatt faktura", "motteke faktura",
+            "received invoice", "incoming invoice",
+            # Portuguese
+            "fatura de fornecedor", "fatura do fornecedor",
+            # Spanish expanded
+            "factura de proveedor", "factura del proveedor",
+            # Nynorsk
+            "leverandørfaktura", "innkomande faktura",
+            # Swedish / Danish
+            "leverantörsfaktura", "inkommande faktura",
+            "leverandørfaktura", "indgående faktura",
+        ],
+    },
     TaskType.LOG_HOURS: {
         "keywords": [
             "logg timer", "log hours", "registrer timer", "timesheet", "timeliste",
             "timeføring", "registrer tid", "register hours", "record hours",
             "registrar horas", "enregistrer heures", "stunden erfassen",
-            "loggfør timer", "føre timer",
+            "loggfør timer", "føre timer", "før timer",
+            # Nynorsk
+            "logg timar", "registrer timar", "timeliste",
+            # Swedish / Danish / Dutch / Finnish
+            "logga timmar", "registrera timmar", "tidrapport",
+            "registrer timer", "tidsregistrering",
+            "uren registreren", "urenregistratie",
+            "kirjaa tunnit", "tuntikirjaus",
+            # German
+            "stunden buchen", "arbeitszeit erfassen", "zeiterfassung",
+            # French
+            "saisir heures", "pointage", "saisie de temps",
+            # Portuguese / Spanish
+            "registrar horas", "registro de horas",
+        ],
+    },
+    TaskType.UPDATE_PRODUCT: {
+        "keywords": [
+            "oppdater produkt", "endre produkt", "update product", "modify product",
+            "change product", "edit product", "rediger produkt",
+            "modifier produit", "actualizar producto", "produkt ändern",
+            "ändern produkt", "aktualisieren produkt", "atualizar produto",
+            # Swedish / Danish / Dutch / Finnish
+            "uppdatera produkt", "ändra produkt", "opdater produkt", "ændr produkt",
+            "wijzig product", "päivitä tuote", "muokkaa tuote",
+        ],
+    },
+    TaskType.DELETE_PRODUCT: {
+        "keywords": [
+            "slett produkt", "fjern produkt", "delete product", "remove product",
+            "supprimer produit", "eliminar producto", "löschen produkt",
+            "excluir produto", "remover produto",
+            # Swedish / Danish / Dutch / Finnish
+            "ta bort produkt", "radera produkt", "slet produkt", "fjern produkt",
+            "verwijder product", "poista tuote",
+        ],
+    },
+    TaskType.UPDATE_SUPPLIER: {
+        "keywords": [
+            "oppdater leverandør", "endre leverandør", "update supplier", "modify supplier",
+            "change supplier", "edit supplier", "rediger leverandør",
+            "modifier fournisseur", "actualizar proveedor", "ändern lieferant",
+            "aktualisieren lieferant", "atualizar fornecedor",
+            # Swedish / Danish / Dutch / Finnish
+            "uppdatera leverantör", "ändra leverantör", "opdater leverandør",
+            "wijzig leverancier", "päivitä toimittaja",
+        ],
+    },
+    TaskType.DELETE_SUPPLIER: {
+        "keywords": [
+            "slett leverandør", "fjern leverandør", "delete supplier", "remove supplier",
+            "supprimer fournisseur", "eliminar proveedor", "löschen lieferant",
+            "excluir fornecedor", "remover fornecedor",
+            # Swedish / Danish / Dutch / Finnish
+            "ta bort leverantör", "radera leverantör", "slet leverandør",
+            "verwijder leverancier", "poista toimittaja",
+        ],
+    },
+    TaskType.FIND_SUPPLIER: {
+        "keywords": [
+            "finn leverandør", "søk leverandør", "søk etter leverandør",
+            "find supplier", "search supplier", "look up supplier",
+            "chercher fournisseur", "trouver fournisseur", "rechercher fournisseur",
+            "buscar proveedor", "suche lieferant", "lieferant suchen", "lieferant finden",
+            "procurar fornecedor",
+            # Swedish / Danish / Dutch / Finnish
+            "hitta leverantör", "sök leverantör", "find leverandør", "søg leverandør",
+            "zoek leverancier", "etsi toimittaja",
+        ],
+    },
+    TaskType.DELETE_DEPARTMENT: {
+        "keywords": [
+            "slett avdeling", "fjern avdeling", "delete department", "remove department",
+            "supprimer département", "eliminar departamento", "löschen abteilung",
+            "excluir departamento", "remover departamento",
+            # Swedish / Danish / Dutch / Finnish
+            "ta bort avdelning", "radera avdelning", "slet afdeling", "fjern afdeling",
+            "verwijder afdeling", "poista osasto",
+        ],
+    },
+    TaskType.REVERSE_PAYMENT: {
+        "keywords": [
+            # Norwegian
+            "reverser betaling", "angre betaling", "tilbakefør betaling",
+            "tilbakefør", "returnert av banken", "stornere betaling",
+            "tilbakeført betaling", "reverser innbetaling",
+            "betaling returnert", "betaling ble returnert",
+            # Nynorsk
+            "reverser betaling", "tilbakefør betaling",
+            # English
+            "reverse payment", "undo payment", "cancel payment",
+            "payment returned", "payment bounced", "returned by bank",
+            "bounced by bank", "payment was returned", "reverse the payment",
+            # Swedish
+            "återför betalning", "ångra betalning", "betalning returnerad",
+            "återbetala", "storner betalning",
+            # Danish
+            "tilbagefør betaling", "betaling returneret",
+            # German
+            "zahlung rückerstattet", "zahlung stornieren", "rückbuchung",
+            "zahlung zurückgebucht", "zahlung rückgängig", "stornierung",
+            # French
+            "paiement retourné", "annuler paiement", "paiement rejeté",
+            "retourné par la banque", "reverser le paiement",
+            # Spanish
+            "pago devuelto", "revertir pago", "pago rechazado",
+            "devuelto por el banco", "anular pago",
+            # Portuguese
+            "pagamento devolvido", "reverter pagamento", "pagamento rejeitado",
+            "devolvido pelo banco", "estornar pagamento",
+            # Dutch / Finnish
+            "betaling terugboeken", "peruuta maksu",
+            "betaling geweigerd", "maksu palautettu",
         ],
     },
 }
@@ -1318,7 +1374,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
 # Pre-compiled regex patterns for field extraction
 _RE_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _RE_PHONE = re.compile(r"(?:\+\d{1,3}\s?)?(?:\d[\d\s\-]{6,14}\d)")
-_RE_ORG_NR = re.compile(r"(?:org\.?\s*(?:nr\.?|nummer)?\s*:?\s*)(\d[\d\s]{7,10}\d)", re.IGNORECASE)
+_RE_ORG_NR = re.compile(r"(?:org(?:anisas?tion(?:s?nummer)?)?\.?\s*(?:n[rº]\.?|nummer|number|numéro|número)?\s*:?\s*)(\d[\d\s]{7,10}\d)", re.IGNORECASE)
 _RE_DATE_DMY = re.compile(r"\b(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})\b")
 _RE_DATE_YMD = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 _RE_DATE_TEXT_NB = re.compile(
@@ -1518,7 +1574,7 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
     # Email
     email_match = _RE_EMAIL.search(prompt)
     if email_match:
-        fields["email"] = email_match.group(0)
+        fields["email"] = email_match.group(0).rstrip(".")
 
     # Phone — skip if the match is preceded by org number keywords
     phone_match = _RE_PHONE.search(prompt)
@@ -1526,7 +1582,7 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
         phone_val = phone_match.group(0).strip()
         # Don't treat org numbers as phone numbers
         before_phone = prompt[:phone_match.start()].lower()
-        if not re.search(r"org\.?\s*(?:nr\.?|nummer)?\s*:?\s*$", before_phone):
+        if not re.search(r"(?:org(?:anisas?tion(?:s?nummer)?)?\.?\s*(?:n[rº]\.?|nummer|number|numéro|número)?\s*:?\s*)$", before_phone):
             fields["phone"] = phone_val
 
     # Org number
@@ -1748,6 +1804,101 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
         if cust:
             fields["customer_identifier"] = cust
 
+    elif task_type == TaskType.RUN_PAYROLL:
+        # Extract employee name
+        first_name, last_name = _extract_name_parts(prompt)
+        if first_name:
+            fields["first_name"] = first_name
+        if last_name:
+            fields["last_name"] = last_name
+        if first_name and last_name:
+            fields["employee_identifier"] = f"{first_name} {last_name}"
+        # Base salary: "salaire de base est de 56950" / "grunnlønn 45000" / "base salary 45000"
+        base_match = re.search(
+            r"(?:salaire\s+de\s+base|grunnlønn|grundgehalt|base\s+salary|sueldo\s+base|salário\s+base|basislønn)\s+(?:est\s+de\s+|er\s+|ist\s+|es\s+|é\s+)?(\d[\d\s.,]*)\s*(?:kr|NOK)?",
+            prompt, re.IGNORECASE,
+        )
+        if base_match:
+            fields["base_salary"] = float(base_match.group(1).replace(",", ".").replace(" ", ""))
+        elif amounts:
+            fields["base_salary"] = amounts[0]
+        # Bonus: "prime unique de 9350" / "bonus 9350" / "tillegg 9350"
+        bonus_match = re.search(
+            r"(?:prime|bonus|tillegg|Bonus|Zuschlag|Prämie|bonificación|bônus|gratification)\s+(?:unique\s+)?(?:de\s+|på\s+|von\s+|of\s+)?(\d[\d\s.,]*)\s*(?:kr|NOK)?",
+            prompt, re.IGNORECASE,
+        )
+        if bonus_match:
+            fields["bonus"] = float(bonus_match.group(1).replace(",", ".").replace(" ", ""))
+
+    elif task_type == TaskType.CREATE_SUPPLIER:
+        # Extract supplier name: "Lieferanten X GmbH" / "leverandør X AS" / "supplier X"
+        sup_match = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if sup_match:
+            fields["name"] = sup_match.group(1).strip().rstrip(",.")
+
+    elif task_type == TaskType.CREATE_SUPPLIER_INVOICE:
+        # Extract supplier name: "leverandøren X" / "fra leverandør X" / "supplier X"
+        sup_match = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant|proveedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if sup_match:
+            fields["supplier_name"] = sup_match.group(1).strip().rstrip(",.")
+        if amounts:
+            fields["amount_including_vat"] = amounts[0]
+        if dates:
+            fields["invoice_date"] = dates[0]
+
+    elif task_type == TaskType.REVERSE_PAYMENT:
+        # Extract customer name
+        cust = _guess_customer_name(prompt)
+        if cust:
+            fields["customer_name"] = cust
+        # Invoice number if mentioned
+        inv_match = re.search(r"(?:faktura|invoice|rechnung|factura?)\s*(?:nr\.?\s*)?#?\s*(\d+)", prompt, re.IGNORECASE)
+        if inv_match:
+            fields["invoice_number"] = inv_match.group(1)
+        if amounts:
+            fields["amount"] = amounts[0]
+
+    elif task_type == TaskType.CREATE_DIMENSION_VOUCHER:
+        # Extract quoted values for dimension_name and dimension_values
+        quoted = re.findall(r"['\u2018\u2019\u201C\u201D\"']([^'\u2018\u2019\u201C\u201D\"']+)['\u2018\u2019\u201C\u201D\"']", prompt)
+        if quoted:
+            fields["dimension_name"] = quoted[0]
+            if len(quoted) > 1:
+                # linked_dimension_value: look for association keyword + quoted value
+                link_match = re.search(
+                    r"(?:verknüpft|linked|knyttet|lié|vinculado|associé)\s+(?:mit|with|til|med|à|a|con)?\s*(?:dem\s+)?(?:Dimensionswert|dimension\s*value?|dimensjonsverdien?)?\s*['\u2018\u2019\u201C\u201D\"']([^'\u2018\u2019\u201C\u201D\"']+)['\u2018\u2019\u201C\u201D\"']",
+                    prompt, re.IGNORECASE,
+                )
+                if link_match:
+                    fields["linked_dimension_value"] = link_match.group(1)
+                # Deduplicate values and exclude the dimension name itself
+                seen = set()
+                dim_values = []
+                for q in quoted[1:]:
+                    if q.lower() != quoted[0].lower() and q.lower() not in seen:
+                        seen.add(q.lower())
+                        dim_values.append(q)
+                fields["dimension_values"] = dim_values
+        # Account number: "Konto 7000" / "account 7000" / "konto 6000"
+        acct_match = re.search(r"(?:Konto|konto|account|compte|cuenta|conta|Buchungskonto)\s+(\d{4})", prompt, re.IGNORECASE)
+        if acct_match:
+            fields["account_number"] = acct_match.group(1)
+        # Amount
+        if amounts:
+            fields["amount"] = amounts[0]
+        if dates:
+            fields["voucher_date"] = dates[0]
+
     return fields
 
 
@@ -1834,11 +1985,15 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
     p = prompt.lower()
     # Order matters — more specific matches first
     _LAST_RESORT = [
-        # Reverse payment (bounced) before credit note
-        (["returnert av banken", "returned by bank", "bounced", "payment returned",
-          "betaling returnert", "rückerstattet", "devolvido", "reverser betaling",
-          "reverse payment", "tilbakefør betaling"], TaskType.REVERSE_PAYMENT),
-        # Credit note
+        # Supplier invoice before regular invoice
+        # Dimension/voucher before invoice/voucher
+        (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
+        (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lønnsslipp", "salary"], TaskType.RUN_PAYROLL),
+        (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "facture fournisseur"], TaskType.CREATE_SUPPLIER_INVOICE),
+        (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
+        # Reverse payment before credit note (both deal with "undo" but reverse_payment is for bank returns)
+        (["reverser", "reverse payment", "tilbakefør", "stornere", "rückbuchung", "bounced", "returned by bank", "returnert av banken", "devolvido pelo banco", "pago devuelto", "paiement retourné"], TaskType.REVERSE_PAYMENT),
+        # Credit note before invoice
         (["kreditnota", "credit note", "gutschrift", "avoir", "nota de crédito"], TaskType.CREATE_CREDIT_NOTE),
         # Invoice+payment before plain invoice
         (["betaling", "payment", "pago", "zahlung", "paiement", "betalt", "paid", "innbetaling"], TaskType.INVOICE_WITH_PAYMENT),
@@ -1856,14 +2011,20 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         (["slett ansatt", "delete employee", "fjern ansatt"], TaskType.DELETE_EMPLOYEE),
         (["slett prosjekt", "delete project", "fjern prosjekt"], TaskType.DELETE_PROJECT),
         (["slett reise", "delete travel", "fjern reise"], TaskType.DELETE_TRAVEL_EXPENSE),
+        (["slett produkt", "delete product", "fjern produkt"], TaskType.DELETE_PRODUCT),
+        (["slett leverandør", "delete supplier", "fjern leverandør"], TaskType.DELETE_SUPPLIER),
+        (["slett avdeling", "delete department", "fjern avdeling"], TaskType.DELETE_DEPARTMENT),
         # Update patterns
         (["oppdater ansatt", "update employee", "endre ansatt"], TaskType.UPDATE_EMPLOYEE),
         (["oppdater kunde", "update customer", "endre kunde"], TaskType.UPDATE_CUSTOMER),
         (["oppdater prosjekt", "update project", "endre prosjekt"], TaskType.UPDATE_PROJECT),
         (["oppdater kontakt", "update contact", "endre kontakt"], TaskType.UPDATE_CONTACT),
         (["oppdater avdeling", "update department", "endre avdeling"], TaskType.UPDATE_DEPARTMENT),
+        (["oppdater produkt", "update product", "endre produkt"], TaskType.UPDATE_PRODUCT),
+        (["oppdater leverandør", "update supplier", "endre leverandør"], TaskType.UPDATE_SUPPLIER),
         # Find
         (["finn kunde", "find customer", "søk kunde", "search customer"], TaskType.FIND_CUSTOMER),
+        (["finn leverandør", "find supplier", "søk leverandør", "search supplier"], TaskType.FIND_SUPPLIER),
         # Set roles
         (["rolle", "role", "tilgang", "access", "user type"], TaskType.SET_EMPLOYEE_ROLES),
         # Contact
@@ -1951,6 +2112,11 @@ def _classify_with_keywords(
     # Last resort: single-word heuristic — NEVER return UNKNOWN if there's any signal
     if best_type == TaskType.UNKNOWN:
         _LAST_RESORT = [
+            (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon"], TaskType.CREATE_DIMENSION_VOUCHER),
+            (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "salary"], TaskType.RUN_PAYROLL),
+            (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
+            (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
+            (["reverser", "reverse payment", "tilbakefør", "stornere", "bounced", "rückbuchung", "returnert av banken"], TaskType.REVERSE_PAYMENT),
             (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
             (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário", "empregado"], TaskType.CREATE_EMPLOYEE),
             (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
