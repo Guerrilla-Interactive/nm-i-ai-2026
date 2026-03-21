@@ -128,6 +128,7 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 | bank reconciliation | bankavtale/bankavstemming | bankavstemming | bank reconciliation | conciliación bancaria | conciliação bancária | Kontoabstimmung | rapprochement bancaire |
 | error correction | feilretting/korrigering | feilretting/korrigering | error correction | corrección | correção | Korrektur/Berichtigung | correction d'écriture |
 | year-end closing | årsavslutning/årsoppgjør | årsavslutning | year-end closing | cierre anual | encerramento anual | Jahresabschluss | clôture annuelle |
+| month-end closing | månedsslutt/periodisering | månedsslutt | month-end closing | cierre mensual/periodificación | fechamento mensal | Monatsabschluss | clôture mensuelle |
 | module | modul/modulen | modul | module | módulo | módulo | Modul | module |
 | riconciliazione bancaria | riconciliazione bancaria | - | - | - | - | - | - |
 | chiusura annuale | chiusura annuale | - | - | - | - | - | - |
@@ -186,8 +187,9 @@ AND mentions payment → invoice_with_payment
 - CRITICAL: "aktiver modul" / "enable module" / "activer le module" / "Modul aktivieren" → enable_module (NOT create_project, NOT create_travel_expense, NOT run_payroll). \
 Even if the module name contains "Reiseregning" / "Travel Expense" / "Prosjekt" / "lønn", classify as enable_module.
 - CRITICAL: "årsavslutning" / "arsavslutning" / "årsoppgjør" / "avslutt år" / "year-end closing" / "Jahresabschluss" / "clôture annuelle" → year_end_closing (NOT unknown)
-- CRITICAL: "månedsslutt" / "maanedsslutt" / "month-end closing" / "Monatsabschluss" / "clôture mensuelle" / "cierre mensual" / "periodisering" → month_end_closing (NOT year_end_closing, NOT unknown). \
-Month-end closing involves accrual/periodification vouchers and depreciation, NOT annual year-end closing.
+- CRITICAL: "månedsslutt" / "maanedsslutt" / "month-end closing" / "Monatsabschluss" / "clôture mensuelle" / "cierre mensual" / "periodisering" / "periodificación" / "depreciación mensual" → month_end_closing (NOT year_end_closing, NOT unknown). \
+Month-end closing involves accrual/periodification vouchers and monthly depreciation, NOT annual year-end closing. \
+IMPORTANT: A prompt mentioning "cierre mensual" is ALWAYS month_end_closing even if it also mentions "depreciación anual" (annual depreciation rate is a parameter for calculating monthly depreciation).
 - CRITICAL: "leverandørfaktura" / "leverandorfaktura" / "inngående faktura" / "Eingangsrechnung" / "facture fournisseur" / "supplier invoice" → register_supplier_invoice (NOT create_invoice). \
 A supplier/vendor invoice is an INCOMING invoice from a supplier, not an outgoing invoice to a customer.
 - CRITICAL: "lønnskjøring" / "lonnskjoring" / "kjør lønn" / "kjor lonn" / "run payroll" / "salary payment" → run_payroll (NOT unknown)
@@ -504,6 +506,11 @@ Output:
 Input: "Realice el cierre mensual de marzo de 2026. Registre la periodificación de 15000 NOK de la cuenta 1700 a la cuenta 6300."
 Output:
 {{"task_type": "month_end_closing", "confidence": 0.97, "fields": {{"month": "03", "year": "2026", "accrual_amount": 15000.0, "accrual_from_account": "1700", "accrual_to_account": "6300"}}}}
+
+### Example 34d2 — Month-end closing (Spanish, with depreciation)
+Input: "Realice el cierre mensual de marzo de 2026. Registre la periodificación (12500 NOK por mes de la cuenta 1720 a gasto). Contabilice la depreciación mensual de un activo fijo con costo de adquisición 61000 NOK y depreciación anual de 10000 NOK."
+Output:
+{{"task_type": "month_end_closing", "confidence": 0.98, "fields": {{"month": "03", "year": "2026", "accrual_amount": 12500.0, "accrual_from_account": "1720", "depreciation_cost": 61000.0, "depreciation_annual": 10000.0}}}}
 
 ### Example 34e — Month-end closing (Norwegian)
 Input: "Utfør månedsslutt for mars 2026. Registrer periodisering på 25000 NOK fra konto 1700."
@@ -1633,7 +1640,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             # French
             "clôture mensuelle", "cloture mensuelle",
             # Spanish
-            "cierre mensual",
+            "cierre mensual", "periodificación", "depreciación mensual",
             # Portuguese
             "fechamento mensal", "encerramento mensal",
             # Italian

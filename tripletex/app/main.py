@@ -1302,6 +1302,7 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
         (["betaling", "payment", "innbetaling", "pago", "zahlung", "paiement"], TaskType.REGISTER_PAYMENT),
         (["kreditnota", "credit note", "gutschrift", "avoir"], TaskType.CREATE_CREDIT_NOTE),
         (["bankavsteming", "reconcil", "avstem", "kontoabstimmung", "conciliación", "conciliação", "riconciliazione", "rapprochement", "afstemming", "bankafstemming", "bankabstimmung"], TaskType.BANK_RECONCILIATION),
+        (["månedsslutt", "maanedsslutt", "month-end", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodificación", "depreciación mensual", "fechamento mensal", "chiusura mensile"], TaskType.MONTH_END_CLOSING),
         (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "encerramento", "chiusura", "cierre anual", "jahresabschluss", "clôture annuelle", "bokslut"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct error", "feilrett", "corrigir", "correggere", "corriger", "corregir", "korrigieren", "fehlbuchung", "feilpostering", "erreur comptable", "error contable", "erro contábil"], TaskType.ERROR_CORRECTION),
     ]
