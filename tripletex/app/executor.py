@@ -2689,12 +2689,15 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
          account_id=account_id, account_number=account.get("number"))
 
     # Step 2: Try to create a bank reconciliation entry
+    # NOTE: The Tripletex bank reconciliation API does NOT accept "date" as a field.
+    # The correct field name is "accountDate" for the reconciliation date.
+    # "type" must also be a valid enum value.
     reconciliation_id = None
     try:
         recon_data = {
             "account": {"id": account_id},
             "type": "MANUAL",
-            "date": period_end,
+            "accountDate": period_end,
         }
         if transactions:
             total = sum(float(t.get("amount", 0)) for t in transactions if t.get("amount"))
@@ -2737,16 +2740,16 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
             if amount >= 0:
                 postings = [
                     {"account": {"id": account_id}, "amountGross": abs_amount,
-                     "amountGrossCurrency": abs_amount, "description": txn_description, "date": txn_date},
+                     "amountGrossCurrency": abs_amount, "description": txn_description},
                     {"account": {"id": counter_account_id or account_id}, "amountGross": -abs_amount,
-                     "amountGrossCurrency": -abs_amount, "description": txn_description, "date": txn_date},
+                     "amountGrossCurrency": -abs_amount, "description": txn_description},
                 ]
             else:
                 postings = [
                     {"account": {"id": account_id}, "amountGross": -abs_amount,
-                     "amountGrossCurrency": -abs_amount, "description": txn_description, "date": txn_date},
+                     "amountGrossCurrency": -abs_amount, "description": txn_description},
                     {"account": {"id": counter_account_id or account_id}, "amountGross": abs_amount,
-                     "amountGrossCurrency": abs_amount, "description": txn_description, "date": txn_date},
+                     "amountGrossCurrency": abs_amount, "description": txn_description},
                 ]
 
             try:
