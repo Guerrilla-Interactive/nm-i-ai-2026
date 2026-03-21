@@ -215,24 +215,26 @@ CRITICAL: These 7 task types are Tier 3 (highest value). You MUST recognize them
 | Language | Keywords |
 |----------|----------|
 | nb | månedsslutt, periodisering, månedlig avskrivning |
-| nn | månedsslutt, periodisering |
+| nn | månedsslutt, månavslutninga, månadsslutt, periodisering |
 | en | month-end closing, accrual, monthly depreciation, periodification |
 | es | cierre mensual, periodificación, depreciación mensual, acumulación mensual |
-| pt | fechamento mensal, encerramento mensal, provisão mensal, depreciação mensal |
+| pt | fechamento mensal, encerramento mensal, provisão mensal, depreciação mensal, periodificação |
 | de | Monatsabschluss, Periodenabgrenzung, monatliche Abschreibung |
 | fr | clôture mensuelle, régularisation, provision mensuelle, amortissement mensuel |
-If the prompt says "cierre mensual" or "periodificación" → ALWAYS month_end_closing.
+If the prompt says "cierre mensual" or "periodificación" or "fechamento mensal" or "månavslutninga" → ALWAYS month_end_closing.
 
 ### YEAR_END_CLOSING — year-end closing / annual closing
 | Language | Keywords |
 |----------|----------|
 | nb | årsavslutning, årsoppgjør |
-| nn | årsavslutning |
+| nn | årsavslutning, årsoppgjer, årsoppgjor |
 | en | year-end closing, annual closing |
 | es | cierre anual, cierre del ejercicio |
-| pt | encerramento anual, fechamento anual |
+| pt | encerramento anual, fechamento anual, encerramento anual simplificado |
 | de | Jahresabschluss |
 | fr | clôture annuelle |
+CRITICAL: "encerramento anual simplificado" (PT) = year_end_closing. \
+"årsoppgjer" / "forenkla årsoppgjer" (Nynorsk) = year_end_closing.
 
 ### BANK_RECONCILIATION — reconcile bank account
 | Language | Keywords |
@@ -248,11 +250,11 @@ If the prompt says "cierre mensual" or "periodificación" → ALWAYS month_end_c
 ### ERROR_CORRECTION — correct a ledger error / reverse a voucher
 | Language | Keywords |
 |----------|----------|
-| nb | feilretting, korrigering, korriger bilag |
-| nn | feilretting |
+| nb | feilretting, korrigering, korriger bilag, Buchungskorrektur |
+| nn | feilretting, korrigering |
 | en | error correction, correct error |
 | es | corrección de error, corregir comprobante, corrección contable |
-| pt | correção de erro, corrigir lançamento |
+| pt | correção de erro, corrigir lançamento, correção contábil |
 | de | Fehlerkorrektur, Buchungskorrektur, Korrektur |
 | fr | correction d'erreur, corriger écriture |
 
@@ -288,6 +290,55 @@ If the prompt says "cierre mensual" or "periodificación" → ALWAYS month_end_c
 | pt | dimensão contábil, centro de custo |
 | de | Buchhaltungsdimension, Kostenstelle |
 | fr | dimension comptable, centre de coût |
+
+## PORTUGUESE (pt) TASK RECOGNITION
+CRITICAL: Portuguese prompts must be correctly classified. Key patterns:
+- "encerramento anual" / "encerramento anual simplificado" / "fechamento anual" → year_end_closing
+- "fechamento mensal" / "encerramento mensal" / "provisão" / "periodificação" → month_end_closing
+- "depreciação anual" in context of year-end → year_end_closing
+- "depreciação mensal" in context of month-end → month_end_closing
+- "conciliação bancária" / "reconciliação bancária" → bank_reconciliation
+- "fatura de fornecedor" / "fatura do fornecedor" → register_supplier_invoice
+- "nota de crédito" → create_credit_note
+- "fatura vencida" / "fatura pendente" + "pagamento" → invoice_with_payment
+- "correção de erro" / "corrigir lançamento" → error_correction
+- "ativar módulo" / "habilitar módulo" → enable_module
+- "dimensão" / "centro de custo" → create_dimension_voucher
+- "Realize" / "Efetue" / "Execute" = imperative verbs meaning "Perform"
+- "Calcule e registe" / "Registre" = "Calculate and record" / "Record"
+
+## NYNORSK (nn) TASK RECOGNITION
+CRITICAL: Nynorsk differs from Bokmål. Key patterns:
+- "årsoppgjer" / "årsoppgjor" = year-end closing (Bokmål: "årsoppgjør")
+- "forenkla årsoppgjer" = simplified year-end closing → year_end_closing
+- "Gjer månavslutninga" / "månadsslutt" = month-end closing → month_end_closing
+- "Analyser hovudboka" = analyze the general ledger → error_correction
+- "Totalkostnadene auka" / "kostnadene auka" = costs increased → error_correction (cost analysis, finding discrepancies)
+- "finn dei tre kostnadspostane" = find the three cost items → error_correction
+- "avskrivingar" = depreciation (in closing context → year_end_closing or month_end_closing)
+- "periodiser" = periodize/accrue → month_end_closing
+- CRITICAL: If a Nynorsk prompt asks to "analyser hovudboka" (analyze the ledger) and find cost discrepancies, this is error_correction, NOT create_project.
+
+## MONTH_END vs YEAR_END DISAMBIGUATION
+CRITICAL rules for distinguishing month-end from year-end closing:
+- If prompt mentions a SPECIFIC MONTH (mars/March/marzo/março/März) → month_end_closing
+- If prompt mentions "periodisering" / "periodificación" / "periodificação" / "accrual" / "Periodenabgrenzung" → month_end_closing
+- If prompt mentions monthly depreciation calculation → month_end_closing
+- If prompt mentions a YEAR without a month (2025, fiscal year, regnskapsår) → year_end_closing
+- If prompt mentions closing ALL revenue/expense to equity / retained earnings → year_end_closing
+- If prompt mentions annual depreciation as part of year-end procedures → year_end_closing
+- "depreciación anual" as a PARAMETER for monthly calculation (e.g., annual rate / 12) → month_end_closing
+- "depreciación anual" as the primary operation (full year writedown) → year_end_closing
+- When in doubt: check for "mensual/mensal/måned/month" → month_end_closing; "anual/annual/år/year" → year_end_closing
+
+## MULTI-STEP COMPOUND PROMPTS
+If a prompt describes MULTIPLE sequential operations (numbered steps like "1)... 2)... 3)..."), classify by the PRIMARY/umbrella operation:
+- Steps involving accruals + monthly depreciation + month closing → month_end_closing
+- Steps involving annual depreciation + closing P&L + retained earnings → year_end_closing
+- "vollständigen Projektzyklus" / "ciclo de vida completo del proyecto" / "cycle de vie complet du projet" \
+(complete project lifecycle: create project + invoice + hours + payment) → This is a compound operation. \
+Classify based on the FIRST concrete action. If it starts with project creation → create_project or project_with_customer.
+- CRITICAL: Do NOT classify multi-step closing prompts as "unknown" — always pick the closing type.
 
 ## FEW-SHOT EXAMPLES
 
@@ -620,6 +671,31 @@ Output:
 Input: "Effectuer la clôture mensuelle de mars 2026. Enregistrer les écritures de régularisation."
 Output:
 {{"task_type": "month_end_closing", "confidence": 0.96, "fields": {{"month": "03", "year": "2026"}}}}
+
+### Example 34i — Month-end closing (Portuguese)
+Input: "Efetue o fechamento mensal de março de 2026. Registre a provisão de 15000 NOK da conta 1700 para despesas."
+Output:
+{{"task_type": "month_end_closing", "confidence": 0.97, "fields": {{"month": "03", "year": "2026", "accrual_amount": 15000.0, "accrual_from_account": "1700"}}}}
+
+### Example 34j — Month-end closing (Nynorsk)
+Input: "Gjer månavslutninga for mars 2026. Periodiser forskotsbetalt kostnad (11700 kr per månad frå konto 1720 til konto 6300)."
+Output:
+{{"task_type": "month_end_closing", "confidence": 0.97, "fields": {{"month": "03", "year": "2026", "accrual_amount": 11700.0, "accrual_from_account": "1720", "accrual_to_account": "6300"}}}}
+
+### Example 34k — Year-end closing (Portuguese, simplified with depreciation)
+Input: "Realize o encerramento anual simplificado de 2025: 1) Calcule e registe a depreciação anual de três ativos fixos. 2) Feche as contas de receita e despesa."
+Output:
+{{"task_type": "year_end_closing", "confidence": 0.97, "fields": {{"year": "2025"}}}}
+
+### Example 34l — Year-end closing (Nynorsk)
+Input: "Gjer forenkla årsoppgjer for 2025: 1) Rekn ut og bokfør årlege avskrivingar. 2) Steng inntekts- og kostnadskonti."
+Output:
+{{"task_type": "year_end_closing", "confidence": 0.97, "fields": {{"year": "2025"}}}}
+
+### Example 34m — Error correction / cost analysis (Nynorsk)
+Input: "Totalkostnadene auka monaleg frå januar til februar 2026. Analyser hovudboka og finn dei tre kostnadene som auka mest."
+Output:
+{{"task_type": "error_correction", "confidence": 0.90, "fields": {{}}}}
 
 ### Example 35 — Find supplier (Spanish)
 Input: "Buscar el proveedor NordTech AS por número de organización 987654321"
@@ -1722,6 +1798,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "corregir comprobante", "corrección contable",
             "corrigir lançamento", "correcao de erro",
             "correccion de error",
+            # Nynorsk / cost analysis
+            "analyser hovudboka", "analyser hovedboka",
+            "kostnadene auka", "totalkostnadene auka",
         ],
     },
     TaskType.YEAR_END_CLOSING: {
@@ -1730,7 +1809,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "annual closing", "cierre anual", "cierre del ejercicio",
             # German / French / Portuguese
             "jahresabschluss", "clôture annuelle", "encerramento anual",
-            "fechamento anual",
+            "fechamento anual", "encerramento anual simplificado",
             # Italian
             "chiusura annuale",
             # Swedish / Danish
@@ -1738,6 +1817,8 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             # ASCII variants (no special chars)
             "arsavslutning", "aarsavslutning", "year.end", "arsslutt",
             "aarsoppgjor", "arsoppgjor",
+            # Nynorsk
+            "årsoppgjer", "arsoppgjer", "forenkla årsoppgjer",
             # Additional Norwegian variants
             "årsslutt", "year end closing", "annual close",
             "avslutt år", "avslutt aar",
@@ -1764,6 +1845,10 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "chiusura mensile",
             # Swedish / Danish
             "månadsavslut", "månedsafslutning",
+            # Nynorsk
+            "månavslutninga", "månadsslutt", "manadsslutt",
+            # Portuguese additional
+            "periodificação", "periodificacao",
             # ASCII variants
             "maanedsslutt", "maanedslutt", "maanedsavslutning",
         ],
@@ -2832,8 +2917,8 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         (["timer", "hours", "stunden", "heures", "horas", "timesheet", "timeliste", "timefør", "logg"], TaskType.LOG_HOURS),
         # Bank/year-end/error
         (["bankavstem", "reconcil", "abgleich", "rapprochement", "rapprocher", "rapprochez", "relevé bancaire", "releve bancaire", "conciliación bancaria", "conciliacao bancaria", "conciliação bancária", "bancaire"], TaskType.BANK_RECONCILIATION),
-        (["månedsslutt", "maanedsslutt", "month-end", "month end clos", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodenabgrenzung", "periodificación", "periodificacion", "fechamento mensal", "encerramento mensal"], TaskType.MONTH_END_CLOSING),
-        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture annuelle", "avslutt år", "cierre anual", "encerramento anual", "fechamento anual"], TaskType.YEAR_END_CLOSING),
+        (["månedsslutt", "maanedsslutt", "månavslutninga", "month-end", "month end clos", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodenabgrenzung", "periodificación", "periodificacion", "fechamento mensal", "encerramento mensal", "periodificação", "periodificacao"], TaskType.MONTH_END_CLOSING),
+        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "årsoppgjer", "arsoppgjer", "year-end", "year end", "jahresabschluss", "clôture annuelle", "avslutt år", "cierre anual", "encerramento anual", "fechamento anual"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct", "feil", "error correction", "corrección", "correccion", "correção", "correcao", "korrektur"], TaskType.ERROR_CORRECTION),
         (["aktiver modul", "aktiver modulen", "enable module", "slå på", "slaa paa", "slaa paa modul", "activate module", "activar módulo", "activar modulo", "habilitar módulo", "habilitar modulo", "ativar módulo", "ativar modulo"], TaskType.ENABLE_MODULE),
         # Delete patterns (check before create)
@@ -2948,8 +3033,8 @@ def _classify_with_keywords(
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["reverser", "reverse payment", "tilbakefør", "stornere", "bounced", "rückbuchung", "returnert av banken"], TaskType.REVERSE_PAYMENT),
             (["bankavstem", "reconcil", "rapprochement", "rapprocher", "rapprochez", "relevé bancaire", "releve bancaire", "bancaire", "abgleich", "conciliación", "conciliação"], TaskType.BANK_RECONCILIATION),
-            (["månedsslutt", "maanedsslutt", "month-end", "month end", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodificación", "periodificacion", "fechamento mensal", "encerramento mensal"], TaskType.MONTH_END_CLOSING),
-            (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "year-end", "year.end", "arsslutt", "jahresabschluss", "cierre anual", "encerramento anual", "fechamento anual", "clôture annuelle"], TaskType.YEAR_END_CLOSING),
+            (["månedsslutt", "maanedsslutt", "månavslutninga", "month-end", "month end", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodificación", "periodificacion", "fechamento mensal", "encerramento mensal", "periodificação", "periodificacao"], TaskType.MONTH_END_CLOSING),
+            (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "årsoppgjer", "arsoppgjer", "year-end", "year.end", "arsslutt", "jahresabschluss", "cierre anual", "encerramento anual", "fechamento anual", "clôture annuelle"], TaskType.YEAR_END_CLOSING),
             (["aktiver modul", "enable module", "slaa paa modul", "activate module", "aktiver modul", "activar módulo", "activar modulo", "habilitar módulo", "habilitar modulo", "ativar módulo", "ativar modulo"], TaskType.ENABLE_MODULE),
             (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
             (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário", "empregado"], TaskType.CREATE_EMPLOYEE),

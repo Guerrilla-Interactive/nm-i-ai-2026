@@ -399,6 +399,11 @@ _KEYWORD_MAP = [
         r"\binvoice\b.*\bfrom\b.*\b(supplier|vendor)\b",
         # "vendor invoice" / "supplier invoice" (already above but ensure word boundary)
         r"\bvendor\s+invoice\b",
+        # Typo-tolerant: "fatkura" instead of "faktura"
+        r"\bleverandør.*fa[kt]{2,}ura\b",
+        r"\bleverandor.*fa[kt]{2,}ura\b",
+        r"fa[kt]{2,}ura.*leverandør",
+        r"fa[kt]{2,}ura.*leverandor",
     ]),
     # --- Credit Note (MUST come before CREATE_SUPPLIER_INVOICE to avoid "invoice" matching supplier invoice) ---
     (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b",
@@ -424,7 +429,14 @@ _KEYWORD_MAP = [
                                      r"\bclient\w*\b.*\bfacture\b.*\bimpayée?\b",
                                      # Spanish: "factura pendiente" = unpaid invoice
                                      r"\bfactura\s+pendiente\b",
-                                     r"\b(pendiente|impaga)\b.*\b(factura|invoice)\b"]),
+                                     r"\b(pendiente|impaga)\b.*\b(factura|invoice)\b",
+                                     # French: "en retard" = overdue
+                                     r"\b(facture|invoice)\b.*\ben\s+retard\b",
+                                     r"\ben\s+retard\b.*\b(facture|invoice)\b",
+                                     # Portuguese: "fatura vencida/pendente" = overdue/pending
+                                     r"\bfatura\s+(vencida|pendente)\b",
+                                     # German: "überfällige Rechnung" = overdue invoice
+                                     r"\b(überfällig|ueberfaellig)\w*\b.*\b(rechnung|invoice)\b"]),
     (TaskType.REGISTER_PAYMENT, [r"\b(registrer|register|registreer|registrar)\w*\b.*\b(betaling|innbetaling|payment|pago|zahlung|paiement|pagamento)\b",
                                   r"\b(betaling|payment|pago|zahlung|paiement|pagamento)\b.*\b(faktura|invoice|factuur|factura|rechnung|facture|fatura)\b",
                                   r"\bbetal\w*\s+faktura\b",
@@ -480,6 +492,24 @@ _KEYWORD_MAP = [
     (TaskType.PROJECT_BILLING, [r"\bfaktur\w*\b.*\b(prosjekt|project|projekt|projet)\b",
                                  r"\b(prosjekt|project)\b.*\bfaktur\w*\b"]),
 ]
+
+
+def _safe_parse_number(s: str | None) -> float | None:
+    """Parse a number from extracted text, handling truncated strings and locale formats."""
+    if not s:
+        return None
+    s = s.strip().rstrip('.…').replace(',', '.').replace(' ', '').replace('\u00a0', '')
+    # Handle European thousands separator: 45.500 → 45500
+    if s.count('.') > 1:
+        s = s.replace('.', '')
+    elif s.count('.') == 1:
+        parts = s.split('.')
+        if len(parts[1]) == 3 and len(parts[0]) >= 2:  # likely thousands separator
+            s = s.replace('.', '')
+    try:
+        return float(s)
+    except (ValueError, OverflowError):
+        return None
 
 
 def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
@@ -1015,17 +1045,25 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         # Extract amounts — try to get accrual and depreciation separately
         amounts = re.findall(r"(\d[\d\s.,]*\d)\s*(?:kr|NOK|EUR|USD)", text, re.I)
         if amounts:
-            fields["amount"] = float(amounts[0].replace(",", ".").replace(" ", ""))
+            val = _safe_parse_number(amounts[0])
+            if val is not None:
+                fields["amount"] = val
             if len(amounts) >= 2:
-                fields["accrual_amount"] = float(amounts[0].replace(",", ".").replace(" ", ""))
+                val = _safe_parse_number(amounts[0])
+                if val is not None:
+                    fields["accrual_amount"] = val
         # Extract annual depreciation (e.g. "depreciación anual de 10000 NOK")
         dep_ann = re.search(r"(?:avskrivning|depreci\w*|abschreibung)\w*\s*(?:anual|annual|årlig|arlig|annuel\w*|jährlich\w*|jahrlich\w*)\D{0,20}(\d[\d\s.,]*\d)", text, re.I)
         if dep_ann:
-            fields["annual_depreciation"] = float(dep_ann.group(1).replace(",", ".").replace(" ", ""))
+            val = _safe_parse_number(dep_ann.group(1))
+            if val is not None:
+                fields["annual_depreciation"] = val
         # Extract acquisition cost (e.g. "costo de adquisición 61000 NOK")
         cost_match = re.search(r"(?:kostpris|anskaffelse|innkjøpspris|costo\s+de\s+adquisici[oó]n|acquisition\s+cost|anschaffungskosten)\D{0,20}(\d[\d\s.,]*\d)", text, re.I)
         if cost_match:
-            fields["depreciation_cost"] = float(cost_match.group(1).replace(",", ".").replace(" ", ""))
+            val = _safe_parse_number(cost_match.group(1))
+            if val is not None:
+                fields["depreciation_cost"] = val
 
     if task_type == TaskType.ENABLE_MODULE:
         m = re.search(r"(?:modul|module|funksjon|feature)\s+(.+?)(?:\s*[,.]|$)", text, re.I)
@@ -1101,7 +1139,9 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         # Extract hours: "27 hours" / "27 timer"
         m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:timer|hours?|stunden|heures|horas|t)\b", text, re.I)
         if m:
-            fields["hours"] = float(m.group(1).replace(",", "."))
+            val = _safe_parse_number(m.group(1))
+            if val is not None:
+                fields["hours"] = val
         # Extract project name: 'project "System Upgrade"' or 'prosjekt Alpha'
         m = re.search(r"(?:prosjekt|project|projekt|projet)\s+[\"']([^\"']+)[\"']", text, re.I)
         if m:
@@ -1267,19 +1307,25 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             text, re.I,
         )
         if m:
-            fields["base_salary"] = float(m.group(1).replace(",", ".").replace(" ", ""))
+            val = _safe_parse_number(m.group(1))
+            if val is not None:
+                fields["base_salary"] = val
         else:
             # Fallback: first amount
             m = re.search(r"(\d+[\d.,]*)\s*(?:kr|NOK)", text, re.I)
             if m:
-                fields["base_salary"] = float(m.group(1).replace(",", ".").replace(" ", ""))
+                val = _safe_parse_number(m.group(1))
+                if val is not None:
+                    fields["base_salary"] = val
         # Bonus
         m = re.search(
             r"(?:prime|bonus|tillegg|Prämie|Zuschlag|bonificación|bônus|gratification)\s+(?:unique\s+)?(?:de\s+|på\s+|von\s+|of\s+)?(\d[\d\s.,]*)\s*(?:kr|NOK)?",
             text, re.I,
         )
         if m:
-            fields["bonus"] = float(m.group(1).replace(",", ".").replace(" ", ""))
+            val = _safe_parse_number(m.group(1))
+            if val is not None:
+                fields["bonus"] = val
 
     # --- Supplier: extract name, org number, email ---
     if task_type == TaskType.CREATE_SUPPLIER:
@@ -1393,8 +1439,9 @@ def _extract_invoice_lines(text: str) -> list[dict]:
     ):
         qty = int(m.group(1))
         desc = m.group(2).strip().rstrip(",.")
-        price = float(m.group(3).replace(",", ".").replace(" ", ""))
-        lines.append({"description": desc, "quantity": qty, "unit_price": price})
+        price = _safe_parse_number(m.group(3))
+        if price is not None:
+            lines.append({"description": desc, "quantity": qty, "unit_price": price})
 
     # Pattern: "X - N stk à Y kr" or "X: N stk à Y kr"
     if not lines:
@@ -1404,8 +1451,8 @@ def _extract_invoice_lines(text: str) -> list[dict]:
         ):
             desc = m.group(1).strip().rstrip(",.-:")
             qty = int(m.group(2))
-            price = float(m.group(3).replace(",", ".").replace(" ", ""))
-            if desc and len(desc) < 100:  # sanity check
+            price = _safe_parse_number(m.group(3))
+            if price is not None and desc and len(desc) < 100:  # sanity check
                 lines.append({"description": desc, "quantity": qty, "unit_price": price})
 
     # Pattern: "N stk/pcs X" without explicit price (price=0, product lookup needed)
@@ -1427,8 +1474,9 @@ def _extract_invoice_lines(text: str) -> list[dict]:
         ):
             qty = int(m.group(1))
             desc = m.group(2).strip().rstrip(",.")
-            price = float(m.group(3).replace(",", ".").replace(" ", ""))
-            lines.append({"description": desc, "quantity": qty, "unit_price": price})
+            price = _safe_parse_number(m.group(3))
+            if price is not None:
+                lines.append({"description": desc, "quantity": qty, "unit_price": price})
 
     return lines
 
