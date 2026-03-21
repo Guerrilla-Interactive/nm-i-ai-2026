@@ -505,6 +505,7 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                           TaskType.CREATE_PROJECT, TaskType.CREATE_CUSTOMER,
                           TaskType.PROJECT_WITH_CUSTOMER, TaskType.FIND_CUSTOMER,
                           TaskType.UPDATE_CUSTOMER, TaskType.UPDATE_PROJECT,
+                          TaskType.UPDATE_PRODUCT, TaskType.DELETE_PRODUCT,
                           TaskType.DELETE_PROJECT, TaskType.DELETE_DEPARTMENT,
                           TaskType.UPDATE_DEPARTMENT)
     if "name" not in fields and task_type in _NAME_ENTITY_TYPES:
@@ -522,10 +523,10 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         # Fallback: unquoted name starting with uppercase
         if "name" not in fields:
             m = re.search(
-            r"(?i:avdeling|department|département|departamento|abteilung|"
-            r"produkt|product|produit|producto|produto|"
-            r"prosjekt|project|projet|proyecto|projeto|"
-            r"kund(?:e|en)|customer|client|cliente)\s+"
+            r"(?i:avdeling\w*|department\w*|département\w*|departamento\w*|abteilung\w*|"
+            r"produkt\w*|product\w*|produit\w*|producto\w*|produto\w*|"
+            r"prosjekt\w*|project\w*|projet\w*|proyecto\w*|projeto\w*|"
+            r"kund(?:e|en)\w*|customer\w*|client\w*|cliente\w*)\s+"
             r"(?i:med\s+(?:navn\s+)?|named?\s+|called\s+|kalt\s+|appelée?\s+|nommée?\s+|"
             r"namens\s+|genannt\s+|chamad[oa]\s+|llamad[oa]\s+)?"
             r"([A-ZÆØÅ\u00C0-\u024F][\w&-]+(?:\s+[A-ZÆØÅ\u00C0-\u024F&][\w&-]+)*)"
