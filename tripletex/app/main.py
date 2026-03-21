@@ -285,7 +285,23 @@ _KEYWORD_MAP = [
                                    # German compound: "Buchungskorrektur"
                                    r"\bbuchungskorrektur\w*\b",
                                    # "Korrigér feil" with accent
-                                   r"\bkorrig[eé]r\w*\b.*\b(feil|bilag)\b"]),
+                                   r"\bkorrig[eé]r\w*\b.*\b(feil|bilag)\b",
+                                   # French: "erreurs dans le grand livre" / "découvert des erreurs"
+                                   r"\berreurs?\b.*\bgrand\s+livre\b",
+                                   r"\bdécouvert\b.*\berreurs?\b",
+                                   r"\bpièces?\s+comptable\w*\b.*\berreur\w*\b",
+                                   # Portuguese: "erros no livro razão" / "descobrimos erros" / "lançamento incorreto"
+                                   r"\berros?\b.*\blivro\s+raz[aã]o\b",
+                                   r"\bdescobr\w+\b.*\berros?\b",
+                                   r"\blan[çc]amento\s+incorret\w*\b",
+                                   # Portuguese: "analise o livro razão" + cost investigation
+                                   r"\banalise?\b.*\blivro\s+raz[aã]o\b",
+                                   r"\bcustos\s+totais\b.*\baument\w+\b",
+                                   # Nynorsk: "analyser hovudboka" (analyze the main ledger)
+                                   r"\banalyser?\b.*\bhovudbok\w*\b",
+                                   r"\bhovudbok\w*\b.*\bkostnad\w*\b",
+                                   # Bokmål: "analyser hovedboken"
+                                   r"\banalyser?\b.*\bhovedbok\w*\b"]),
     (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\barsavslut\w*\b", r"\baarsavslut\w*\b",
                                    r"\bårsoppgjør\w*\b", r"\barsoppgjor\w*\b", r"\baarsoppgjor\w*\b",
                                    r"\byear.?end\b", r"\bannual.?clos\w*\b",

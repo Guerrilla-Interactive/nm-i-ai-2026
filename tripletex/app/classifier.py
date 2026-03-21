@@ -203,6 +203,9 @@ Any invoice FROM a supplier/vendor is register_supplier_invoice. CREATE_INVOICE 
 - CRITICAL: 'Registre X horas' / 'Enregistrer X heures' / 'Erfassen Sie X Stunden' / 'Registrer X timer' + person name → log_hours (NOT invoice_existing_customer). \
 Logging hours/time on a project for an employee is log_hours, NOT an invoice operation.
 - CRITICAL: 'Korrigieren...Buchung' / 'corriger écriture' / 'corregir comprobante' / 'corrigir lançamento' / 'correggere registrazione' → error_correction (NOT unknown)
+- CRITICAL: 'erreurs dans le grand livre' / 'découvert des erreurs' / 'pièces comptables' → error_correction (French ledger error investigation)
+- CRITICAL: 'erros no livro razão' / 'descobrimos erros' / 'lançamento incorreto' / 'analise o livro razão' / 'custos totais aumentaram' → error_correction (Portuguese ledger analysis)
+- CRITICAL: 'analyser hovudboka' / 'hovudboka...kostnad' / 'analyser hovedboken' → error_correction (Norwegian ledger analysis, NOT create_project)
 - CRITICAL: 'encerramento anual' / 'chiusura annuale' / 'cierre anual' / 'cierre del ejercicio' → year_end_closing (NOT unknown)
 - CRITICAL: 'lønnsdimensjon' / 'prosjektdimensjon' / any Norwegian compound ending in '-dimensjon' → create_dimension_voucher. The compound word describes the dimension name.
 - CRITICAL: 'dimensión' (ES) / 'dimensão' (PT) / 'dimensione' (IT) in the context of accounting dimensions → create_dimension_voucher (NOT unknown)
