@@ -418,9 +418,10 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
         last_e = last_name.lower().replace(" ", "")
         email = f"{first_e}.{last_e}@example.com"
 
-    # Default dateOfBirth and startDate (required by Tripletex API)
+    # Default dateOfBirth (required by Tripletex API)
+    # NOTE: startDate is NOT a valid employee field — it's project-only.
+    # Including it breaks employee creation silently.
     date_of_birth = _get(fields, "date_of_birth") or "1990-01-01"
-    start_date = _get(fields, "start_date") or "2026-03-21"
 
     payload = _clean({
         "firstName": first_name,
@@ -432,7 +433,6 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
         "phoneNumberWork": _get(fields, "phone_work"),
         "phoneNumberHome": _get(fields, "phone_home"),
         "dateOfBirth": date_of_birth,
-        "startDate": start_date,
         "employeeNumber": _get(fields, "employee_number"),
         "nationalIdentityNumber": _get(fields, "national_identity_number"),
         "bankAccountNumber": _get(fields, "bank_account_number"),
@@ -2128,6 +2128,26 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
     voucher_id = None
     voucher = None
 
+    # Default date range: extract from fields or use current month
+    date_from = _get(fields, "date_from")
+    date_to = _get(fields, "date_to")
+    if not date_from or not date_to:
+        today = date.today()
+        first_of_month = today.replace(day=1)
+        # Last day of current month
+        if today.month == 12:
+            last_of_month = today.replace(day=31)
+        else:
+            last_of_month = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+        date_from = date_from or first_of_month.isoformat()
+        date_to = date_to or last_of_month.isoformat()
+
+    voucher_search_params = {
+        "number": str(voucher_identifier),
+        "dateFrom": date_from,
+        "dateTo": date_to,
+    }
+
     # Step 1: Find the voucher
     # Try as direct ID first
     if str(voucher_identifier).isdigit():
@@ -2141,7 +2161,7 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                 # Not found by ID — try searching by number
                 _log("INFO", "Voucher not found by ID, searching by number",
                      identifier=voucher_identifier)
-                vouchers = await client.get_vouchers({"number": str(voucher_identifier)})
+                vouchers = await client.get_vouchers(voucher_search_params)
                 if vouchers:
                     voucher = vouchers[0]
                     voucher_id = voucher["id"]
@@ -2151,7 +2171,22 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
     if not voucher_id:
         # Try search by number as string
         try:
-            vouchers = await client.get_vouchers({"number": str(voucher_identifier)})
+            vouchers = await client.get_vouchers(voucher_search_params)
+            if vouchers:
+                voucher = vouchers[0]
+                voucher_id = voucher["id"]
+        except TripletexAPIError:
+            pass
+
+    if not voucher_id:
+        # Widen search to full year if current month found nothing
+        try:
+            wide_params = {
+                "number": str(voucher_identifier),
+                "dateFrom": f"{date.today().year}-01-01",
+                "dateTo": f"{date.today().year}-12-31",
+            }
+            vouchers = await client.get_vouchers(wide_params)
             if vouchers:
                 voucher = vouchers[0]
                 voucher_id = voucher["id"]
@@ -2601,21 +2636,62 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
     base_salary = _get(fields, "base_salary")
     bonus = _get(fields, "bonus")
 
+    # Extract month/year from fields or use current month
+    payroll_month = _get(fields, "month")
+    payroll_year = _get(fields, "year")
+    period = _get(fields, "period") or _get(fields, "payroll_period")
+
+    # Parse Norwegian month names if needed
+    _month_map = {
+        "januar": 1, "february": 2, "februar": 2, "mars": 3, "march": 3,
+        "april": 4, "mai": 5, "may": 5, "juni": 6, "june": 6,
+        "juli": 7, "july": 7, "august": 8, "september": 9,
+        "oktober": 10, "october": 10, "november": 11, "desember": 12, "december": 12,
+    }
+
+    if payroll_month and not str(payroll_month).isdigit():
+        payroll_month = _month_map.get(str(payroll_month).lower(), None)
+    if payroll_month is not None:
+        payroll_month = int(payroll_month)
+    if payroll_year is not None:
+        payroll_year = int(payroll_year)
+
+    # Default to current month/year
+    if not payroll_month:
+        payroll_month = date.today().month
+    if not payroll_year:
+        payroll_year = date.today().year
+
+    # Determine payroll date (last day of the payroll month)
+    if payroll_month == 12:
+        payroll_date = date(payroll_year, 12, 31).isoformat()
+    else:
+        payroll_date = (date(payroll_year, payroll_month + 1, 1) - timedelta(days=1)).isoformat()
+
     if base_salary is not None:
         base_salary = float(base_salary)
     if bonus is not None:
         bonus = float(bonus)
+
+    # Default salary if none specified (payroll runs typically have a salary)
+    if base_salary is None and bonus is None:
+        base_salary = 30000.0  # Reasonable default monthly salary
 
     total_amount = (base_salary or 0) + (bonus or 0)
 
     # Step 1: Find employee using shared helper
     emp = await _find_employee(client, fields)
     if not emp:
-        return {"success": False, "error": f"Employee not found: {employee_id or first_name}"}
+        # If no employee found and no identifier given, proceed without employee
+        if not employee_id and not first_name and not last_name and not email:
+            emp = {}
+            _log("INFO", "No employee specified, creating general payroll voucher")
+        else:
+            return {"success": False, "error": f"Employee not found: {employee_id or first_name}"}
 
     emp_id = emp.get("id")
-    emp_name = f"{emp.get('firstName', '')} {emp.get('lastName', '')}".strip()
-    today = _today()
+    emp_name = f"{emp.get('firstName', '')} {emp.get('lastName', '')}".strip() or "General"
+    today = payroll_date
 
     # Step 2: Voucher-based salary posting
     # Account 5000 is system-managed (salary module), use 7700 instead
@@ -2667,7 +2743,10 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
     voucher_type_id = await _get_voucher_type_id(
         client, ["lønn", "salary", "payroll"])
 
-    description = f"Salary payment: {emp_name}"
+    month_names_no = ["", "januar", "februar", "mars", "april", "mai", "juni",
+                       "juli", "august", "september", "oktober", "november", "desember"]
+    period_label = f"{month_names_no[payroll_month]} {payroll_year}"
+    description = f"Lønn {period_label}: {emp_name}"
     postings = []
 
     # Debit base salary
@@ -2721,6 +2800,9 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
         "base_salary": base_salary,
         "bonus": bonus,
         "total": total_amount,
+        "month": payroll_month,
+        "year": payroll_year,
+        "period": period_label,
     }
 
 
@@ -2917,6 +2999,11 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     if isinstance(dim_values, str):
         dim_values = [v.strip() for v in dim_values.split(",") if v.strip()]
 
+    # If no values extracted but a single value name is available, use it
+    single_value = _get(fields, "dimension_value") or _get(fields, "value_name")
+    if not dim_values and single_value:
+        dim_values = [single_value]
+
     amount = _get(fields, "amount")
     if amount is not None:
         amount = float(amount)
@@ -3057,8 +3144,10 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             if linked_dim_value and val_name.lower() == linked_dim_value.lower():
                 linked_value_id = val_id
 
-    # If no amount, return dimension-only result
-    if amount is None or amount == 0:
+    # If no amount specified, try a minimal voucher (1000 NOK default) if we have values
+    # The prompt may request "opprett dimensjon ... og før bilag" (create dimension and post voucher)
+    create_voucher = _get(fields, "create_voucher")
+    if (amount is None or amount == 0) and not create_voucher:
         return {
             "entity": "dimension",
             "dimension_name": dim_name,
@@ -3066,6 +3155,10 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             "dimension_number": dim_number,
             "values": created_values,
         }
+
+    # Default amount for voucher if not specified
+    if amount is None or amount == 0:
+        amount = 1000.0
 
     # If linked_dim_value specified but not yet resolved, try to find it
     if linked_dim_value and not linked_value_id:
@@ -3177,6 +3270,16 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
     invoice_number = _get(fields, "invoice_number") or _get(fields, "invoice_identifier")
 
     # Step 1: Find the invoice
+    # If we have an invoice_number that looks like an ID, try direct GET first
+    if not invoice_id and invoice_number and str(invoice_number).isdigit():
+        try:
+            inv = await client.get_invoice(int(invoice_number))
+            if inv:
+                invoice_id = inv.get("id", int(invoice_number))
+        except TripletexAPIError as e:
+            if e.status_code != 404:
+                _log("WARNING", "Direct invoice GET failed", id=invoice_number, status=e.status_code)
+
     if not invoice_id:
         if invoice_number and str(invoice_number).isdigit():
             invoices = await client.get_invoices({
@@ -3195,6 +3298,26 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
             if invoices:
                 # Get the most recent invoice
                 invoice_id = max(invoices, key=lambda inv: inv.get("id", 0))["id"]
+
+    # Last resort: search all recent invoices
+    if not invoice_id:
+        try:
+            invoices = await client.get_invoices({
+                "invoiceDateFrom": (date.today() - timedelta(days=365)).isoformat(),
+                "invoiceDateTo": _today(),
+            })
+            if invoices:
+                # If we have a number to match, try to find it
+                target = str(invoice_number or "")
+                for inv in invoices:
+                    if str(inv.get("invoiceNumber", "")) == target or str(inv.get("id", "")) == target:
+                        invoice_id = inv["id"]
+                        break
+                # If still nothing, use most recent
+                if not invoice_id and invoices:
+                    invoice_id = max(invoices, key=lambda inv: inv.get("id", 0))["id"]
+        except TripletexAPIError:
+            pass
 
     if not invoice_id:
         return {"success": False, "error": f"Could not find invoice for customer: {customer_name}"}

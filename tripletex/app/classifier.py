@@ -1079,7 +1079,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "skapa projekt", "nytt projekt", "opret projekt", "nyt projekt",
             "maak project", "nieuw project", "luo projekti", "uusi projekti",
         ],
-        "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change"],
+        "anti_keywords": ["slett", "delete", "fjern", "remove", "oppdater", "update", "endre", "change", "aktiver", "modul", "enable module"],
     },
     TaskType.DELETE_TRAVEL_EXPENSE: {
         "keywords": [
@@ -1147,6 +1147,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "jahresabschluss", "clôture annuelle", "encerramento anual",
             # Swedish / Danish
             "årsbokslut", "årsafslutning",
+            # ASCII variants (no special chars)
+            "arsavslutning", "aarsavslutning", "year.end", "arsslutt",
+            "aarsoppgjor", "arsoppgjor",
         ],
     },
     TaskType.ENABLE_MODULE: {
@@ -1157,7 +1160,10 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "modul aktivieren", "ativar módulo",
             # Swedish / Danish
             "aktivera modul", "aktiver modul",
+            # ASCII variants
+            "slaa paa modul", "aktiver modulen",
         ],
+        "anti_keywords": ["opprett prosjekt", "create project", "nytt prosjekt", "new project"],
     },
     TaskType.UPDATE_CONTACT: {
         "keywords": [
@@ -1212,6 +1218,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "kör lön", "löneutbetalning", "lön", "kør løn", "lønudbetaling", "løn",
             "salaris uitbetalen", "salarisverwerking", "salaris",
             "palkka", "palkanmaksu", "suorita palkanmaksu",
+            # ASCII variants (no special chars)
+            "lonnskjoring", "loennskjoering", "kjor lonn", "loennsslipp",
+            "lonn", "lonnsutbetaling",
         ],
     },
     TaskType.CREATE_SUPPLIER: {
@@ -1247,6 +1256,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             # Swedish / Danish
             "leverantörsfaktura", "inkommande faktura",
             "leverandørfaktura", "indgående faktura",
+            # ASCII variants + "registrer faktura fra"
+            "leverandorfaktura", "registrer faktura fra",
+            "faktura fra leverandor", "inngaaende faktura",
         ],
     },
     TaskType.LOG_HOURS: {
@@ -2113,10 +2125,12 @@ def _classify_with_keywords(
     if best_type == TaskType.UNKNOWN:
         _LAST_RESORT = [
             (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon"], TaskType.CREATE_DIMENSION_VOUCHER),
-            (["lønn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "salary"], TaskType.RUN_PAYROLL),
-            (["leverandørfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
+            (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "salary"], TaskType.RUN_PAYROLL),
+            (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["reverser", "reverse payment", "tilbakefør", "stornere", "bounced", "rückbuchung", "returnert av banken"], TaskType.REVERSE_PAYMENT),
+            (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "year-end", "year.end", "arsslutt", "jahresabschluss"], TaskType.YEAR_END_CLOSING),
+            (["aktiver modul", "enable module", "slaa paa modul", "activate module"], TaskType.ENABLE_MODULE),
             (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
             (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário", "empregado"], TaskType.CREATE_EMPLOYEE),
             (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
