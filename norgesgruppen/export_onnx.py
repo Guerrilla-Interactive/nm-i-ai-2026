@@ -18,8 +18,8 @@ def main():
         help="Path to trained YOLOv8 .pt weights",
     )
     parser.add_argument(
-        "--imgsz", type=int, default=640,
-        help="Input image size (default: 640)",
+        "--imgsz", type=int, default=1280,
+        help="Input image size (default: 1280 for small object detection)",
     )
     parser.add_argument(
         "--half", action="store_true",
@@ -28,6 +28,10 @@ def main():
     parser.add_argument(
         "--simplify", action="store_true",
         help="Simplify ONNX graph (requires onnxslim)",
+    )
+    parser.add_argument(
+        "--opset", type=int, default=12,
+        help="ONNX opset version (default: 12 for broad compatibility)",
     )
     parser.add_argument(
         "--output", type=str, default=None,
@@ -46,12 +50,13 @@ def main():
     model = YOLO(str(weights_path))
 
     # Export to ONNX
-    print(f"Exporting to ONNX (imgsz={args.imgsz}, half={args.half}, simplify={args.simplify})")
+    print(f"Exporting to ONNX (imgsz={args.imgsz}, half={args.half}, simplify={args.simplify}, opset={args.opset})")
     export_path = model.export(
         format="onnx",
         imgsz=args.imgsz,
         half=args.half,
         simplify=args.simplify,
+        opset=args.opset,
     )
     export_path = Path(export_path)
     print(f"Exported: {export_path}")
