@@ -286,6 +286,10 @@ _KEYWORD_MAP = [
                                     r"\b(eingeschränkt|restricted|begrenz)\w*\b.*\b(benutzer|user|bruker)\b",
                                     r"\b(administrator|admin|kontoadministrator)\b.*\b(ansatt|employee|mitarbeiter|tilsett)\b",
                                     r"\b(ansatt|employee|mitarbeiter|tilsett)\b.*\b(administrator|admin|kontoadministrator)\b"]),
+    # --- Log Hours / Timesheet (MUST come before CREATE_EMPLOYEE — "Registrer timer for ansatt" matches both) ---
+    (TaskType.LOG_HOURS, [r"\b(log|logg|registrer|register|føre?|enter|erfassen|enregistrer)\b.*\b(timer|hours?|stunden|heures|horas|tid|time)\b",
+                           r"\b(timer|hours?|timesheet|timefør\w*|tidregistrering|timeliste)\b.*\b(prosjekt|project|projekt|projet)\b",
+                           r"\b(timesheet|timeliste|timefør\w*|tidregistrering|stundenzettel|feuille.de.temps)\b"]),
     (TaskType.UPDATE_EMPLOYEE, [r"\b(oppdater|endre|update|modify|ändra|aktualisieren|ändern|actualizar|modificar|modifier|atualizar)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|empregado)\b",
                                  r"\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b.*\b(ansatt|tilsett|employee)\b",
                                  r"\b(ansatt|tilsett|employee)\b.*\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b"]),
@@ -339,7 +343,8 @@ _KEYWORD_MAP = [
     # --- Supplier (register supplier entity — after supplier invoice, before customer) ---
     (TaskType.CREATE_SUPPLIER, [
         r"\b(?:registrer|opprett|create|register|add|erstellen|registrieren|créer|crear|criar|enregistre)\w*\b.*\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b",
-        r"\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b.*\b(?:registrer|opprett|create|register|add|ny|new|erstellen|registrieren|enregistre)\w*\b",
+        r"\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b.*\b(?:registrer|opprett|create|register|add|erstellen|registrieren|enregistre)\w*\b",
+        r"\b(?:ny|new|neu|nouveau|nuevo|novo)\s+(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\b",
     ]),
     (TaskType.INVOICE_WITH_PAYMENT, [r"\b(faktura|invoice|factura|rechnung|facture)\b.*\b(betaling|payment|betalt|paid|pago|zahlung|paiement)\b",
                                      r"\b(facture|faktura|invoice|rechnung)\s+impayée?\b",
@@ -357,8 +362,9 @@ _KEYWORD_MAP = [
                                 r"\b(sende?|send)\b.*\b(regning|faktura|invoice)\b",
                                 r"\b(faktura|invoice|factura|rechnung|facture|fatura)\b"]),
     # --- Contact (use "kontaktperson" not bare "kontakt" to avoid matching email addresses like kontakt@...) ---
-    (TaskType.UPDATE_CONTACT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(kontaktperson|contact(?!@)|contacto|contato)\b"]),
-    (TaskType.CREATE_CONTACT, [r"\bkontaktperson\b", r"\b(opprett|create|add|erstellen|créer|crear|criar)\b.*\b(contactperson|contact(?!@)|contacto|contato)\b"]),
+    (TaskType.UPDATE_CONTACT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(kontaktperson|kontakt(?!@)|contact(?!@)|contacto|contato)\b",
+                                r"\b(kontaktperson|kontakt)\b.*\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b"]),
+    (TaskType.CREATE_CONTACT, [r"\bkontaktperson\b", r"\b(opprett|create|add|erstellen|créer|crear|criar)\b.*\b(contactperson|kontakt(?!@)|contact(?!@)|contacto|contato)\b"]),
     # --- Project (before customer — "prosjekt for kunde" should match project, not customer) ---
     (TaskType.PROJECT_WITH_CUSTOMER, [r"\bprosjekt\w*\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
                                       r"\b(project|proyecto|projekt|projet)\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
@@ -394,10 +400,6 @@ _KEYWORD_MAP = [
     (TaskType.CREATE_DEPARTMENT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b",
                                    r"\bny\w?\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b",
                                    r"\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b.*\b(opprett|create|lag)\b"]),
-    # --- Log Hours / Timesheet ---
-    (TaskType.LOG_HOURS, [r"\b(log|logg|registrer|register|føre?|enter|erfassen|enregistrer)\b.*\b(timer|hours?|stunden|heures|horas|tid|time)\b",
-                           r"\b(timer|hours?|timesheet|timefør\w*|tidregistrering|timeliste)\b.*\b(prosjekt|project|projekt|projet)\b",
-                           r"\b(timesheet|timeliste|timefør\w*|tidregistrering|stundenzettel|feuille.de.temps)\b"]),
     # --- Project Billing ---
     (TaskType.PROJECT_BILLING, [r"\bfaktur\w*\b.*\b(prosjekt|project|projekt|projet)\b",
                                  r"\b(prosjekt|project)\b.*\bfaktur\w*\b"]),
