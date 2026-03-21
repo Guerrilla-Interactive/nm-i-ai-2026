@@ -472,23 +472,22 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
             employment_payload = _clean({
                 "employee": {"id": emp_id},
                 "startDate": start_date or _today(),
-                "employmentPercentage": float(percentage) if percentage else 100.0,
             })
-            emp_resp = await client._request("POST", "/employment", json=employment_payload)
+            emp_resp = await client._request("POST", "/employee/employment", json=employment_payload)
             employment = client._extract_value(emp_resp)
             employment_id = employment.get("id")
 
-            if base_salary and employment_id:
-                salary_payload = _clean({
+            if employment_id:
+                details_payload = _clean({
                     "employment": {"id": employment_id},
                     "date": start_date or _today(),
-                    "basicSalary": float(base_salary),
-                    "paymentType": "FIXED_SALARY",
+                    "percentageOfFullTimeEquivalent": float(percentage) if percentage else 100.0,
+                    "annualSalary": float(base_salary) if base_salary else None,
                 })
                 try:
-                    await client._request("POST", "/employment/salary", json=salary_payload)
-                except Exception as e_sal:
-                    _log("WARNING", "Salary creation failed", error=str(e_sal)[:200])
+                    await client._request("POST", "/employee/employment/details", json=details_payload)
+                except Exception as e_det:
+                    _log("WARNING", "Employment details creation failed", error=str(e_det)[:200])
         except Exception as e_emp:
             _log("WARNING", "Employment creation failed", error=str(e_emp)[:200])
 
@@ -1208,10 +1207,18 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
                         recv_id = recv_accts[0]["id"]
                         abs_diff = abs(rate_diff)
 
+                        # Get customer ID from invoice for receivables posting
+                        cust_ref = None
+                        if invoice_data:
+                            cust_obj = invoice_data.get("customer") or {}
+                            cust_id_val = cust_obj.get("id") if isinstance(cust_obj, dict) else None
+                            if cust_id_val:
+                                cust_ref = {"id": cust_id_val}
+
                         voucher_type_id = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
                         desc = f"Exchange rate {'loss' if rate_diff > 0 else 'gain'}: {currency} {invoice_currency_amount:.2f}"
 
-                        voucher_payload = {
+                        voucher_payload = _clean({
                             "date": payment_date,
                             "description": desc,
                             "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
@@ -1224,16 +1231,17 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
                                     "description": desc,
                                     "row": 1,
                                 },
-                                {
+                                _clean({
                                     "date": payment_date,
                                     "account": {"id": recv_id},
+                                    "customer": cust_ref,
                                     "amountGross": -abs_diff,
                                     "amountGrossCurrency": -abs_diff,
                                     "description": desc,
                                     "row": 2,
-                                },
+                                }),
                             ],
-                        }
+                        })
 
                         try:
                             voucher = await _create_voucher_safe(client, voucher_payload)
