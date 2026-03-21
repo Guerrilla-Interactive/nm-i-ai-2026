@@ -2818,7 +2818,7 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         # Dimension/voucher before invoice/voucher
         (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
         (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "lønnsslipp", "lonnsslipp", "salary"], TaskType.RUN_PAYROLL),
-        (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung", "facture fournisseur"], TaskType.REGISTER_SUPPLIER_INVOICE),
+        (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung", "facture fournisseur", "rechnung vom lieferanten", "rechnung des lieferanten", "facture du fournisseur", "facture de fournisseur"], TaskType.REGISTER_SUPPLIER_INVOICE),
         (["leverandør", "leverandor", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         # Reverse payment before credit note (both deal with "undo" but reverse_payment is for bank returns)
         (["reverser", "reverse payment", "tilbakefør", "stornere", "rückbuchung", "bounced", "returned by bank", "returnert av banken", "devolvido pelo banco", "pago devuelto", "paiement retourné"], TaskType.REVERSE_PAYMENT),
@@ -2831,7 +2831,7 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         # Hours/timesheet
         (["timer", "hours", "stunden", "heures", "horas", "timesheet", "timeliste", "timefør", "logg"], TaskType.LOG_HOURS),
         # Bank/year-end/error
-        (["bankavstem", "reconcil", "abgleich", "rapprochement", "conciliación bancaria", "conciliacao bancaria", "conciliação bancária"], TaskType.BANK_RECONCILIATION),
+        (["bankavstem", "reconcil", "abgleich", "rapprochement", "rapprocher", "rapprochez", "relevé bancaire", "releve bancaire", "conciliación bancaria", "conciliacao bancaria", "conciliação bancária", "bancaire"], TaskType.BANK_RECONCILIATION),
         (["månedsslutt", "maanedsslutt", "month-end", "month end clos", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodenabgrenzung", "periodificación", "periodificacion", "fechamento mensal", "encerramento mensal"], TaskType.MONTH_END_CLOSING),
         (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture annuelle", "avslutt år", "cierre anual", "encerramento anual", "fechamento anual"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct", "feil", "error correction", "corrección", "correccion", "correção", "correcao", "korrektur"], TaskType.ERROR_CORRECTION),
@@ -2944,9 +2944,10 @@ def _classify_with_keywords(
         _LAST_RESORT = [
             (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon"], TaskType.CREATE_DIMENSION_VOUCHER),
             (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "salary"], TaskType.RUN_PAYROLL),
-            (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung"], TaskType.REGISTER_SUPPLIER_INVOICE),
+            (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung", "rechnung vom lieferanten", "rechnung des lieferanten", "facture fournisseur", "facture du fournisseur"], TaskType.REGISTER_SUPPLIER_INVOICE),
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["reverser", "reverse payment", "tilbakefør", "stornere", "bounced", "rückbuchung", "returnert av banken"], TaskType.REVERSE_PAYMENT),
+            (["bankavstem", "reconcil", "rapprochement", "rapprocher", "rapprochez", "relevé bancaire", "releve bancaire", "bancaire", "abgleich", "conciliación", "conciliação"], TaskType.BANK_RECONCILIATION),
             (["månedsslutt", "maanedsslutt", "month-end", "month end", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodificación", "periodificacion", "fechamento mensal", "encerramento mensal"], TaskType.MONTH_END_CLOSING),
             (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "year-end", "year.end", "arsslutt", "jahresabschluss", "cierre anual", "encerramento anual", "fechamento anual", "clôture annuelle"], TaskType.YEAR_END_CLOSING),
             (["aktiver modul", "enable module", "slaa paa modul", "activate module", "aktiver modul", "activar módulo", "activar modulo", "habilitar módulo", "habilitar modulo", "ativar módulo", "ativar modulo"], TaskType.ENABLE_MODULE),

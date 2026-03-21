@@ -4197,14 +4197,163 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
 
 
 async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) -> dict:
-    """Create a custom accounting dimension with values, optionally post a voucher.
+    """Create a dimension voucher — department/project allocation or custom dimension.
 
-    1. GET /ledger/accountingDimensionName — check existing dimensions
-    2. POST /ledger/accountingDimensionName — create dimension if not found
-    3. POST /ledger/accountingDimensionValue — create each value
-    4. If amount specified: look up accounts + POST /ledger/voucher with
-       freeAccountingDimension{N} on the debit posting
+    Primary path: If the prompt references departments/projects with percentage
+    allocations, create a voucher with standard department.id / project.id on
+    each posting line (no custom accounting dimensions needed).
+
+    Fallback: Create custom accounting dimensions + voucher (legacy path).
     """
+    prompt_text = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+    prompt_lower = prompt_text.lower()
+
+    # ── Detect department/project allocation mode ───────────────────────
+    has_dept = bool(re.search(r"avdeling|department|département|abteilung|departamento", prompt_lower))
+    has_proj = bool(re.search(r"prosjekt|project|projet|proyecto|projeto", prompt_lower))
+
+    # Parse percentage allocations: "Alpha (60%) og Beta (40%)"
+    alloc_pattern = re.findall(
+        r"([A-Za-zÆØÅæøå\u00C0-\u024F][\w-]+)\s*\(\s*(\d+)\s*%\s*\)",
+        prompt_text,
+    )
+
+    # Parse total amount
+    total_amount = _get(fields, "amount")
+    if total_amount is not None:
+        total_amount = _parse_number(str(total_amount))
+    else:
+        amt_m = re.search(r"(\d[\d\s.,]*\d)\s*(?:kr|NOK|,-)", prompt_text)
+        if not amt_m:
+            amt_m = re.search(r"(?:fordel|allocat|beløp|amount)\D{0,20}(\d[\d\s.,]*\d)", prompt_text, re.IGNORECASE)
+        if amt_m:
+            total_amount = _parse_number(amt_m.group(1))
+
+    # Parse source department name: "fra avdeling Salg"
+    dept_name = _get(fields, "department_name") or _get(fields, "source_department")
+    if not dept_name:
+        dept_m = re.search(
+            r"(?:fra\s+)?(?:avdeling(?:en)?|department|abteilung|département|departamento)\s+"
+            r"([A-Za-zÆØÅæøå\u00C0-\u024F][\w-]+)",
+            prompt_text, re.IGNORECASE,
+        )
+        if dept_m:
+            dept_name = dept_m.group(1)
+
+    if (has_dept or has_proj) and alloc_pattern and total_amount:
+        _log("INFO", "Dimension voucher: department/project allocation mode",
+             dept=dept_name, allocations=alloc_pattern, amount=total_amount)
+
+        # Look up department
+        dept_id = None
+        if dept_name:
+            try:
+                depts = await client.get_departments({"name": dept_name})
+                if not depts:
+                    depts = await client.get_departments()
+                    for d in depts:
+                        if dept_name.lower() in (d.get("name") or "").lower():
+                            depts = [d]
+                            break
+                if depts:
+                    dept_id = depts[0]["id"]
+            except TripletexAPIError:
+                pass
+
+        # Look up projects by name
+        proj_map: dict[str, int] = {}
+        try:
+            all_projects = await client.get_projects()
+            for p in (all_projects or []):
+                p_name = (p.get("name") or "").lower()
+                for alloc_name, _ in alloc_pattern:
+                    if alloc_name.lower() in p_name or p_name in alloc_name.lower():
+                        proj_map[alloc_name] = p["id"]
+        except TripletexAPIError:
+            pass
+
+        # Create projects that don't exist
+        for alloc_name, _ in alloc_pattern:
+            if alloc_name not in proj_map:
+                try:
+                    new_proj = await client.post("/project", data={
+                        "name": alloc_name,
+                        "isInternal": True,
+                        "projectManager": {"id": 0},  # will be filled by API
+                    })
+                    proj_id = (new_proj.get("value") or new_proj).get("id")
+                    if proj_id:
+                        proj_map[alloc_name] = proj_id
+                except TripletexAPIError:
+                    pass
+
+        # Look up an expense account for the postings
+        account_number = str(_get(fields, "account_number") or "7000")
+        contra_account_number = str(_get(fields, "contra_account_number") or "1920")
+        acct_map: dict[str, int] = {}
+        try:
+            accts = await client.get_ledger_accounts({"numberFrom": "1000", "numberTo": "9999", "count": 500})
+            acct_map = {str(a.get("number", "")): a["id"] for a in (accts or []) if a.get("number")}
+        except TripletexAPIError:
+            pass
+
+        expense_acct_id = acct_map.get(account_number) or acct_map.get("7000") or acct_map.get("7700")
+        contra_acct_id = acct_map.get(contra_account_number) or acct_map.get("1920")
+
+        if not expense_acct_id or not contra_acct_id:
+            return {"success": False, "error": "Could not resolve accounts for dimension voucher"}
+
+        # Build postings: one debit per project allocation, one credit total
+        postings = []
+        voucher_date = _get(fields, "voucher_date") or _today()
+        description = _get(fields, "description") or f"Dimensjonsbilag: fordeling fra {dept_name or 'avdeling'}"
+
+        for alloc_name, pct_str in alloc_pattern:
+            pct = int(pct_str) / 100.0
+            alloc_amount = round(total_amount * pct, 2)
+            posting = {
+                "account": {"id": expense_acct_id},
+                "amountGross": alloc_amount,
+                "amountGrossCurrency": alloc_amount,
+                "description": f"{alloc_name} ({pct_str}%)",
+            }
+            if dept_id:
+                posting["department"] = {"id": dept_id}
+            if alloc_name in proj_map:
+                posting["project"] = {"id": proj_map[alloc_name]}
+            postings.append(posting)
+
+        # Credit posting (contra)
+        postings.append({
+            "account": {"id": contra_acct_id},
+            "amountGross": -total_amount,
+            "amountGrossCurrency": -total_amount,
+            "description": description,
+            **({"department": {"id": dept_id}} if dept_id else {}),
+        })
+
+        voucher_payload = _clean({
+            "date": voucher_date,
+            "description": description,
+            "postings": postings,
+        })
+        _normalize_postings(voucher_payload)
+
+        try:
+            voucher = await client.create_voucher(voucher_payload)
+            return {
+                "entity": "dimension_voucher",
+                "voucher_id": voucher.get("id"),
+                "amount": total_amount,
+                "allocations": [{"name": n, "pct": int(p)} for n, p in alloc_pattern],
+                "department": dept_name,
+                "projects": proj_map,
+            }
+        except TripletexAPIError as e:
+            _log("WARNING", "Dept/project allocation voucher failed", error=str(e)[:200])
+            # Fall through to legacy custom dimension path
+
+    # ── Legacy path: custom accounting dimensions ───────────────────────
     dim_name = _get(fields, "dimension_name") or "Kostsenter"
     dim_values = _get(fields, "dimension_values") or []
     if isinstance(dim_values, str):
@@ -5162,6 +5311,21 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
     accrual_from_account = str(_get(fields, "accrual_from_account") or "1720")
     accrual_expense_account = str(_get(fields, "accrual_expense_account") or _get(fields, "expense_account") or "6000")
 
+    # Extract accounts from multilingual prompts: "cuenta 1720 a gasto", "Konto 1720 → 6000"
+    prompt_acct_text = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+    accrual_acct_m = re.search(
+        r"(?:cuenta|konto|compte|conta|account)\s*(\d{4})\s*(?:a|→|->|til|to|zu|à|nach|vers|para)\s*"
+        r"(?:gasto|expense|utgift|dépense|Aufwand|gasto|despesa|\d{4})",
+        prompt_acct_text, re.IGNORECASE,
+    )
+    if accrual_acct_m:
+        accrual_from_account = accrual_acct_m.group(1)
+        # Also check if target account number is explicit
+        target_m = re.search(r"→|->", prompt_acct_text[accrual_acct_m.end()-10:accrual_acct_m.end()+20])
+        target_num = re.search(r"(\d{4})", prompt_acct_text[accrual_acct_m.end():accrual_acct_m.end()+10])
+        if target_num:
+            accrual_expense_account = target_num.group(1)
+
     # --- Depreciation: try annual rate first, then acquisition cost ---
     annual_depreciation = _get(fields, "annual_depreciation") or _get(fields, "depreciation_annual")
     depreciation_cost = _get(fields, "depreciation_cost") or _get(fields, "asset_cost") or _get(fields, "cost")
@@ -5204,10 +5368,27 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
     if useful_life_months is not None:
         useful_life_months = int(float(str(useful_life_months)))
     else:
-        useful_life_months = 60  # 5 years default
+        # Extract useful life from prompt: "5 años", "5 years", "5 år", "5 Jahre", "5 ans"
+        life_m = re.search(
+            r"(\d+)\s*(?:años?|years?|år|Jahre?|ans|anni|anos)\s*(?:línea\s+recta|straight\s+line|lineær|linear)?",
+            prompt_text2, re.IGNORECASE,
+        )
+        if life_m:
+            useful_life_months = int(life_m.group(1)) * 12
+        else:
+            useful_life_months = 60  # 5 years default
 
     depreciation_expense_account = str(_get(fields, "depreciation_expense_account") or "6010")
     accumulated_depreciation_account = str(_get(fields, "accumulated_depreciation_account") or "1029")
+
+    # Extract depreciation accounts from prompt: "cuenta 1200→6010", "konto 1200 til 6010"
+    depr_acct_m = re.search(
+        r"(?:cuenta|konto|compte|conta|account)\s*(\d{4})\s*(?:→|->|til|to|zu|à|nach|vers|para)\s*(\d{4})",
+        prompt_text2, re.IGNORECASE,
+    )
+    if depr_acct_m:
+        accumulated_depreciation_account = depr_acct_m.group(1)
+        depreciation_expense_account = depr_acct_m.group(2)
 
     # Calculate monthly depreciation: prefer annual rate / 12, else cost / life
     if annual_depreciation:
