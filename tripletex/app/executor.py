@@ -436,6 +436,12 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
         last = unicodedata.normalize("NFKD", last).encode("ascii", "ignore").decode()
         email = f"{first}.{last}@example.com"
 
+    # Prevent duplicate: if employee_number == national_identity_number, clear employee_number
+    emp_number = _get(fields, "employee_number")
+    nat_id = _get(fields, "national_identity_number")
+    if emp_number and nat_id and str(emp_number) == str(nat_id):
+        emp_number = None
+
     payload = _clean({
         "firstName": _get(fields, "first_name"),
         "lastName": _get(fields, "last_name"),
@@ -446,14 +452,47 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
         "phoneNumberWork": _get(fields, "phone_work"),
         "phoneNumberHome": _get(fields, "phone_home"),
         "dateOfBirth": _get(fields, "date_of_birth"),
-        "employeeNumber": _get(fields, "employee_number"),
-        "nationalIdentityNumber": _get(fields, "national_identity_number"),
+        "employeeNumber": emp_number,
+        "nationalIdentityNumber": nat_id,
         "bankAccountNumber": _get(fields, "bank_account_number"),
+        # Note: startDate does NOT exist on the employee API object
         "address": _build_address(fields),
         "comments": _get(fields, "comments"),
     })
     result = await client.create_employee(payload)
-    return {"created_id": result.get("id"), "entity": "employee"}
+    emp_id = result.get("id")
+
+    # Create employment record with start date and salary if provided
+    base_salary = _get(fields, "base_salary")
+    start_date = _get(fields, "start_date")
+    percentage = _get(fields, "employment_percentage")
+
+    if emp_id and (base_salary or start_date):
+        try:
+            employment_payload = _clean({
+                "employee": {"id": emp_id},
+                "startDate": start_date or _today(),
+                "employmentPercentage": float(percentage) if percentage else 100.0,
+            })
+            emp_resp = await client._request("POST", "/employment", json=employment_payload)
+            employment = client._extract_value(emp_resp)
+            employment_id = employment.get("id")
+
+            if base_salary and employment_id:
+                salary_payload = _clean({
+                    "employment": {"id": employment_id},
+                    "date": start_date or _today(),
+                    "basicSalary": float(base_salary),
+                    "paymentType": "FIXED_SALARY",
+                })
+                try:
+                    await client._request("POST", "/employment/salary", json=salary_payload)
+                except Exception as e_sal:
+                    _log("WARNING", "Salary creation failed", error=str(e_sal)[:200])
+        except Exception as e_emp:
+            _log("WARNING", "Employment creation failed", error=str(e_emp)[:200])
+
+    return {"created_id": emp_id, "entity": "employee"}
 
 
 async def _exec_update_employee(fields: dict, client: TripletexClient) -> dict:
@@ -1138,7 +1177,76 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
         "paidAmount": float(amount) if amount is not None else None,
     })
     await client.register_payment(int(invoice_id), payment_params)
-    return {"invoice_id": invoice_id, "entity": "payment", "action": "registered"}
+
+    result = {"invoice_id": invoice_id, "entity": "payment", "action": "registered"}
+
+    # Exchange rate gain/loss (agio/disagio) handling
+    currency = _get(fields, "currency")
+    exchange_rate = _get(fields, "exchange_rate")
+    if currency and exchange_rate and str(currency).upper() != "NOK":
+        try:
+            payment_rate = float(exchange_rate)
+            # Get original invoice rate from the invoice data
+            original_amount_nok = float(invoice_data.get("amount") or 0) if invoice_data else 0
+            invoice_currency_amount = float(_get(fields, "amount") or 0)
+
+            if invoice_currency_amount > 0 and original_amount_nok > 0:
+                original_rate = original_amount_nok / invoice_currency_amount
+                payment_nok = invoice_currency_amount * payment_rate
+                rate_diff = original_amount_nok - payment_nok  # positive = loss, negative = gain
+
+                if abs(rate_diff) > 0.01:
+                    # Lookup accounts: 8160 (currency loss) / 8060 (currency gain) and 1500 (receivables)
+                    loss_acct_num = "8160" if rate_diff > 0 else "8060"
+                    recv_acct_num = "1500"
+
+                    loss_accts = await client.get_ledger_accounts({"number": loss_acct_num})
+                    recv_accts = await client.get_ledger_accounts({"number": recv_acct_num})
+
+                    if loss_accts and recv_accts:
+                        loss_id = loss_accts[0]["id"]
+                        recv_id = recv_accts[0]["id"]
+                        abs_diff = abs(rate_diff)
+
+                        voucher_type_id = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
+                        desc = f"Exchange rate {'loss' if rate_diff > 0 else 'gain'}: {currency} {invoice_currency_amount:.2f}"
+
+                        voucher_payload = {
+                            "date": payment_date,
+                            "description": desc,
+                            "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
+                            "postings": [
+                                {
+                                    "date": payment_date,
+                                    "account": {"id": loss_id},
+                                    "amountGross": abs_diff,
+                                    "amountGrossCurrency": abs_diff,
+                                    "description": desc,
+                                    "row": 1,
+                                },
+                                {
+                                    "date": payment_date,
+                                    "account": {"id": recv_id},
+                                    "amountGross": -abs_diff,
+                                    "amountGrossCurrency": -abs_diff,
+                                    "description": desc,
+                                    "row": 2,
+                                },
+                            ],
+                        }
+
+                        try:
+                            voucher = await _create_voucher_safe(client, voucher_payload)
+                            result["exchange_rate_voucher_id"] = voucher.get("id")
+                            result["exchange_rate_diff"] = rate_diff
+                            _log("INFO", "Created exchange rate voucher",
+                                 diff=rate_diff, voucher_id=voucher.get("id"))
+                        except TripletexAPIError as e:
+                            _log("WARNING", "Failed to create exchange rate voucher", error=str(e))
+        except (ValueError, TypeError, ZeroDivisionError) as e:
+            _log("WARNING", "Exchange rate calculation failed", error=str(e))
+
+    return result
 
 
 async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dict:
@@ -2006,9 +2114,9 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
             amount = float(txn_amount)
             counter_account = txn.get("counter_account") or txn.get("account")
             if not counter_account:
-                # Use balance sheet accounts to avoid VAT requirements
-                # 1500 = customer receivables, 2400 = supplier payables
-                counter_account = "1500" if amount >= 0 else "2400"
+                # Use balance sheet accounts to avoid VAT/supplier requirements
+                # 1500 = customer receivables, 1920 = bank (2400 requires supplier ref)
+                counter_account = "1500" if amount >= 0 else "1920"
 
             counter_accounts = await client.get_ledger_accounts({"number": str(counter_account)})
             counter_account_id = counter_accounts[0]["id"] if counter_accounts else None
@@ -2092,168 +2200,186 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
 
 
 async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
-    """Correct an error in the ledger — reverse or delete a voucher.
+    """Correct an error in the ledger — reverse/delete a voucher and/or create corrections.
 
     Flow:
-    1. Find the voucher by identifier (number or ID)
-    2. Try to reverse it (PUT /:reverse), fall back to DELETE
-    3. If correction_description or new_postings provided, create a correcting voucher
+    1. If valid voucher ID: find, reverse/delete it
+    2. If new_postings provided: create a correction voucher (works with or without step 1)
 
-    API calls: 2-4 (lookup + reverse/delete + optional new voucher).
+    API calls: 1-4 depending on mode.
     """
     voucher_identifier = _get(fields, "voucher_identifier")
-    if not voucher_identifier:
-        return {"success": False, "error": "No voucher identifier provided"}
+    new_postings = _get(fields, "new_postings")
+    correction_desc = _get(fields, "correction_description")
+
+    # Check if we have a valid numeric voucher identifier
+    has_valid_voucher_id = (
+        voucher_identifier
+        and str(voucher_identifier).replace(",", "").strip().isdigit()
+    )
+
+    if not has_valid_voucher_id and not new_postings:
+        return {"success": False, "error": "No voucher identifier or correction postings provided"}
 
     voucher_id = None
     voucher = None
+    reversed_ok = False
+    deleted_ok = False
 
-    # Step 1: Find the voucher
-    # Try as direct ID first
-    if str(voucher_identifier).isdigit():
-        vid = int(voucher_identifier)
+    # Step 1: Find and reverse/delete the voucher (only if we have a valid ID)
+    if has_valid_voucher_id:
+        vid_str = str(voucher_identifier).replace(",", "").strip()
+        vid = int(vid_str)
         # Try direct GET by ID first (1 API call)
         try:
             voucher = await client.get_voucher(vid)
             voucher_id = voucher.get("id", vid)
         except TripletexAPIError as e:
             if e.status_code == 404:
-                # Not found by ID — try searching by number
                 _log("INFO", "Voucher not found by ID, searching by number",
                      identifier=voucher_identifier)
-                vouchers = await client.get_vouchers({"number": str(voucher_identifier)})
+                vouchers = await client.get_vouchers({"number": vid_str})
                 if vouchers:
                     voucher = vouchers[0]
                     voucher_id = voucher["id"]
             else:
                 raise
 
-    if not voucher_id:
-        # Try search by number as string
-        try:
-            vouchers = await client.get_vouchers({"number": str(voucher_identifier)})
-            if vouchers:
-                voucher = vouchers[0]
-                voucher_id = voucher["id"]
-        except TripletexAPIError:
-            pass
+        if not voucher_id:
+            try:
+                vouchers = await client.get_vouchers({"number": vid_str})
+                if vouchers:
+                    voucher = vouchers[0]
+                    voucher_id = voucher["id"]
+            except TripletexAPIError:
+                pass
 
-    if not voucher_id:
-        return {"success": False, "error": f"Voucher '{voucher_identifier}' not found"}
+        if voucher_id:
+            _log("INFO", "Found voucher for correction", voucher_id=voucher_id)
 
-    _log("INFO", "Found voucher for correction", voucher_id=voucher_id)
-
-    # Step 2: Reverse or delete the voucher
-    reversed_ok = False
-    deleted_ok = False
-
-    # Try PUT /:reverse first (preferred — creates reversing entry automatically)
-    try:
-        reverse_params = {"date": _today()}
-        reverse_result = await client.reverse_voucher(voucher_id, reverse_params)
-        reversed_ok = True
-        _log("INFO", "Voucher reversed successfully", voucher_id=voucher_id)
-    except TripletexAPIError as e:
-        _log("WARNING", "Reverse voucher failed, trying delete",
-             voucher_id=voucher_id, status=e.status_code, detail=(e.detail or "")[:200])
-
-        # Fallback: try DELETE
-        try:
-            await client.delete_voucher(voucher_id)
-            deleted_ok = True
-            _log("INFO", "Voucher deleted successfully", voucher_id=voucher_id)
-        except TripletexAPIError as e2:
-            _log("WARNING", "Delete voucher also failed",
-                 voucher_id=voucher_id, status=e2.status_code, detail=e2.detail[:200])
-
-            # Last resort: create a reversing entry manually
-            # Get the postings from the original voucher to create reversed entries
-            if voucher:
+            # Step 2: Reverse or delete the voucher
+            try:
+                reverse_result = await client.reverse_voucher(voucher_id, {"date": _today()})
+                reversed_ok = True
+                _log("INFO", "Voucher reversed successfully", voucher_id=voucher_id)
+            except TripletexAPIError as e:
+                _log("WARNING", "Reverse voucher failed, trying delete",
+                     voucher_id=voucher_id, status=e.status_code, detail=(e.detail or "")[:200])
                 try:
-                    postings = await client.get_postings({"voucherId": str(voucher_id)})
-                    if postings:
-                        # Create reversing postings (swap debit/credit)
-                        reversed_postings = []
-                        for idx, p in enumerate(postings):
-                            reversed_postings.append(_clean({
-                                "account": p.get("account"),
-                                "amountGross": -(p.get("amountGross", 0)),
-                                "amountGrossCurrency": -(p.get("amountGrossCurrency", 0)),
-                                "currency": p.get("currency"),
-                                "description": f"Korreksjon: {p.get('description', '')}",
-                                "row": idx + 1,
-                            }))
+                    await client.delete_voucher(voucher_id)
+                    deleted_ok = True
+                    _log("INFO", "Voucher deleted successfully", voucher_id=voucher_id)
+                except TripletexAPIError as e2:
+                    _log("WARNING", "Delete voucher also failed",
+                         voucher_id=voucher_id, status=e2.status_code, detail=e2.detail[:200])
 
-                        if reversed_postings:
-                            corr_vt_id = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
-                            correction_voucher = _clean({
-                                "date": _today(),
-                                "description": _get(fields, "correction_description")
-                                               or f"Korreksjon av bilag {voucher_identifier}",
-                                "voucherType": {"id": corr_vt_id} if corr_vt_id else None,
-                                "postings": reversed_postings,
-                            })
-                            try:
-                                new_voucher = await _create_voucher_safe(client, correction_voucher)
-                                return {
-                                    "entity": "voucher",
-                                    "action": "manual_reversal",
-                                    "original_voucher_id": voucher_id,
-                                    "correction_voucher_id": new_voucher.get("id"),
-                                }
-                            except TripletexAPIError as e3:
-                                _log("WARNING", "Manual reversal voucher creation failed",
-                                     detail=e3.detail[:200])
-                except TripletexAPIError:
-                    pass
+                    # Last resort: create a reversing entry manually
+                    if voucher:
+                        try:
+                            postings = await client.get_postings({"voucherId": str(voucher_id)})
+                            if postings:
+                                reversed_postings = []
+                                for idx, p in enumerate(postings):
+                                    reversed_postings.append(_clean({
+                                        "account": p.get("account"),
+                                        "amountGross": -(p.get("amountGross", 0)),
+                                        "amountGrossCurrency": -(p.get("amountGrossCurrency", 0)),
+                                        "currency": p.get("currency"),
+                                        "description": f"Korreksjon: {p.get('description', '')}",
+                                        "row": idx + 1,
+                                    }))
+                                if reversed_postings:
+                                    corr_vt_id = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
+                                    correction_voucher = _clean({
+                                        "date": _today(),
+                                        "description": correction_desc
+                                                       or f"Korreksjon av bilag {voucher_identifier}",
+                                        "voucherType": {"id": corr_vt_id} if corr_vt_id else None,
+                                        "postings": reversed_postings,
+                                    })
+                                    try:
+                                        new_voucher = await _create_voucher_safe(client, correction_voucher)
+                                        return {
+                                            "entity": "voucher",
+                                            "action": "manual_reversal",
+                                            "original_voucher_id": voucher_id,
+                                            "correction_voucher_id": new_voucher.get("id"),
+                                        }
+                                    except TripletexAPIError as e3:
+                                        _log("WARNING", "Manual reversal voucher creation failed",
+                                             detail=e3.detail[:200])
+                        except TripletexAPIError:
+                            pass
 
-            # If nothing worked, report partial success with what we know
-            return {
-                "success": False,
-                "error": f"Could not reverse or delete voucher {voucher_identifier}. "
-                         f"Reverse: {e.status_code}, Delete: {e2.status_code}",
-                "voucher_id": voucher_id,
-            }
+                    if not new_postings:
+                        return {
+                            "success": False,
+                            "error": f"Could not reverse or delete voucher {voucher_identifier}. "
+                                     f"Reverse: {e.status_code}, Delete: {e2.status_code}",
+                            "voucher_id": voucher_id,
+                        }
 
-    # Step 3: If correction_description or new_postings provided, create correcting voucher
-    new_postings = _get(fields, "new_postings")
-    correction_desc = _get(fields, "correction_description")
-
+    # Step 3: Create correction voucher from new_postings
     correction_voucher_id = None
     if new_postings and isinstance(new_postings, list):
-        # Build correcting voucher with provided postings
         formatted_postings = []
         for idx, np in enumerate(new_postings):
+            # Resolve account: try account_id, then account_number, then account
+            acct_ref = None
+            acct_id = _get(np, "account_id")
+            if acct_id:
+                acct_ref = {"id": int(acct_id)}
+            else:
+                acct_num = str(_get(np, "account_number") or _get(np, "account") or "")
+                if acct_num and acct_num.isdigit():
+                    accts = await client.get_ledger_accounts({"number": acct_num})
+                    if accts:
+                        acct_ref = {"id": accts[0]["id"]}
+                    else:
+                        _log("WARNING", f"Account {acct_num} not found, skipping posting")
+                        continue
+
+            if not acct_ref:
+                _log("WARNING", "No account resolved for posting", posting=np)
+                continue
+
+            amt = float(_get(np, "amount") or _get(np, "amount_gross") or 0)
+            amt_cur = float(_get(np, "amount_currency") or _get(np, "amount_gross_currency") or amt)
             formatted_postings.append(_clean({
-                "account": _ref(_get(np, "account_id")) or {"id": int(np.get("account", 0))},
-                "amountGross": _get(np, "amount") or _get(np, "amount_gross"),
-                "amountGrossCurrency": _get(np, "amount_currency") or _get(np, "amount_gross_currency"),
+                "account": acct_ref,
+                "amountGross": amt,
+                "amountGrossCurrency": amt_cur,
                 "currency": _ref(_get(np, "currency_id")),
                 "description": _get(np, "description") or correction_desc,
                 "row": idx + 1,
             }))
 
-        corr_vt_id2 = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
-        correction_payload = _clean({
-            "date": _today(),
-            "description": correction_desc or f"Korrigering etter bilag {voucher_identifier}",
-            "voucherType": {"id": corr_vt_id2} if corr_vt_id2 else None,
-            "postings": formatted_postings,
-        })
-        try:
-            new_v = await _create_voucher_safe(client, correction_payload)
-            correction_voucher_id = new_v.get("id")
-            _log("INFO", "Correction voucher created", new_voucher_id=correction_voucher_id)
-        except TripletexAPIError as e:
-            _log("WARNING", "Failed to create correction voucher", detail=(e.detail or "")[:200])
+        if formatted_postings:
+            corr_vt_id2 = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
+            correction_payload = _clean({
+                "date": _today(),
+                "description": correction_desc or "Korreksjon",
+                "voucherType": {"id": corr_vt_id2} if corr_vt_id2 else None,
+                "postings": formatted_postings,
+            })
+            try:
+                new_v = await _create_voucher_safe(client, correction_payload)
+                correction_voucher_id = new_v.get("id")
+                _log("INFO", "Correction voucher created", new_voucher_id=correction_voucher_id)
+            except TripletexAPIError as e:
+                _log("WARNING", "Failed to create correction voucher", detail=(e.detail or "")[:200])
 
-    result = {
-        "entity": "voucher",
-        "original_voucher_id": voucher_id,
-        "action": "reversed" if reversed_ok else "deleted",
-    }
+    result = {"entity": "voucher"}
+    if voucher_id:
+        result["original_voucher_id"] = voucher_id
+        result["action"] = "reversed" if reversed_ok else ("deleted" if deleted_ok else "correction_only")
+    else:
+        result["action"] = "correction_only"
     if correction_voucher_id:
         result["correction_voucher_id"] = correction_voucher_id
+    if not voucher_id and not correction_voucher_id:
+        result["success"] = False
+        result["error"] = "Failed to create correction voucher"
     return result
 
 
@@ -3096,7 +3222,8 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
     # Step 3: Look up accounts
     expense_acct_num = _get(fields, "account_number") or "4000"
     expense_accounts = await client.get_ledger_accounts({"number": expense_acct_num, "fields": "*"})
-    liability_accounts = await client.get_ledger_accounts({"number": "2400", "fields": "*"})
+    # Use 1920 (bank) to avoid supplier reference requirement on 2400
+    liability_accounts = await client.get_ledger_accounts({"number": "1920", "fields": "*"})
 
     expense_acct_id = expense_accounts[0]["id"] if expense_accounts else None
     liability_acct_id = liability_accounts[0]["id"] if liability_accounts else None
@@ -3201,7 +3328,8 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     if amount is not None:
         amount = float(amount)
     account_number = _get(fields, "account_number") or "7000"
-    contra_account_number = _get(fields, "contra_account_number") or "2400"
+    # Use 1920 (bank) as default — 2400 (supplier payables) requires a supplier reference
+    contra_account_number = _get(fields, "contra_account_number") or "1920"
     linked_dim_value = _get(fields, "linked_dimension_value")
     description = _get(fields, "description") or f"Dimension voucher: {dim_name}"
     voucher_date = _get(fields, "voucher_date") or _today()

@@ -75,10 +75,11 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
     TaskType.CREATE_EMPLOYEE: {
         "required": ["first_name", "last_name"],
         "optional": [
-            "email", "phone", "date_of_birth",
+            "email", "phone", "phone_mobile", "date_of_birth",
             "department_name", "employee_number", "national_identity_number",
-            "address_line1", "postal_code", "city",
-            "bank_account_number", "user_type",
+            "address_line1", "address_line2", "postal_code", "city",
+            "bank_account_number", "user_type", "start_date",
+            "base_salary", "employment_percentage", "comments",
         ],
     },
     TaskType.UPDATE_EMPLOYEE: {

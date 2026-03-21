@@ -98,7 +98,9 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 {_build_task_type_block()}
 
 ## FIELD FORMATTING RULES
-- ONLY extract fields explicitly stated in the prompt. NEVER fabricate emails, phones, addresses, or websites that are not present in the input text.
+- Extract ALL fields explicitly stated in the prompt text AND in any attached documents (PDFs, images). Attached files are part of the input — read them thoroughly and extract every available field.
+- NEVER fabricate data that is not present in EITHER the prompt text or attached documents.
+- For employee offer letters/contracts (tilbudsbrev/arbeidsavtale), extract ALL of: first_name, last_name, date_of_birth, national_identity_number, bank_account_number, department_name, email, phone, address_line1, postal_code, city, employee_number, user_type, start_date, base_salary.
 - Dates → YYYY-MM-DD (convert from any format: "15. mars 2026" → "2026-03-15")
 - Numbers → plain decimals, no thousand separators ("1 200,50" → 1200.50)
 - Currency amounts → assume NOK unless explicitly stated otherwise
@@ -128,6 +130,10 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 | update | oppdater/endre | oppdater/endre | update/modify | actualizar/modificar | atualizar/modificar | aktualisieren/ändern | mettre à jour/modifier |
 
 ## IMPORTANT DISAMBIGUATION RULES
+- CRITICAL: When processing an employment contract PDF (arbeidskontrakt/contrato de trabajo/Arbeitsvertrag/contrat de travail), \
+extract ALL available fields: first_name, last_name, date_of_birth, national_identity_number, email, phone, \
+address_line1, postal_code, city, bank_account_number, department_name, start_date, \
+base_salary (annual salary in NOK), employment_percentage (100 if full-time/heltid). Do NOT skip any field present in the document.
 - "Opprett faktura" / "Create invoice" with a NEW customer name → create_invoice
 - "Opprett faktura" / "Create invoice" referencing an EXISTING customer (by name/number) → invoice_existing_customer
 - If the prompt says to create an invoice AND register payment → invoice_with_payment
@@ -162,20 +168,20 @@ Extract "exchange_rate" if a conversion rate is mentioned (taux de change, veksl
 
 ## FEW-SHOT EXAMPLES
 
-### Example 1 — Create employee (Bokmål)
-Input: "Opprett en ansatt med navn Ola Nordmann, e-post ola@example.com"
+### Example 1 — Create employee (Bokmål, all fields)
+Input: "Vi har en ny ansatt som heter Ola Nordmann, født 15. januar 1990. Opprett som ansatt med e-post ola@example.com i avdeling Salg som standard bruker."
 Output:
-{{"task_type": "create_employee", "confidence": 0.98, "fields": {{"first_name": "Ola", "last_name": "Nordmann", "email": "ola@example.com"}}}}
+{{"task_type": "create_employee", "confidence": 0.98, "fields": {{"first_name": "Ola", "last_name": "Nordmann", "email": "ola@example.com", "date_of_birth": "1990-01-15", "department_name": "Salg", "user_type": "STANDARD"}}}}
 
 ### Example 2 — Create employee (Nynorsk)
-Input: "Opprett ein tilsett med namn Kari Nordmann"
+Input: "Opprett ein tilsett med namn Kari Nordmann, avdeling IT, brukartype administrator"
 Output:
-{{"task_type": "create_employee", "confidence": 0.95, "fields": {{"first_name": "Kari", "last_name": "Nordmann"}}}}
+{{"task_type": "create_employee", "confidence": 0.95, "fields": {{"first_name": "Kari", "last_name": "Nordmann", "department_name": "IT", "user_type": "ADMINISTRATOR"}}}}
 
-### Example 3 — Create employee (English)
-Input: "Create an employee named John Smith with email john@smith.com, phone +47 912 34 567, starting March 1st 2026"
+### Example 3 — Create employee (English, comprehensive)
+Input: "Create an employee named John Smith with email john@smith.com, phone +47 912 34 567, department Finance, user type standard"
 Output:
-{{"task_type": "create_employee", "confidence": 0.99, "fields": {{"first_name": "John", "last_name": "Smith", "email": "john@smith.com", "phone": "+47 912 34 567", "start_date": "2026-03-01"}}}}
+{{"task_type": "create_employee", "confidence": 0.99, "fields": {{"first_name": "John", "last_name": "Smith", "email": "john@smith.com", "phone": "+47 912 34 567", "department_name": "Finance", "user_type": "STANDARD"}}}}
 
 ### Example 4 — Create customer (German)
 Input: "Erstellen Sie einen Kunden namens Schmidt GmbH mit der Organisationsnummer 123456789"
