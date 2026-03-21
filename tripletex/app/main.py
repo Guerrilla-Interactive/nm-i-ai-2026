@@ -231,15 +231,25 @@ async def _classify_with_claude(prompt: str, files: Optional[list[dict]] = None)
 
 _KEYWORD_MAP = [
     # --- Enable Module (MUST come before travel — "Aktiver modul Reiseregning" must not match travel) ---
-    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate)\w*\b.*\b(modul|module)\w*\b",
+    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare)\w*\b.*\b(modul|module)\w*\b",
+                               r"\w*(modul|module)\w*\b.*\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare)\w*\b",
+                               r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare)\w*\b",
+                               r"\w+(modul|module)(en|e|n)?\b",
                                r"\bslå\s+på\b.*\b(modul|module)\w*\b",
                                r"\bslaa\s+paa\b.*\b(modul|module)\w*\b",
-                               r"\bsla\s+pa\b.*\b(modul|module)\w*\b"]),
+                               r"\bsla\s+pa\b.*\b(modul|module)\w*\b",
+                               r"\b(slå|slaa|sla)\s+(på|paa|pa)\b"]),
     # --- T3: Bank / Year-end / Error (before travel/employee to catch compound words) ---
     (TaskType.BANK_RECONCILIATION, [r"\bbankavstem\w*\b",
                                      r"\bbank\w*\b.*\bavstem\w*\b",
                                      r"\bavstem\w*\b.*\bbank\w*\b",
-                                     r"\b(reconcil|abgleich|rapprochement)\w*\b"]),
+                                     r"\b(reconcil|abgleich|rapprochement)\w*\b",
+                                     r"\b(kontoabstimmung|kontenaustimmung)\w*\b",
+                                     r"\bconciliaci[oó]n\s+bancaria\b",
+                                     r"\bconcilia[çc][aã]o\s+banc[aá]ria\b",
+                                     r"\briconciliazione\s+bancaria\b",
+                                     r"\brapprochement\s+bancaire\b",
+                                     r"\b(afstemming|bankafstemming|bankabstimmung)\w*\b"]),
     # --- Payment returned / bounced / reversed → reverse_payment (before error correction) ---
     (TaskType.REVERSE_PAYMENT, [r"\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b.*\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b",
                                  r"\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b.*\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b",
@@ -247,11 +257,19 @@ _KEYWORD_MAP = [
                                  r"\b(returnert|returned|bounced)\w*\b.*\b(bank|betaling|payment)\w*\b"]),
     (TaskType.ERROR_CORRECTION, [r"\b(korriger|correct|fiks|fix)\w*\b.*\b(feil|error|bilag|voucher|postering)\b",
                                    r"\b(feil|error)\w*\b.*\b(korriger|correct|rett)\b",
-                                   r"\b(reverser|reverse|tilbakefør)\w*\b.*\b(bilag|voucher|postering)\b"]),
+                                   r"\b(reverser|reverse|tilbakefør)\w*\b.*\b(bilag|voucher|postering)\b",
+                                   r"\b(korrigier|corrigir|correggere|corriger|corregir)\w*\b.*\b(buchung|écriture|scrittura|comprobante|lançamento|registrazione|postering|voucher|bilag|beleg)\b",
+                                   r"\b(feilpostering|fehlbuchung|erreur\s+comptable|error\s+contable|erro\s+contábil)\w*\b",
+                                   r"\b(korriger|rett|correct)\w*\b.*\b(feilpostering|fehlbuchung)\w*\b"]),
     (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\barsavslut\w*\b", r"\baarsavslut\w*\b",
                                    r"\bårsoppgjør\w*\b", r"\barsoppgjor\w*\b", r"\baarsoppgjor\w*\b",
                                    r"\byear.?end\b", r"\bannual.?clos\w*\b",
                                    r"\bjahresabschluss\w*\b", r"\bclôture\b", r"\bcierre\s+anual\b",
+                                   r"\bencerramento\s+anual\b",
+                                   r"\bchiusura\s+(annuale|d[ie]l?\s+esercizio)\b",
+                                   r"\b(bokslut|årsbokslut|arsbokslut)\w*\b",
+                                   r"\bclôture\s+annuelle\b",
+                                   r"\b(fiscal\s+year|accounting\s+year)\b.*\b(clos|end|avslutt)\w*\b",
                                    r"\b(avslutt|close|lukk)\w*\b.*\b(år|year|ar|regnskapsår|regnskapsar)\w*\b"]),
     # --- Travel (after enable_module — "reiseregning" alone should match travel) ---
     # NOTE: "reise" without trailing \b so it matches "reiseregning" as substring
@@ -285,8 +303,11 @@ _KEYWORD_MAP = [
     # --- Dimension + Voucher (MUST come before invoice/voucher patterns — "Beleg" alone could trigger invoice) ---
     (TaskType.CREATE_DIMENSION_VOUCHER, [
         r"\b(?:dimensjon|dimension|buchhaltungsdimension|fri\s+dimensjon|custom\s+dimension|benutzerdefinierte\s+dimension)\b",
+        r"\w*dimensjon\w*\b",
+        r"\b(?:dimensi[oó][nm]|dimensão|dimensione)\w*\b",
         r"\b(?:kostsenter|kostenstelle|cost\s*center|kostnadssenter)\b",
         r"\b(?:dimensjonsverdier|dimensionswert|dimension\s*values?)\b",
+        r"\b(?:regnskaps|accounting|buchhalter)\w*\s*dimensjon\w*\b",
     ]),
     # --- Supplier Invoice (more specific — MUST come before supplier and regular invoice) ---
     # REGISTER_SUPPLIER_INVOICE = alias for CREATE_SUPPLIER_INVOICE (same executor)
@@ -1156,14 +1177,14 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
     # Last resort: single-word heuristic — NEVER return UNKNOWN if there's any signal
     _LAST_RESORT_WORDS = [
         (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "salary"], TaskType.RUN_PAYROLL),
-        (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
+        (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension", "dimensión", "dimensão", "dimensione", "lønnsdimensjon", "lonnsdimensjon"], TaskType.CREATE_DIMENSION_VOUCHER),
         (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
         (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
         (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário"], TaskType.CREATE_EMPLOYEE),
         (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),
         (["avdeling", "department", "abteilung", "département", "departamento"], TaskType.CREATE_DEPARTMENT),
-        (["modul", "module"], TaskType.ENABLE_MODULE),
+        (["modul", "module", "aktiver", "activate", "activar", "ativar", "attivare", "activer", "aktivieren"], TaskType.ENABLE_MODULE),
         (["prosjekt", "project", "projekt", "projet", "proyecto"], TaskType.CREATE_PROJECT),
         (["produkt", "product", "produit", "producto", "produto"], TaskType.CREATE_PRODUCT),
         (["timer", "hours", "timesheet", "timeliste", "stunden", "heures"], TaskType.LOG_HOURS),
@@ -1171,9 +1192,9 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
         (["kontaktperson", "contact", "contacto", "contato"], TaskType.CREATE_CONTACT),
         (["betaling", "payment", "innbetaling", "pago", "zahlung", "paiement"], TaskType.REGISTER_PAYMENT),
         (["kreditnota", "credit note", "gutschrift", "avoir"], TaskType.CREATE_CREDIT_NOTE),
-        (["bankavsteming", "reconcil", "avstem"], TaskType.BANK_RECONCILIATION),
-        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end"], TaskType.YEAR_END_CLOSING),
-        (["korriger", "correct error", "feilrett"], TaskType.ERROR_CORRECTION),
+        (["bankavsteming", "reconcil", "avstem", "kontoabstimmung", "conciliación", "conciliação", "riconciliazione", "rapprochement", "afstemming", "bankafstemming", "bankabstimmung"], TaskType.BANK_RECONCILIATION),
+        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "encerramento", "chiusura", "cierre anual", "jahresabschluss", "clôture annuelle", "bokslut"], TaskType.YEAR_END_CLOSING),
+        (["korriger", "correct error", "feilrett", "corrigir", "correggere", "corriger", "corregir", "korrigieren", "fehlbuchung", "feilpostering", "erreur comptable", "error contable", "erro contábil"], TaskType.ERROR_CORRECTION),
     ]
     for words, fallback_type in _LAST_RESORT_WORDS:
         if any(w in text for w in words):

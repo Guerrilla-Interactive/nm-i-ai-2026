@@ -125,6 +125,13 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 | voucher/posting | bilag/postering | bilag/postering | voucher/posting | asiento | lançamento | Beleg/Buchung | écriture |
 | delete | slett/fjern | slett/fjern | delete/remove | eliminar/borrar | excluir/remover | löschen/entfernen | supprimer |
 | update | oppdater/endre | oppdater/endre | update/modify | actualizar/modificar | atualizar/modificar | aktualisieren/ändern | mettre à jour/modifier |
+| bank reconciliation | bankavtale/bankavstemming | bankavstemming | bank reconciliation | conciliación bancaria | conciliação bancária | Kontoabstimmung | rapprochement bancaire |
+| error correction | feilretting/korrigering | feilretting/korrigering | error correction | corrección | correção | Korrektur/Berichtigung | correction d'écriture |
+| year-end closing | årsavslutning/årsoppgjør | årsavslutning | year-end closing | cierre anual | encerramento anual | Jahresabschluss | clôture annuelle |
+| module | modul/modulen | modul | module | módulo | módulo | Modul | module |
+| riconciliazione bancaria | riconciliazione bancaria | - | - | - | - | - | - |
+| chiusura annuale | chiusura annuale | - | - | - | - | - | - |
+| correzione | correzione | - | - | - | - | - | - |
 
 ## IMPORTANT DISAMBIGUATION RULES
 - "Opprett faktura" / "Create invoice" with a NEW customer name → create_invoice
@@ -168,6 +175,12 @@ Even if the module name contains "Reiseregning" / "Travel Expense" / "Prosjekt" 
 - CRITICAL: "leverandørfaktura" / "leverandorfaktura" / "inngående faktura" / "Eingangsrechnung" / "facture fournisseur" / "supplier invoice" → register_supplier_invoice (NOT create_invoice). \
 A supplier/vendor invoice is an INCOMING invoice from a supplier, not an outgoing invoice to a customer.
 - CRITICAL: "lønnskjøring" / "lonnskjoring" / "kjør lønn" / "kjor lonn" / "run payroll" / "salary payment" → run_payroll (NOT unknown)
+- CRITICAL: If the prompt contains compound words ending in '-modulen' or '-modul' (e.g., 'prosjektmodulen', 'lønnsmodulen', 'reisemodulen', 'personalmodulen'), this is ALWAYS enable_module. The first part of the compound word is the MODULE NAME, not a separate entity. Do NOT classify as create_project, run_payroll, or create_travel_expense.
+- CRITICAL: 'Kontoabstimmung' / 'rapprochement bancaire' / 'conciliación bancaria' / 'conciliação bancária' / 'riconciliazione bancaria' → bank_reconciliation (NOT unknown)
+- CRITICAL: 'Korrigieren...Buchung' / 'corriger écriture' / 'corregir comprobante' / 'corrigir lançamento' / 'correggere registrazione' → error_correction (NOT unknown)
+- CRITICAL: 'encerramento anual' / 'chiusura annuale' / 'cierre anual' / 'cierre del ejercicio' → year_end_closing (NOT unknown)
+- CRITICAL: 'lønnsdimensjon' / 'prosjektdimensjon' / any Norwegian compound ending in '-dimensjon' → create_dimension_voucher. The compound word describes the dimension name.
+- CRITICAL: 'dimensión' (ES) / 'dimensão' (PT) / 'dimensione' (IT) in the context of accounting dimensions → create_dimension_voucher (NOT unknown)
 
 ## FEW-SHOT EXAMPLES
 
@@ -400,6 +413,76 @@ Output:
 Input: "Kjør lønnskjøring for ansatt Per Hansen for mars 2026, grunnlønn 45000 kr"
 Output:
 {{"task_type": "run_payroll", "confidence": 0.97, "fields": {{"employee_identifier": "Per Hansen", "first_name": "Per", "last_name": "Hansen", "base_salary": 45000.0, "month": "03", "year": "2026"}}}}
+
+### Example 30 — Enable module with compound word (Norwegian)
+Input: "Aktiver prosjektmodulen i Tripletex"
+Output:
+{{"task_type": "enable_module", "confidence": 0.98, "fields": {{"module_name": "Prosjekt"}}}}
+
+### Example 30b — Enable module (German)
+Input: "Aktivieren Sie das Projektmodul in Tripletex"
+Output:
+{{"task_type": "enable_module", "confidence": 0.97, "fields": {{"module_name": "Projekt"}}}}
+
+### Example 30c — Enable module (Spanish)
+Input: "Activar el módulo de proyecto en Tripletex"
+Output:
+{{"task_type": "enable_module", "confidence": 0.96, "fields": {{"module_name": "Proyecto"}}}}
+
+### Example 31 — Bank reconciliation (German)
+Input: "Führen Sie eine Kontoabstimmung für März 2026 durch"
+Output:
+{{"task_type": "bank_reconciliation", "confidence": 0.97, "fields": {{}}}}
+
+### Example 31b — Bank reconciliation (French)
+Input: "Effectuer le rapprochement bancaire pour mars 2026"
+Output:
+{{"task_type": "bank_reconciliation", "confidence": 0.96, "fields": {{}}}}
+
+### Example 31c — Bank reconciliation (Spanish)
+Input: "Realizar la conciliación bancaria del mes de marzo 2026"
+Output:
+{{"task_type": "bank_reconciliation", "confidence": 0.96, "fields": {{}}}}
+
+### Example 32 — Error correction (German)
+Input: "Korrigieren Sie die Buchung auf Konto 6000 vom 15.03.2026"
+Output:
+{{"task_type": "error_correction", "confidence": 0.97, "fields": {{"account_number": "6000", "date": "2026-03-15"}}}}
+
+### Example 32b — Error correction (French)
+Input: "Corriger l'écriture comptable sur le compte 6000"
+Output:
+{{"task_type": "error_correction", "confidence": 0.96, "fields": {{"account_number": "6000"}}}}
+
+### Example 32c — Error correction (Spanish)
+Input: "Corregir el comprobante contable del 15 de marzo"
+Output:
+{{"task_type": "error_correction", "confidence": 0.96, "fields": {{"date": "2026-03-15"}}}}
+
+### Example 33 — Create dimension voucher (Spanish)
+Input: "Crear una dimensión contable 'Centro de costos' con valores 'Ventas' y 'Operaciones'"
+Output:
+{{"task_type": "create_dimension_voucher", "confidence": 0.97, "fields": {{"dimension_name": "Centro de costos", "dimension_values": ["Ventas", "Operaciones"]}}}}
+
+### Example 33b — Create dimension voucher with compound word (Norwegian)
+Input: "Opprett lønnsdimensjon med verdiene 'Fast' og 'Variabel'"
+Output:
+{{"task_type": "create_dimension_voucher", "confidence": 0.96, "fields": {{"dimension_name": "Lønn", "dimension_values": ["Fast", "Variabel"]}}}}
+
+### Example 34 — Year-end closing (Spanish)
+Input: "Realizar el cierre anual del ejercicio 2025"
+Output:
+{{"task_type": "year_end_closing", "confidence": 0.96, "fields": {{"year": "2025"}}}}
+
+### Example 34b — Year-end closing (Portuguese)
+Input: "Realizar o encerramento anual de 2025"
+Output:
+{{"task_type": "year_end_closing", "confidence": 0.96, "fields": {{"year": "2025"}}}}
+
+### Example 34c — Year-end closing (Italian)
+Input: "Eseguire la chiusura annuale per il 2025"
+Output:
+{{"task_type": "year_end_closing", "confidence": 0.96, "fields": {{"year": "2025"}}}}
 
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
