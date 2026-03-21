@@ -4643,25 +4643,11 @@ async def _exec_update_supplier(fields: dict, client: TripletexClient) -> dict:
 
     result_data = {"updated_id": result.get("id"), "entity": "supplier"}
 
-    # If bank account was requested, try to update it via bank account endpoint
+    # Bank account updates are not supported via the supplier PUT endpoint.
+    # The bankAccountPresentation field is read-only and has an unknown nested schema.
+    # Avoid wasting API calls on attempts that will always fail.
     if bank_acct:
-        # Strip dots/dashes/spaces from bank account number
-        clean_bank = str(bank_acct).replace(".", "").replace("-", "").replace(" ", "")
-        try:
-            # Try to set bank account via the supplier's bankAccountPresentation
-            bank_payload = {
-                "id": supplier["id"],
-                "version": result.get("version", supplier.get("version", 0) + 1),
-                "name": supplier.get("name"),
-            }
-            # Re-fetch to get fresh version after the first PUT
-            fresh = await client.get_suppliers({"id": str(supplier["id"]), "fields": "*"})
-            if fresh:
-                bank_payload["version"] = fresh[0].get("version", 0)
-            await client.update_supplier(supplier["id"], bank_payload)
-        except (TripletexAPIError, Exception):
-            pass  # Bank account update is best-effort
-        result_data["note"] = f"Bank account '{bank_acct}' update attempted (field not directly supported on supplier)"
+        result_data["note"] = f"Bank account '{bank_acct}' noted but not directly settable on supplier object"
 
     return result_data
 
