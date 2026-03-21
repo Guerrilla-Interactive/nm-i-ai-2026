@@ -48,6 +48,8 @@ class TaskType(str, Enum):
     BANK_RECONCILIATION = "bank_reconciliation"
     ERROR_CORRECTION = "error_correction"
     YEAR_END_CLOSING = "year_end_closing"
+    MONTHLY_CLOSING = "monthly_closing"
+    ANALYZE_LEDGER = "analyze_ledger"
     ENABLE_MODULE = "enable_module"
     CREATE_DIMENSION_VOUCHER = "create_dimension_voucher"
 
@@ -169,7 +171,7 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
     },
     TaskType.REGISTER_PAYMENT: {
         "required": ["invoice_identifier", "amount"],
-        "optional": ["payment_date", "payment_type"],
+        "optional": ["payment_date", "payment_type", "currency", "exchange_rate"],
     },
     TaskType.CREATE_CREDIT_NOTE: {
         "required": ["invoice_identifier"],
@@ -317,6 +319,21 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
         "required": ["year"],
         "optional": [],
     },
+    TaskType.MONTHLY_CLOSING: {
+        "required": [],
+        "optional": [
+            "month", "year", "postings", "amount", "from_account",
+            "to_account", "description", "period",
+        ],
+    },
+    TaskType.ANALYZE_LEDGER: {
+        "required": [],
+        "optional": [
+            "period1_start", "period1_end", "period2_start", "period2_end",
+            "year", "num_accounts", "description", "account_range_from",
+            "account_range_to",
+        ],
+    },
     TaskType.ENABLE_MODULE: {
         "required": ["module_name"],
         "optional": [],
@@ -374,7 +391,9 @@ TASK_TYPE_DESCRIPTIONS: dict[TaskType, str] = {
     TaskType.REVERSE_PAYMENT: "Reverse a payment that was returned/bounced by the bank, reopening the invoice as outstanding",
     TaskType.BANK_RECONCILIATION: "Reconcile bank transactions (often from a CSV file)",
     TaskType.ERROR_CORRECTION: "Correct an error in the ledger (reverse or adjust a voucher)",
-    TaskType.YEAR_END_CLOSING: "Perform year-end closing procedures",
+    TaskType.YEAR_END_CLOSING: "Perform year-end closing procedures (annual / årsavslutning / clôture annuelle)",
+    TaskType.MONTHLY_CLOSING: "Perform monthly or period closing with accrual/regularization journal entries (månedsavslutning / clôture mensuelle / Monatsabschluss / cierre mensual). Create voucher postings to transfer amounts between accounts (e.g. prepaid expenses to expense accounts).",
+    TaskType.ANALYZE_LEDGER: "Analyze the general ledger to identify cost/expense changes between periods (analyser hovudboka / analice el libro mayor / analysez le grand livre / Hauptbuch analysieren). Query postings, compare periods, find top expense changes, and create correction entries.",
     TaskType.ENABLE_MODULE: "Enable a company module or feature in Tripletex",
     TaskType.CREATE_DIMENSION_VOUCHER: "Create a custom accounting dimension with values, and optionally post a voucher linked to a dimension value",
     TaskType.UNKNOWN: "Could not determine the task type — use fallback logic",

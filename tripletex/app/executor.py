@@ -27,6 +27,7 @@ Key API facts from tested sandbox (MUST handle):
 
 import json
 import logging
+import unicodedata
 from datetime import date
 from typing import Any
 
@@ -74,6 +75,13 @@ def _build_address(fields: dict, prefix: str = "") -> dict | None:
         val = _get(fields, key)
         if val is not None:
             addr[dst] = str(val)
+    if addr:
+        # Country is required for Tripletex to store the address
+        country = _get(fields, f"{prefix}country_id") or _get(fields, f"{prefix}country")
+        if country and str(country).isdigit():
+            addr["country"] = {"id": int(country)}
+        else:
+            addr["country"] = {"id": 162}  # Norway default
     return addr if addr else None
 
 
@@ -92,7 +100,11 @@ _cached_voucher_types: dict[int, list] = {}
 
 
 async def _get_voucher_type_id(client: TripletexClient, preferred_keywords: list[str] | None = None) -> int | None:
-    """Look up a voucher type, with caching. Returns the id or None."""
+    """Look up a voucher type, with caching. Returns the id or None.
+
+    Prefers keyword matches, then falls back to any non-system type.
+    System types (lønn, salary, bank, etc.) auto-generate postings at row 0.
+    """
     cid = id(client)
     if cid not in _cached_voucher_types:
         _cached_voucher_types[cid] = await client.get_voucher_types()
@@ -105,7 +117,42 @@ async def _get_voucher_type_id(client: TripletexClient, preferred_keywords: list
         vt_name = (vt.get("name") or "").lower()
         if any(kw in vt_name for kw in keywords):
             return vt["id"]
+
+    # Fallback: skip known system-managed types
+    system_keywords = {"lønn", "salary", "bank", "innbetaling", "årsavslutning",
+                       "closing", "leverandør", "supplier", "korreksjon"}
+    for vt in voucher_types:
+        vt_name = (vt.get("name") or "").lower()
+        if not any(sk in vt_name for sk in system_keywords):
+            return vt["id"]
+
+    # Last resort: use first type anyway
     return voucher_types[0]["id"]
+
+
+async def _create_voucher_safe(client: TripletexClient, payload: dict) -> dict:
+    """Create a voucher with fallback on voucherType errors.
+
+    1. Try with the provided voucherType
+    2. If 'Ugyldig verdi' / voucherType error → retry WITHOUT voucherType
+    3. If 'systemgenererte' error → retry without voucherType
+    """
+    try:
+        return await client.create_voucher(payload)
+    except TripletexAPIError as e:
+        detail = (e.detail or "").lower()
+        if "vouchertype" in detail or "ugyldig verdi" in detail:
+            _log("WARNING", "Voucher type rejected, retrying without voucherType")
+            payload_no_type = {k: v for k, v in payload.items() if k != "voucherType"}
+            try:
+                return await client.create_voucher(payload_no_type)
+            except TripletexAPIError:
+                pass  # Fall through to raise original
+        if "systemgenererte" in detail:
+            _log("WARNING", "System-generated error, retrying without voucherType")
+            payload_no_type = {k: v for k, v in payload.items() if k != "voucherType"}
+            return await client.create_voucher(payload_no_type)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +274,15 @@ async def _ensure_department(client: TripletexClient, department_name: str = Non
         depts = await client.get_departments({"name": department_name})
         if depts:
             return depts[0]["id"]
+        # Named department not found — create it
+        try:
+            dept = await client.create_department({
+                "name": department_name,
+                "departmentNumber": str(abs(hash(department_name)) % 900 + 100),
+            })
+            return dept["id"]
+        except TripletexAPIError:
+            pass  # Fall through to existing department fallback
 
     # Get any existing department
     depts = await client.get_departments({"count": 1})
@@ -375,6 +431,9 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
     if not email:
         first = (_get(fields, "first_name") or "user").lower().replace(" ", "")
         last = (_get(fields, "last_name") or "test").lower().replace(" ", "")
+        # Strip non-ASCII (ü→u, ö→o, é→e, ø→o, å→a, etc.)
+        first = unicodedata.normalize("NFKD", first).encode("ascii", "ignore").decode()
+        last = unicodedata.normalize("NFKD", last).encode("ascii", "ignore").decode()
         email = f"{first}.{last}@example.com"
 
     payload = _clean({
@@ -821,12 +880,26 @@ async def _create_invoice_from_order(
     # Create products for lines that have product numbers
     order_lines = await _create_products_for_lines(client, order_lines)
 
+    # Resolve currency if non-NOK
+    currency_code = _get(fields, "currency")
+    currency_ref = None
+    if currency_code and currency_code.upper() != "NOK":
+        try:
+            cur_resp = await client._request("GET", "/currency", params={"code": currency_code.upper()})
+            cur_list = client._extract_values(cur_resp)
+            if cur_list:
+                currency_ref = {"id": cur_list[0]["id"]}
+                _log("INFO", "Resolved currency", code=currency_code, id=cur_list[0]["id"])
+        except Exception as e:
+            _log("WARNING", "Currency lookup failed", code=currency_code, error=str(e)[:200])
+
     # Create order with inline order lines
     order_payload = _clean({
         "customer": {"id": int(customer_id)},
         "orderDate": invoice_date,
         "deliveryDate": invoice_date,
         "invoiceComment": _get(fields, "comment") or _get(fields, "invoice_comment"),
+        "currency": currency_ref,
         "orderLines": order_lines,
     })
     order = await client.create_order(order_payload)
@@ -1778,38 +1851,54 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
     activity_name = _get(fields, "activity_name")
     if not activity_id:
         activities = await client.get_activities({"projectId": str(project_id)} if project_id else None)
-        if activities and activity_name:
+        # Filter out disabled activities
+        usable = [a for a in activities if not a.get("isDisabled", False)]
+        if usable and activity_name:
             # Try to match by name
             match = next(
-                (a for a in activities if a.get("name", "").lower() == activity_name.lower()),
+                (a for a in usable if a.get("name", "").lower() == activity_name.lower()),
                 None,
             )
             if not match:
                 match = next(
-                    (a for a in activities if activity_name.lower() in a.get("name", "").lower()),
+                    (a for a in usable if activity_name.lower() in a.get("name", "").lower()),
                     None,
                 )
             if match:
                 activity_id = match["id"]
-        if not activity_id and activities:
-            activity_id = activities[0]["id"]
+        if not activity_id and usable:
+            # Prefer project activities over general ones
+            proj_acts = [a for a in usable if a.get("isProjectActivity", False)]
+            activity_id = (proj_acts[0] if proj_acts else usable[0])["id"]
 
     if not activity_id:
         # Try getting all activities without project filter
         activities = await client.get_activities({})
-        if activities:
+        usable = [a for a in activities if not a.get("isDisabled", False)]
+        if usable:
             if activity_name:
                 match = next(
-                    (a for a in activities if activity_name.lower() in a.get("name", "").lower()),
+                    (a for a in usable if activity_name.lower() in a.get("name", "").lower()),
                     None,
                 )
                 if match:
                     activity_id = match["id"]
             if not activity_id:
-                activity_id = activities[0]["id"]
+                proj_acts = [a for a in usable if a.get("isProjectActivity", False)]
+                activity_id = (proj_acts[0] if proj_acts else usable[0])["id"]
 
     if not activity_id:
-        return {"success": False, "error": "No activity found for hour logging"}
+        # Create a project activity as last resort
+        try:
+            new_act = await client.create_activity({
+                "name": activity_name or "General",
+                "activityType": "PROJECT_GENERAL_ACTIVITY",
+            })
+            activity_id = new_act["id"]
+            _log("INFO", "Created activity for timesheet", name=activity_name, id=activity_id)
+        except Exception as e:
+            _log("ERROR", "Failed to create activity", error=str(e))
+            return {"success": False, "error": f"No usable activity found and creation failed: {e}"}
 
     # 4. Create timesheet entry
     hours = _get(fields, "hours")
@@ -1917,7 +2006,9 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
             amount = float(txn_amount)
             counter_account = txn.get("counter_account") or txn.get("account")
             if not counter_account:
-                counter_account = "3000" if amount >= 0 else "6300"
+                # Use balance sheet accounts to avoid VAT requirements
+                # 1500 = customer receivables, 2400 = supplier payables
+                counter_account = "1500" if amount >= 0 else "2400"
 
             counter_accounts = await client.get_ledger_accounts({"number": str(counter_account)})
             counter_account_id = counter_accounts[0]["id"] if counter_accounts else None
@@ -1927,27 +2018,27 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
             if amount >= 0:
                 postings = [
                     {"account": {"id": account_id}, "amountGross": abs_amount,
-                     "amountGrossCurrency": abs_amount, "description": txn_description, "date": txn_date},
+                     "amountGrossCurrency": abs_amount, "description": txn_description, "date": txn_date, "row": 1},
                     {"account": {"id": counter_account_id or account_id}, "amountGross": -abs_amount,
-                     "amountGrossCurrency": -abs_amount, "description": txn_description, "date": txn_date},
+                     "amountGrossCurrency": -abs_amount, "description": txn_description, "date": txn_date, "row": 2},
                 ]
             else:
                 postings = [
                     {"account": {"id": account_id}, "amountGross": -abs_amount,
-                     "amountGrossCurrency": -abs_amount, "description": txn_description, "date": txn_date},
+                     "amountGrossCurrency": -abs_amount, "description": txn_description, "date": txn_date, "row": 1},
                     {"account": {"id": counter_account_id or account_id}, "amountGross": abs_amount,
-                     "amountGrossCurrency": abs_amount, "description": txn_description, "date": txn_date},
+                     "amountGrossCurrency": abs_amount, "description": txn_description, "date": txn_date, "row": 2},
                 ]
 
             try:
-                vt_id = await _get_voucher_type_id(client, ["bank", "innbetaling"])
+                vt_id = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
                 voucher_data = {
                     "date": txn_date,
                     "description": f"Bank reconciliation: {txn_description}",
                     "voucherType": {"id": vt_id} if vt_id else None,
                     "postings": postings,
                 }
-                voucher = await client.create_voucher(voucher_data)
+                voucher = await _create_voucher_safe(client, voucher_data)
                 voucher_ids.append(voucher.get("id"))
             except TripletexAPIError as e:
                 _log("WARNING", "Failed to create voucher for bank txn",
@@ -2083,17 +2174,18 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                     if postings:
                         # Create reversing postings (swap debit/credit)
                         reversed_postings = []
-                        for p in postings:
+                        for idx, p in enumerate(postings):
                             reversed_postings.append(_clean({
                                 "account": p.get("account"),
                                 "amountGross": -(p.get("amountGross", 0)),
                                 "amountGrossCurrency": -(p.get("amountGrossCurrency", 0)),
                                 "currency": p.get("currency"),
                                 "description": f"Korreksjon: {p.get('description', '')}",
+                                "row": idx + 1,
                             }))
 
                         if reversed_postings:
-                            corr_vt_id = await _get_voucher_type_id(client, ["korreksjon", "correction"])
+                            corr_vt_id = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
                             correction_voucher = _clean({
                                 "date": _today(),
                                 "description": _get(fields, "correction_description")
@@ -2102,7 +2194,7 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                                 "postings": reversed_postings,
                             })
                             try:
-                                new_voucher = await client.create_voucher(correction_voucher)
+                                new_voucher = await _create_voucher_safe(client, correction_voucher)
                                 return {
                                     "entity": "voucher",
                                     "action": "manual_reversal",
@@ -2131,16 +2223,17 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
     if new_postings and isinstance(new_postings, list):
         # Build correcting voucher with provided postings
         formatted_postings = []
-        for np in new_postings:
+        for idx, np in enumerate(new_postings):
             formatted_postings.append(_clean({
                 "account": _ref(_get(np, "account_id")) or {"id": int(np.get("account", 0))},
                 "amountGross": _get(np, "amount") or _get(np, "amount_gross"),
                 "amountGrossCurrency": _get(np, "amount_currency") or _get(np, "amount_gross_currency"),
                 "currency": _ref(_get(np, "currency_id")),
                 "description": _get(np, "description") or correction_desc,
+                "row": idx + 1,
             }))
 
-        corr_vt_id2 = await _get_voucher_type_id(client, ["korreksjon", "correction"])
+        corr_vt_id2 = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
         correction_payload = _clean({
             "date": _today(),
             "description": correction_desc or f"Korrigering etter bilag {voucher_identifier}",
@@ -2148,7 +2241,7 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
             "postings": formatted_postings,
         })
         try:
-            new_v = await client.create_voucher(correction_payload)
+            new_v = await _create_voucher_safe(client, correction_payload)
             correction_voucher_id = new_v.get("id")
             _log("INFO", "Correction voucher created", new_voucher_id=correction_voucher_id)
         except TripletexAPIError as e:
@@ -2189,7 +2282,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     try:
         annual_accounts = await client.get_annual_accounts({
             "yearFrom": str(year),
-            "yearTo": str(year),
+            "yearTo": str(year + 1),  # yearTo is exclusive
         })
 
         if annual_accounts:
@@ -2242,8 +2335,10 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     # Revenue (3xxx) + expenses (4xxx-7xxx) net result → equity (2050).
     try:
         # Get voucher types to find a suitable one
+        # Use "memorial" type — closing/årsavslutning types auto-generate
+        # system postings at row 0, rejecting external postings
         voucher_type_id = await _get_voucher_type_id(
-            client, ["årsavslutning", "year-end", "closing", "avslutning", "årsoppgjør"])
+            client, ["memorial", "memorialnota"])
 
         if not voucher_type_id:
             return {"success": False, "error": "No voucher types available for closing entries"}
@@ -2304,6 +2399,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
                     "account": {"id": result_acc["id"]},
                     "amountGross": -amount,
                     "amountGrossCurrency": -amount,
+                    "row": 1,
                 },
                 {
                     "date": year_end_date,
@@ -2311,11 +2407,12 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
                     "account": {"id": equity_acc["id"]},
                     "amountGross": amount,
                     "amountGrossCurrency": amount,
+                    "row": 2,
                 },
             ],
         }
 
-        voucher = await client.create_voucher(voucher_data)
+        voucher = await _create_voucher_safe(client, voucher_data)
         _log("INFO", "Closing voucher created", voucher_id=voucher.get("id"), year=year)
         return {
             "entity": "year_end_closing",
@@ -2355,6 +2452,301 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
             "error": f"Year-end closing for {year} failed: {(e.detail or '')[:200]}",
             "year": year,
         }
+
+
+async def _exec_monthly_closing(fields: dict, client: TripletexClient) -> dict:
+    """Monthly/period closing with accrual/regularization journal entries.
+
+    Creates voucher postings to transfer amounts between accounts (e.g.
+    prepaid expenses from 1700 to expense accounts).
+    """
+    postings_data = _get(fields, "postings") or []
+    from_account = _get(fields, "from_account")
+    to_account = _get(fields, "to_account")
+    amount = _get(fields, "amount")
+    description = _get(fields, "description") or "Monthly closing entry"
+    month = _get(fields, "month")
+    year = _get(fields, "year")
+
+    today = _today()
+
+    # Build list of posting pairs from either structured postings or simple fields
+    entries = []
+    if postings_data and isinstance(postings_data, list):
+        for p in postings_data:
+            fa = str(_get(p, "from_account") or _get(p, "debit_account") or "")
+            ta = str(_get(p, "to_account") or _get(p, "credit_account") or "")
+            amt = _get(p, "amount")
+            # Skip entries with missing required fields
+            if not fa or not ta or not amt:
+                _log("WARNING", "Skipping incomplete posting entry",
+                     from_account=fa, to_account=ta, amount=amt)
+                continue
+            entries.append({
+                "from_account": fa,
+                "to_account": ta,
+                "amount": float(amt),
+                "description": _get(p, "description") or description,
+            })
+    elif from_account and to_account and amount:
+        entries.append({
+            "from_account": str(from_account),
+            "to_account": str(to_account),
+            "amount": float(amount),
+            "description": description,
+        })
+
+    if not entries:
+        return {"success": False, "error": "No postings specified for monthly closing"}
+
+    voucher_type_id = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
+
+    # Map text descriptions to standard Norwegian account numbers
+    _acct_name_map = {
+        "expense": "7700", "expense account": "7700", "gasto": "7700",
+        "dépense": "7700", "aufwand": "7700", "kostnader": "7700",
+        "accumulated depreciation": "1029", "depreciación acumulada": "1029",
+        "akkumulert avskrivning": "1029", "amortissement cumulé": "1029",
+        "kumulierte abschreibung": "1029",
+        "depreciation": "6010", "avskrivning": "6010", "depreciación": "6010",
+        "abschreibung": "6010", "amortissement": "6010",
+        "prepaid": "1700", "forskuddsbetalt": "1700", "prepaid expenses": "1700",
+        "accrued expenses": "2900", "påløpte kostnader": "2900",
+        "revenue": "3000", "inntekt": "3000", "ingreso": "3000",
+    }
+
+    async def _find_account(acct_num: str) -> int | None:
+        """Find account by exact number, text name mapping, or range fallback."""
+        # If non-numeric, try mapping text to account number
+        if not acct_num.replace(".", "").isdigit():
+            mapped = _acct_name_map.get(acct_num.lower().strip())
+            if mapped:
+                _log("INFO", f"Mapped text '{acct_num}' to account {mapped}")
+                acct_num = mapped
+            else:
+                _log("WARNING", f"Non-numeric account '{acct_num}' has no mapping")
+                return None
+
+        accts = await client.get_ledger_accounts({"number": acct_num})
+        if accts:
+            return accts[0]["id"]
+        # Fallback: try base account (e.g. 6010 → 6000, 1209 → 1200)
+        base = acct_num[:2] + "00"
+        if base != acct_num:
+            accts = await client.get_ledger_accounts({"number": base})
+            if accts:
+                _log("INFO", f"Using fallback account {base} for {acct_num}")
+                return accts[0]["id"]
+        return None
+
+    voucher_ids = []
+    for entry in entries:
+        from_acct_id = await _find_account(entry["from_account"])
+        to_acct_id = await _find_account(entry["to_account"])
+
+        if not from_acct_id or not to_acct_id:
+            _log("WARNING", "Account not found for monthly closing",
+                 from_account=entry["from_account"], to_account=entry["to_account"])
+            continue
+
+        amt = entry["amount"]
+
+        voucher_payload = {
+            "date": today,
+            "description": entry["description"],
+            "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
+            "postings": [
+                {
+                    "date": today,
+                    "account": {"id": to_acct_id},
+                    "amountGross": amt,
+                    "amountGrossCurrency": amt,
+                    "description": entry["description"],
+                    "row": 1,
+                },
+                {
+                    "date": today,
+                    "account": {"id": from_acct_id},
+                    "amountGross": -amt,
+                    "amountGrossCurrency": -amt,
+                    "description": entry["description"],
+                    "row": 2,
+                },
+            ],
+        }
+
+        try:
+            voucher = await _create_voucher_safe(client, voucher_payload)
+            voucher_ids.append(voucher.get("id"))
+        except TripletexAPIError as e:
+            _log("WARNING", "Failed to create monthly closing voucher", error=str(e))
+
+    if not voucher_ids:
+        return {"success": False, "error": "Failed to create any monthly closing vouchers"}
+
+    return {
+        "entity": "monthly_closing",
+        "voucher_ids": voucher_ids,
+        "entries_created": len(voucher_ids),
+        "month": month,
+        "year": year,
+    }
+
+
+async def _exec_analyze_ledger(fields: dict, client: TripletexClient) -> dict:
+    """Analyze general ledger to identify expense changes between two periods.
+
+    1. Determine period1 and period2 (typically consecutive months)
+    2. GET /ledger/posting for each period
+    3. Group by account, calculate differences
+    4. Find top N accounts with largest cost increases
+    5. Create correction vouchers for each
+    """
+    year = int(_get(fields, "year") or "2026")
+    num_accounts = int(_get(fields, "num_accounts") or 3)
+
+    # Determine periods — default: January vs February of given year
+    p1_start = _get(fields, "period1_start") or f"{year}-01-01"
+    p1_end = _get(fields, "period1_end") or f"{year}-01-31"
+    p2_start = _get(fields, "period2_start") or f"{year}-02-01"
+    p2_end = _get(fields, "period2_end") or f"{year}-02-28"
+
+    today = _today()
+
+    # Step 1: Fetch postings for both periods (expense accounts 4000-7999)
+    try:
+        postings_p1 = await client.get_postings({
+            "dateFrom": p1_start,
+            "dateTo": p1_end,
+            "accountNumberFrom": "4000",
+            "accountNumberTo": "7999",
+            "fields": "*",
+        })
+    except TripletexAPIError:
+        postings_p1 = []
+
+    try:
+        postings_p2 = await client.get_postings({
+            "dateFrom": p2_start,
+            "dateTo": p2_end,
+            "accountNumberFrom": "4000",
+            "accountNumberTo": "7999",
+            "fields": "*",
+        })
+    except TripletexAPIError:
+        postings_p2 = []
+
+    # Step 2: Group by account number and sum amounts
+    def _sum_by_account(postings):
+        totals = {}
+        for p in postings:
+            acct = p.get("account", {})
+            acct_num = acct.get("number", 0)
+            acct_id = acct.get("id")
+            acct_name = acct.get("name", "")
+            amount = abs(float(p.get("amount", 0)))
+            if acct_num not in totals:
+                totals[acct_num] = {"id": acct_id, "name": acct_name, "total": 0}
+            totals[acct_num]["total"] += amount
+        return totals
+
+    p1_totals = _sum_by_account(postings_p1)
+    p2_totals = _sum_by_account(postings_p2)
+
+    # Step 3: Calculate increases
+    all_accounts = set(list(p1_totals.keys()) + list(p2_totals.keys()))
+    changes = []
+    for acct_num in all_accounts:
+        p1_amt = p1_totals.get(acct_num, {}).get("total", 0)
+        p2_amt = p2_totals.get(acct_num, {}).get("total", 0)
+        increase = p2_amt - p1_amt
+        if increase > 0:
+            acct_info = p2_totals.get(acct_num) or p1_totals.get(acct_num, {})
+            changes.append({
+                "account_number": acct_num,
+                "account_id": acct_info.get("id"),
+                "account_name": acct_info.get("name", ""),
+                "period1_total": p1_amt,
+                "period2_total": p2_amt,
+                "increase": increase,
+            })
+
+    # Sort by largest increase, take top N
+    changes.sort(key=lambda x: x["increase"], reverse=True)
+    top_changes = changes[:num_accounts]
+
+    if not top_changes:
+        return {
+            "entity": "ledger_analysis",
+            "action": "no_significant_changes",
+            "period1": f"{p1_start} to {p1_end}",
+            "period2": f"{p2_start} to {p2_end}",
+        }
+
+    # Step 4: Create correction vouchers for top expense increases
+    voucher_type_id = await _get_voucher_type_id(client, ["memorial", "memorialnota"])
+
+    # Find a suitable contra account (1500 customer receivables or 2400 supplier)
+    contra_acct_id = None
+    for contra_num in ["1500", "2400", "1900"]:
+        accts = await client.get_ledger_accounts({"number": contra_num})
+        if accts:
+            contra_acct_id = accts[0]["id"]
+            break
+
+    voucher_ids = []
+    for change in top_changes:
+        if not change["account_id"] or not contra_acct_id:
+            continue
+
+        amt = change["increase"]
+        desc = f"Correction: {change['account_name']} (#{change['account_number']}) — cost increase {amt:.2f}"
+
+        voucher_payload = {
+            "date": today,
+            "description": desc,
+            "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
+            "postings": [
+                {
+                    "date": today,
+                    "account": {"id": contra_acct_id},
+                    "amountGross": amt,
+                    "amountGrossCurrency": amt,
+                    "description": desc,
+                    "row": 1,
+                },
+                {
+                    "date": today,
+                    "account": {"id": change["account_id"]},
+                    "amountGross": -amt,
+                    "amountGrossCurrency": -amt,
+                    "description": desc,
+                    "row": 2,
+                },
+            ],
+        }
+
+        try:
+            voucher = await _create_voucher_safe(client, voucher_payload)
+            voucher_ids.append(voucher.get("id"))
+        except TripletexAPIError as e:
+            _log("WARNING", "Failed to create analysis correction voucher", error=str(e))
+
+    return {
+        "entity": "ledger_analysis",
+        "top_changes": [
+            {
+                "account": f"{c['account_number']} {c['account_name']}",
+                "increase": c["increase"],
+                "period1": c["period1_total"],
+                "period2": c["period2_total"],
+            }
+            for c in top_changes
+        ],
+        "voucher_ids": voucher_ids,
+        "period1": f"{p1_start} to {p1_end}",
+        "period2": f"{p2_start} to {p2_end}",
+    }
 
 
 async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
@@ -2570,12 +2962,14 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
         return {"success": False, "error": "Could not find salary/liability ledger accounts",
                 "employee_id": emp_id}
 
-    # Get voucher type (required to avoid "system-generated" 422 error)
+    # Get voucher type — use "memorial" to avoid salary-type vouchers
+    # that auto-generate system postings at row 0
     voucher_type_id = await _get_voucher_type_id(
-        client, ["lønn", "salary", "payroll"])
+        client, ["memorial", "memorialnota"])
 
     description = f"Salary payment: {emp_name}"
     postings = []
+    row = 1  # row 0 is reserved for system-generated postings
 
     # Debit base salary
     if base_salary:
@@ -2585,7 +2979,9 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
             "amountGross": base_salary,
             "amountGrossCurrency": base_salary,
             "description": f"Base salary - {emp_name}",
+            "row": row,
         })
+        row += 1
 
     # Debit bonus (same expense account or 5020 if available)
     if bonus:
@@ -2595,7 +2991,9 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
             "amountGross": bonus,
             "amountGrossCurrency": bonus,
             "description": f"Bonus - {emp_name}",
+            "row": row,
         })
+        row += 1
 
     # Credit total to liability
     postings.append({
@@ -2604,6 +3002,7 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
         "amountGross": -total_amount,
         "amountGrossCurrency": -total_amount,
         "description": description,
+        "row": row,
     })
 
     voucher_payload = {
@@ -2614,7 +3013,7 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
     }
 
     try:
-        voucher = await client.create_voucher(voucher_payload)
+        voucher = await _create_voucher_safe(client, voucher_payload)
         voucher_id = voucher.get("id")
     except TripletexAPIError as e:
         return {"success": False, "error": f"Failed to create salary voucher: {e}",
@@ -2706,17 +3105,46 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
         return {"success": False, "error": "Could not find required ledger accounts (4000/2400)",
                 "supplier_id": supplier_id}
 
-    # Step 3b: Get voucher type (required to avoid "system-generated" 422 error)
-    voucher_type_id = await _get_voucher_type_id(
-        client, ["leverandør", "inngående", "supplier", "incoming"])
-
-    # Step 4: Create voucher with postings
+    # Step 3b: Prepare common fields
     invoice_number = _get(fields, "invoice_number")
     voucher_date = _get(fields, "invoice_date") or _today()
     due_date = _get(fields, "due_date")
     description = _get(fields, "description") or f"Supplier invoice from {supplier_name}"
 
-    voucher_payload = {
+    # Step 4: Try /incomingInvoice first (proper API for supplier invoices)
+    ii_payload = _clean({
+        "invoiceHeader": _clean({
+            "vendorId": supplier_id,
+            "invoiceDate": voucher_date,
+            "dueDate": due_date or voucher_date,
+            "currencyId": 1,  # NOK
+            "invoiceAmount": amount,
+            "description": description,
+            "invoiceNumber": invoice_number,
+        }),
+        "orderLines": [{
+            "externalId": "1",
+            "row": 1,
+            "description": description,
+            "accountId": expense_acct_id,
+            "amountInclVat": amount,
+        }],
+    })
+    try:
+        result = await client._request("POST", "/incomingInvoice", json=ii_payload,
+                                        params={"sendTo": "ledger"})
+        result = client._extract_value(result)
+        return {"entity": "supplier_invoice", "supplier_id": supplier_id,
+                "created_id": result.get("id"), "amount": amount}
+    except TripletexAPIError as e:
+        _log("WARNING", "incomingInvoice failed, trying voucher approach", error=str(e))
+
+    # Fallback: voucher with manual postings
+    voucher_type_id = await _get_voucher_type_id(
+        client, ["memorial", "memorialnota"])
+    _log("DEBUG", "Selected voucher type for supplier invoice", voucher_type_id=voucher_type_id)
+
+    voucher_payload = _clean({
         "date": voucher_date,
         "description": description,
         "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
@@ -2727,19 +3155,22 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
                 "amountGross": amount,
                 "amountGrossCurrency": amount,
                 "description": description,
+                "row": 1,
             },
             {
                 "date": voucher_date,
                 "account": {"id": liability_acct_id},
+                "supplier": {"id": supplier_id},
                 "amountGross": -amount,
                 "amountGrossCurrency": -amount,
                 "description": description,
+                "row": 2,
             },
         ],
-    }
+    })
 
     try:
-        voucher = await client.create_voucher(voucher_payload)
+        voucher = await _create_voucher_safe(client, voucher_payload)
         voucher_id = voucher.get("id")
         return {
             "entity": "supplier_invoice",
@@ -2747,33 +3178,6 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
             "voucher_id": voucher_id,
             "amount": amount,
         }
-    except TripletexAPIError as e:
-        _log("WARNING", "Voucher approach failed, trying /supplierInvoice", error=str(e))
-
-    # Fallback 1: try dedicated /supplierInvoice endpoint
-    si_payload = _clean({
-        "invoiceNumber": invoice_number,
-        "invoiceDate": voucher_date,
-        "dueDate": due_date or voucher_date,
-        "supplier": {"id": supplier_id},
-        "amount": amount,
-        "amountCurrency": amount,
-        "currency": {"id": 1},  # NOK
-    })
-    try:
-        result = await client._request("POST", "/supplierInvoice", json=si_payload)
-        result = client._extract_value(result)
-        return {"entity": "supplier_invoice", "supplier_id": supplier_id,
-                "created_id": result.get("id"), "amount": amount}
-    except TripletexAPIError:
-        pass
-
-    # Fallback 2: try /incomingInvoice endpoint
-    try:
-        result = await client._request("POST", "/incomingInvoice", json=si_payload)
-        result = client._extract_value(result)
-        return {"entity": "supplier_invoice", "supplier_id": supplier_id,
-                "created_id": result.get("id"), "amount": amount}
     except TripletexAPIError as e2:
         return {"success": False, "error": f"All approaches failed: {e2}",
                 "supplier_id": supplier_id}
@@ -2972,6 +3376,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
         "amountGross": amount,
         "amountGrossCurrency": amount,
         "description": description,
+        "row": 1,
     }
 
     # Link dimension value to the debit posting
@@ -2985,6 +3390,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
         "amountGross": -amount,
         "amountGrossCurrency": -amount,
         "description": description,
+        "row": 2,
     }
 
     dim_vt_id = await _get_voucher_type_id(client)
@@ -2996,7 +3402,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     }
 
     try:
-        voucher = await client.create_voucher(voucher_payload)
+        voucher = await _create_voucher_safe(client, voucher_payload)
         voucher_id = voucher.get("id")
     except TripletexAPIError as e:
         _log("WARNING", "Voucher with dimension failed, trying without dimension", error=str(e))
@@ -3007,10 +3413,11 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             "amountGross": amount,
             "amountGrossCurrency": amount,
             "description": description,
+            "row": 1,
         }
         voucher_payload["postings"] = [debit_posting_clean, credit_posting]
         try:
-            voucher = await client.create_voucher(voucher_payload)
+            voucher = await _create_voucher_safe(client, voucher_payload)
             voucher_id = voucher.get("id")
             _log("WARNING", "Voucher created without dimension linkage")
         except TripletexAPIError as e2:
@@ -3190,6 +3597,8 @@ _EXECUTORS: dict[TaskType, Any] = {
     TaskType.BANK_RECONCILIATION: _exec_bank_reconciliation,
     TaskType.ERROR_CORRECTION: _exec_error_correction,
     TaskType.YEAR_END_CLOSING: _exec_year_end_closing,
+    TaskType.MONTHLY_CLOSING: _exec_monthly_closing,
+    TaskType.ANALYZE_LEDGER: _exec_analyze_ledger,
     TaskType.ENABLE_MODULE: _exec_enable_module,
     TaskType.CREATE_DIMENSION_VOUCHER: _exec_create_dimension_voucher,
     # Fallback

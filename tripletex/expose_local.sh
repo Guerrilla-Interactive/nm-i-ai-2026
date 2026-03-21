@@ -3,7 +3,11 @@
 # This lets us submit to the competition immediately while setting up GCP
 
 echo "Starting local Tripletex agent on port 8080..."
-cd "$(dirname "$0")/app"
+cd "$(dirname "$0")"
+set -a
+source .env
+set +a
+cd app
 pip install -r requirements.txt 2>/dev/null
 
 # Start uvicorn in background

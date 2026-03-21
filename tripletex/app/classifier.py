@@ -107,6 +107,7 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 - Phone numbers → preserve as-is (including country code if given)
 - Organization numbers → digits only, no spaces
 - VAT rates → extract as vat_percentage (plain number, e.g. 25, 15, 12, 0). Keywords: MVA, mva, MwSt, Steuersatz, tax rate, VAT, TVA, IVA, taux
+- Account numbers (from_account, to_account, account_number) → ALWAYS numeric Norwegian standard chart of accounts (kontoplan), NEVER text descriptions. If the prompt says "to expense" or "a gasto", infer the correct account number. Common: 1029 (accumulated depreciation/akkumulert avskrivning), 1700 (prepaid expenses), 2900 (accrued expenses), 3000 (revenue), 6010 (depreciation expense), 6300 (leasing), 6860 (office services), 7700 (general operating expenses)
 
 ## LANGUAGE-SPECIFIC KEYWORDS
 | Concept | Bokmål (nb) | Nynorsk (nn) | English | Spanish | Portuguese | German | French |
@@ -155,6 +156,9 @@ register_payment is ONLY for registering payment on an ALREADY EXISTING invoice 
 AND mentions payment → invoice_with_payment
 - dimension/Buchhaltungsdimension/dimensjon + values/voucher/Beleg → create_dimension_voucher
 - "fri dimensjon", "custom dimension", "Kostsenter", "Kostenstelle", "cost center" → create_dimension_voucher
+- CRITICAL: When a prompt mentions sending/creating an invoice with a FOREIGN CURRENCY (EUR, USD, GBP, etc.) and customer details → \
+this is invoice_with_payment or create_invoice (NOT register_payment). Extract the currency code into the "currency" field. \
+Extract "exchange_rate" if a conversion rate is mentioned (taux de change, vekslingskurs, Wechselkurs, tipo de cambio).
 
 ## FEW-SHOT EXAMPLES
 
@@ -342,6 +346,16 @@ return a JSON object with a "batch" array containing one classification per enti
 Input: "Create three departments in Tripletex: Utvikling, Innkjøp, and Salg."
 Output:
 {{"batch": [{{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Utvikling"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Innkjøp"}}}}, {{"task_type": "create_department", "confidence": 0.98, "fields": {{"name": "Salg"}}}}]}}
+
+### Example 26 — Monthly closing (Spanish)
+Input: "Realice el cierre mensual de marzo de 2026. Registre la periodificación (11900 NOK por mes de la cuenta 1700 a gasto). Contabilice la depreciación mensual de activo fijo, 1499.31 NOK, en la cuenta 6010."
+Output:
+{{"task_type": "monthly_closing", "confidence": 0.95, "fields": {{"month": "03", "year": "2026", "postings": [{{"description": "Periodificación", "amount": 11900.0, "from_account": "1700", "to_account": "7700"}}, {{"description": "Depreciación mensual de activo fijo", "amount": 1499.31, "from_account": "1029", "to_account": "6010"}}]}}}}
+
+### Example 26b — Monthly closing (Norwegian)
+Input: "Utfør månedsavslutning for mars 2026. Periodiser 8500 NOK fra konto 1700 til konto 7700. Bokfør avskrivning på 2100 NOK fra konto 1029 til konto 6010."
+Output:
+{{"task_type": "monthly_closing", "confidence": 0.97, "fields": {{"month": "03", "year": "2026", "postings": [{{"description": "Periodisering", "amount": 8500.0, "from_account": "1700", "to_account": "7700"}}, {{"description": "Avskrivning", "amount": 2100.0, "from_account": "1029", "to_account": "6010"}}]}}}}
 
 ## EMPLOYEE USER TYPE / ROLE
 When the prompt mentions administrator, admin, kontoadministrator → set user_type to "ADMINISTRATOR"
@@ -832,6 +846,10 @@ def _strip_hallucinated_fields(fields: dict, original_prompt: str) -> dict:
     for key in ("email", "phone", "website"):
         val = f.get(key)
         if val and isinstance(val, str) and val.lower() not in prompt_lower:
+            # Keep @example.com/org emails — these are generated placeholders,
+            # not hallucinated real addresses. The executor generates them anyway.
+            if key == "email" and ("@example.com" in val.lower() or "@example.org" in val.lower()):
+                continue
             logger.info("Stripping hallucinated %s: %s", key, val)
             f.pop(key)
     return f

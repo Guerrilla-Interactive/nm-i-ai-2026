@@ -516,8 +516,14 @@ class TripletexClient:
     # ------------------------------------------------------------------
 
     async def get_activities(self, params: dict | None = None) -> list:
-        resp = await self._request("GET", "/activity", params=params)
+        p = dict(params or {})
+        p.setdefault("fields", "*")
+        resp = await self._request("GET", "/activity", params=p)
         return self._extract_values(resp)
+
+    async def create_activity(self, data: dict) -> dict:
+        resp = await self._request("POST", "/activity", json=data)
+        return self._extract_value(resp)
 
     async def create_timesheet_entry(self, data: dict) -> dict:
         resp = await self._request("POST", "/timesheet/entry", json=data)
