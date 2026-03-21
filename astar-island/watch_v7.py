@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
-Watch for new rounds and auto-submit with V7 solver.
+Watch for new rounds and auto-submit with V7 full-grid Bayesian solver.
 Polls every 30 seconds for active rounds.
-
-V7 strategy:
-1. Fast submit (regression-only, 0 queries)
-2. Heavy regime detection (15-20 probes)
-3. Refinement with remaining budget
-4. Improved resubmit with Bayesian update
+Uses all 50 queries: 9 tiled viewports × 5 seeds for full-grid coverage
++ per-seed regime detection + Bayesian update of predictions.
 """
 import os, sys, json, time, warnings
 import numpy as np
@@ -17,18 +13,18 @@ sys.path.insert(0, os.path.dirname(__file__))
 from client import AstarClient
 from config import GRID_SIZE, NUM_CLASSES
 from predictor_v3 import PredictorV3
-from solver_v5 import predict_with_group_priors
+from solver_v5 import VP_TILES, VP_SIZE
 from solver_v7 import (
-    detect_regime_heavy, build_empirical_counts, adaptive_blend_alpha,
-    predict_ensemble, submit_predictions, refine_with_remaining,
-    FLOOR, N_REGIME_PROBES,
+    simulate_full_grid, detect_regime_from_sims,
+    predict_ensemble_with_coastal, bayesian_update,
+    FLOOR, BLEND_ALPHA, PRIOR_STRENGTH,
 )
 
 
 def submit_round(client, rnd):
-    """Submit predictions for a round using V7 multi-phase strategy."""
+    """Submit predictions for a round using V7 full-grid Bayesian solver."""
     round_id = rnd.id
-    print("\n=== V7 Round %d: %s ===" % (rnd.round_number, round_id[:8]))
+    print("\n=== Round %d: %s ===" % (rnd.round_number, round_id[:8]))
     print("  Seeds: %d, closes: %s" % (rnd.seeds_count, rnd.closes_at))
 
     budget = client.get_budget()
@@ -36,63 +32,77 @@ def submit_round(client, rnd):
     print("  Budget: %d/%d used, %d remaining" % (
         budget['queries_used'], budget['queries_max'], queries_left))
 
-    # Load models
+    # Load both model sets
     base = os.path.dirname(__file__)
     r2_priors = json.load(open(os.path.join(base, 'data/group_priors_r2.json')))
     r3_priors = json.load(open(os.path.join(base, 'data/group_priors_r3.json')))
     r2_predictor = PredictorV3(os.path.join(base, 'data/model_r2.json'))
     r3_predictor = PredictorV3(os.path.join(base, 'data/model_r3.json'))
 
-    # Phase 1: Fast submit
-    print("\n--- Phase 1: Fast Submit ---")
-    submit_predictions(client, round_id, rnd, r2_priors, r2_predictor,
-                       alpha=0.20, floor=FLOOR, label="[fast] ")
+    # Determine how many seeds we can fully simulate
+    queries_per_seed = len(VP_TILES)  # 9
+    max_seeds_simulated = min(rnd.seeds_count, queries_left // queries_per_seed)
 
-    if queries_left <= 0:
-        print("  No query budget. Done with fast submit only.")
-        return True
+    if max_seeds_simulated < rnd.seeds_count:
+        print("  WARNING: Only enough budget for %d/%d seeds with full simulation" % (
+            max_seeds_simulated, rnd.seeds_count))
 
-    # Phase 2: Heavy regime detection
-    n_probes = min(N_REGIME_PROBES, queries_left)
-    print("\n--- Phase 2: Heavy Regime Detection (%d probes) ---" % n_probes)
+    print("\n--- Step 1: Full-Grid Simulation (%d queries/seed x %d seeds = %d queries) ---" % (
+        queries_per_seed, max_seeds_simulated, queries_per_seed * max_seeds_simulated))
 
-    growth_score, sim_results, probes_done = detect_regime_heavy(
-        client, round_id, rnd.initial_states, n_probes=n_probes)
+    # Run simulations for each seed
+    seed_sim_results = {}
+    for seed_idx in range(max_seeds_simulated):
+        initial_grid = rnd.initial_states[seed_idx].grid
+        print("  Seed %d: simulating %d viewports..." % (seed_idx, queries_per_seed))
+        sim_results = simulate_full_grid(client, round_id, seed_idx)
+        seed_sim_results[seed_idx] = sim_results
 
-    if growth_score > 0.3:
-        print("  Regime: GROWTH (%.2f) -> R2 models" % growth_score)
-        priors, predictor = r2_priors, r2_predictor
-    elif growth_score < 0.1:
-        print("  Regime: COLLAPSE (%.2f) -> R3 models" % growth_score)
-        priors, predictor = r3_priors, r3_predictor
-    else:
-        print("  Regime: AMBIGUOUS (%.2f) -> R3 models" % growth_score)
-        priors, predictor = r3_priors, r3_predictor
+        growth = detect_regime_from_sims(initial_grid, sim_results)
+        print("    Got %d results, growth=%.2f" % (len(sim_results), growth))
 
-    alpha = adaptive_blend_alpha(probes_done, growth_score)
-    print("  Adaptive alpha: %.2f" % alpha)
+    print("\n--- Step 2: Generate Predictions with Bayesian Update ---")
+    print("  Blend: %.0f%% group + %.0f%% regression, floor=%.4f, prior_strength=%.1f" % (
+        BLEND_ALPHA * 100, (1 - BLEND_ALPHA) * 100, FLOOR, PRIOR_STRENGTH))
 
-    # Phase 3: Refinement
-    budget = client.get_budget()
-    queries_left = budget['queries_max'] - budget['queries_used']
-    print("\n--- Phase 3: Refinement (%d queries remaining) ---" % queries_left)
+    for seed_idx in range(rnd.seeds_count):
+        initial_grid = rnd.initial_states[seed_idx].grid
 
-    if queries_left > 0:
-        sim_results = refine_with_remaining(
-            client, round_id, rnd, sim_results, queries_left, rnd.initial_states)
+        # Per-seed regime detection
+        if seed_idx in seed_sim_results:
+            growth = detect_regime_from_sims(initial_grid, seed_sim_results[seed_idx])
+        else:
+            growth = 0.5
 
-    counts_by_seed, nobs_by_seed = build_empirical_counts(sim_results, rnd.initial_states)
-    total_obs = sum(n.sum() for n in nobs_by_seed.values())
-    print("  Total observations: %d" % int(total_obs))
+        # Select models based on per-seed regime
+        if growth > 0.3:
+            regime = "GROWTH"
+            priors, predictor = r2_priors, r2_predictor
+        elif growth < 0.1:
+            regime = "COLLAPSE"
+            priors, predictor = r3_priors, r3_predictor
+        else:
+            regime = "AMBIGUOUS"
+            priors, predictor = r3_priors, r3_predictor
 
-    # Phase 4: Improved resubmit
-    print("\n--- Phase 4: Improved Resubmit ---")
-    submit_predictions(client, round_id, rnd, priors, predictor,
-                       alpha=alpha, floor=FLOOR, label="[improved] ",
-                       counts_by_seed=counts_by_seed, nobs_by_seed=nobs_by_seed,
-                       prior_strength=2.0)
+        # Generate ensemble prior with coastal port enforcement
+        pred = predict_ensemble_with_coastal(initial_grid, priors, predictor,
+                                              floor=FLOOR, alpha=BLEND_ALPHA)
 
-    print("\nV7 Round %d done! (fast + improved)" % rnd.round_number)
+        # Bayesian update with simulation observations
+        if seed_idx in seed_sim_results and seed_sim_results[seed_idx]:
+            pred = bayesian_update(pred, seed_sim_results[seed_idx],
+                                   floor=FLOOR, prior_strength=PRIOR_STRENGTH)
+
+        # Validate
+        assert pred.shape == (GRID_SIZE, GRID_SIZE, NUM_CLASSES)
+        assert (pred >= FLOOR * 0.9).all(), "Min: %.8f" % pred.min()
+        assert np.allclose(pred.sum(axis=-1), 1.0, atol=0.02)
+
+        result = client.submit(round_id, seed_idx, pred.tolist())
+        print("  Seed %d [%s growth=%.2f]: %s" % (seed_idx, regime, growth, result))
+
+    print("\nRound %d submitted!" % rnd.round_number)
     return True
 
 
@@ -104,7 +114,7 @@ def main():
     client = AstarClient(token)
     submitted_rounds = set()
 
-    print("V7 Watching for new rounds... (Ctrl+C to stop)")
+    print("Watching for new rounds (V7 full-grid Bayesian)... (Ctrl+C to stop)")
 
     while True:
         try:

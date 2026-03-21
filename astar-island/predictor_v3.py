@@ -73,6 +73,12 @@ class PredictorV3:
             floor = self.floor
         pred = np.zeros((GRID_SIZE, GRID_SIZE, NUM_CLASSES))
 
+        # Pre-compute coastal map for enforcement
+        coastal_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
+                coastal_map[y, x] = is_coastal(initial_grid, y, x)
+
         for y in range(GRID_SIZE):
             for x in range(GRID_SIZE):
                 code = initial_grid[y][x]
@@ -87,6 +93,15 @@ class PredictorV3:
                     # Fallback: use terrain-type average from R2
                     pred[y, x] = self._fallback(code)
 
+                # Coastal enforcement: ports only appear on coastal cells
+                if code not in (5, 10) and not coastal_map[y, x]:
+                    port_mass = max(pred[y, x, 2], 0)
+                    pred[y, x, 2] = 0
+                    # Redistribute port mass to other non-zero classes
+                    other_sum = pred[y, x].sum()
+                    if other_sum > 0:
+                        pred[y, x] = pred[y, x] / other_sum
+
         pred = np.maximum(pred, floor)
         pred = pred / pred.sum(axis=-1, keepdims=True)
         return pred
@@ -97,8 +112,8 @@ class PredictorV3:
             0: [0.7276, 0.1899, 0.0153, 0.0188, 0.0483, 0.0],
             11: [0.7276, 0.1899, 0.0153, 0.0188, 0.0483, 0.0],
             1: [0.3832, 0.4098, 0.0051, 0.0341, 0.1678, 0.0],
-            2: [0.3841, 0.1214, 0.2877, 0.0345, 0.1723, 0.0],
-            3: [0.3841, 0.1214, 0.2877, 0.0345, 0.1723, 0.0],
+            2: [0.5121, 0.0724, 0.1705, 0.0211, 0.2239, 0.0000],
+            3: [0.4437, 0.1894, 0.0028, 0.1696, 0.1936, 0.0010],
             4: [0.1095, 0.1965, 0.0127, 0.0186, 0.6627, 0.0],
         }
         return defaults.get(code, [1/6]*6)
