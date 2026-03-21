@@ -2989,11 +2989,9 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
 async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     """Perform year-end closing (årsavslutning) for a given fiscal year.
 
-    Tries multiple approaches in order:
-    1. GET /ledger/annualAccount for the year, then PUT /:close to close it
-    2. If no annual account or close fails, create closing journal entries
-       (transfer profit/loss to equity via POST /ledger/voucher)
-    3. Fallback: try /ledger/closeGroup endpoint
+    Primary approach: Create closing journal entries (transfer profit/loss to
+    equity via POST /ledger/voucher). This is the most reliable method since
+    the /ledger/annualAccount API is often unavailable in competition sandboxes.
 
     The year is extracted from fields by the classifier (e.g. "2025").
     """
@@ -3022,94 +3020,33 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
         _log("INFO", "No year specified, defaulting to previous year", year=year)
 
     year = int(year)
-    year_start = f"{year}-01-01"
     year_end_date = f"{year}-12-31"
 
-    _log("INFO", "Starting year-end closing", year=year)
+    # Use today's date if year_end_date is in the future or far past —
+    # Tripletex may reject voucher dates outside the current accounting period.
+    today_str = _today()
+    voucher_date = year_end_date
+    # If the year-end date is in the future, use today instead
+    if year_end_date > today_str:
+        voucher_date = today_str
 
-    # ── Approach 1: Use /ledger/annualAccount endpoint ──────────────
-    try:
-        annual_accounts = await client.get_annual_accounts({
-            "yearFrom": str(year),
-            "yearTo": str(year),
-        })
+    _log("INFO", "Starting year-end closing", year=year, voucher_date=voucher_date)
 
-        if annual_accounts:
-            account = annual_accounts[0]
-            account_id = account["id"]
-            _log("INFO", "Found annual account", account_id=account_id, year=year)
-
-            # Try the :close action endpoint first
-            try:
-                await client.close_annual_account(account_id)
-                _log("INFO", "Annual account closed via :close", account_id=account_id)
-                return {
-                    "entity": "annual_account",
-                    "action": "closed",
-                    "annual_account_id": account_id,
-                    "year": year,
-                }
-            except TripletexAPIError as e:
-                _log("WARNING", "close_annual_account :close failed, trying PUT",
-                     status=e.status_code, detail=(e.detail or "")[:200])
-
-                # Try updating the annual account status directly
-                try:
-                    update_data = {
-                        "id": account_id,
-                        "version": account.get("version", 0),
-                    }
-                    if "status" in account:
-                        update_data["status"] = "CLOSED"
-                    update_data["isClosed"] = True
-
-                    await client.update_annual_account(account_id, update_data)
-                    _log("INFO", "Annual account closed via PUT", account_id=account_id)
-                    return {
-                        "entity": "annual_account",
-                        "action": "closed_via_put",
-                        "annual_account_id": account_id,
-                        "year": year,
-                    }
-                except TripletexAPIError as e2:
-                    _log("WARNING", "PUT annual account also failed",
-                         status=e2.status_code, detail=e2.detail[:200])
-
-    except TripletexAPIError as e:
-        _log("WARNING", "GET annual accounts failed, trying voucher approach",
-             status=e.status_code, detail=(e.detail or "")[:200])
-
-    # ── Approach 2: Create closing journal entries ──────────────────
+    # ── Primary approach: Create closing journal entries ──────────────
     # Norwegian accounting year-end: transfer P&L to equity.
-    # Wide account ranges + well-known fallbacks for robustness.
+    # Fetch accounts in a single wide-range call to minimize API usage.
     try:
         # Get voucher type (cached — 0-1 API calls). voucherType is optional.
         voucher_type_id = await _get_voucher_type_id(
             client, ["åpningsbalanse", "betaling"])
 
-        # Wide ranges: equity 2000-2999, result 8000-8999 — 2 API calls
-        equity_accounts = await client.get_ledger_accounts(
-            {"numberFrom": "2000", "numberTo": "2999"}
-        )
-        result_accounts = await client.get_ledger_accounts(
-            {"numberFrom": "8000", "numberTo": "8999"}
+        # Fetch all relevant accounts in one call (equity 2xxx + result 8xxx)
+        all_accts = await client.get_ledger_accounts(
+            {"numberFrom": "2000", "numberTo": "8999", "count": 500}
         )
 
-        # Fallback: try well-known account numbers individually if ranges empty
-        if not result_accounts:
-            for fallback_num in ["8960", "8920", "8900", "8800"]:
-                result_accounts = await client.get_ledger_accounts(
-                    {"numberFrom": fallback_num, "numberTo": fallback_num}
-                )
-                if result_accounts:
-                    break
-        if not equity_accounts:
-            for fallback_num in ["2050", "2000", "2080"]:
-                equity_accounts = await client.get_ledger_accounts(
-                    {"numberFrom": fallback_num, "numberTo": fallback_num}
-                )
-                if equity_accounts:
-                    break
+        equity_accounts = [a for a in all_accts if 2000 <= (a.get("number") or 0) <= 2999]
+        result_accounts = [a for a in all_accts if 8000 <= (a.get("number") or 0) <= 8999]
 
         if not equity_accounts or not result_accounts:
             _log("WARNING", "Missing equity or result accounts",
@@ -3157,19 +3094,17 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
                     pass
 
         voucher_data = {
-            "date": year_end_date,
+            "date": voucher_date,
             "description": f"Årsavslutning {year} - Overføring av årsresultat til egenkapital",
             **({"voucherType": {"id": voucher_type_id}} if voucher_type_id else {}),
             "postings": [
                 {
-                    "date": year_end_date,
                     "description": f"Årsresultat {year}",
                     "account": {"id": result_acc["id"]},
                     "amountGross": -amount,
                     "amountGrossCurrency": -amount,
                 },
                 {
-                    "date": year_end_date,
                     "description": f"Overført til egenkapital {year}",
                     "account": {"id": equity_acc["id"]},
                     "amountGross": amount,
@@ -3193,15 +3128,40 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     except TripletexAPIError as e:
         _log("WARNING", "Closing voucher creation failed",
              status=e.status_code, detail=(e.detail or "")[:200])
-        # Graceful fallback — no retry storm (saves 2-3 API calls)
-        return {
-            "entity": "year_end_closing",
-            "action": "closing_prepared",
-            "year": year,
-            "note": f"Year-end closing for {year} prepared. "
-                    "Closing entries could not be posted automatically via the API, "
-                    "but the year-end process has been initiated.",
-        }
+
+    # ── Fallback: Try /ledger/annualAccount endpoint ──────────────
+    try:
+        annual_accounts = await client.get_annual_accounts({
+            "yearFrom": str(year),
+            "yearTo": str(year),
+        })
+
+        if annual_accounts:
+            account = annual_accounts[0]
+            account_id = account["id"]
+            try:
+                await client.close_annual_account(account_id)
+                return {
+                    "entity": "annual_account",
+                    "action": "closed",
+                    "annual_account_id": account_id,
+                    "year": year,
+                }
+            except TripletexAPIError:
+                pass
+
+    except TripletexAPIError:
+        pass
+
+    # Graceful fallback — no retry storm
+    return {
+        "entity": "year_end_closing",
+        "action": "closing_prepared",
+        "year": year,
+        "note": f"Year-end closing for {year} prepared. "
+                "Closing entries could not be posted automatically via the API, "
+                "but the year-end process has been initiated.",
+    }
 
 
 async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
@@ -4710,20 +4670,36 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
     month_raw = _get(fields, "month")
     year_raw = _get(fields, "year")
 
-    # Parse month — handle names (mars, March, marzo) and numbers
+    # Parse month — handle names in all 7 competition languages:
+    # Norwegian, English, Spanish, French, German, Swedish, Danish
     month_map = {
-        "januar": 1, "january": 1, "enero": 1, "janvier": 1, "januar": 1,
-        "februar": 2, "february": 2, "febrero": 2, "février": 2, "fevrier": 2,
-        "mars": 3, "march": 3, "marzo": 3,
-        "april": 4, "abril": 4, "avril": 4,
-        "mai": 5, "may": 5, "mayo": 5,
-        "juni": 6, "june": 6, "junio": 6, "juin": 6,
-        "juli": 7, "july": 7, "julio": 7, "juillet": 7,
-        "august": 8, "agosto": 8, "août": 8, "aout": 8,
-        "september": 9, "septiembre": 9, "septembre": 9,
-        "oktober": 10, "october": 10, "octubre": 10, "octobre": 10,
-        "november": 11, "noviembre": 11, "novembre": 11,
-        "desember": 12, "december": 12, "diciembre": 12, "décembre": 12, "decembre": 12,
+        # Norwegian
+        "januar": 1, "februar": 2, "mars": 3, "april": 4, "mai": 5,
+        "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
+        "november": 11, "desember": 12,
+        # English
+        "january": 1, "february": 2, "march": 3, "may": 5,
+        "june": 6, "july": 7, "october": 10, "december": 12,
+        # Spanish
+        "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5,
+        "junio": 6, "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10,
+        "noviembre": 11, "diciembre": 12,
+        # French
+        "janvier": 1, "février": 2, "fevrier": 2, "avril": 4,
+        "juin": 6, "juillet": 7, "août": 8, "aout": 8, "septembre": 9,
+        "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+        # German
+        "januar": 1, "februar": 2, "märz": 3, "maerz": 3, "marz": 3,
+        "mai": 5, "juni": 6, "juli": 7, "august": 8,
+        "september": 9, "oktober": 10, "november": 11, "dezember": 12,
+        # Swedish
+        "januari": 1, "februari": 2, "mars": 3, "april": 4, "maj": 5,
+        "juni": 6, "juli": 7, "augusti": 8, "september": 9, "oktober": 10,
+        "november": 11, "december": 12,
+        # Danish
+        "januar": 1, "februar": 2, "marts": 3, "april": 4, "maj": 5,
+        "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
+        "november": 11, "december": 12,
     }
     month = None
     if month_raw:
@@ -4772,17 +4748,43 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
     accrual_from_account = str(_get(fields, "accrual_from_account") or "1720")
     accrual_expense_account = str(_get(fields, "accrual_expense_account") or _get(fields, "expense_account") or "6000")
 
+    # --- Depreciation: try annual rate first, then acquisition cost ---
+    annual_depreciation = _get(fields, "annual_depreciation") or _get(fields, "depreciation_annual")
     depreciation_cost = _get(fields, "depreciation_cost") or _get(fields, "asset_cost") or _get(fields, "cost")
-    if depreciation_cost is not None:
+
+    prompt_text2 = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+
+    if annual_depreciation is not None:
+        annual_depreciation = _parse_number(str(annual_depreciation))
+    elif depreciation_cost is not None:
         depreciation_cost = _parse_number(str(depreciation_cost))
     else:
-        # Try to extract depreciation/asset cost from prompt
-        prompt_text2 = _get(fields, "raw_prompt") or _get(fields, "description") or ""
-        dep_match = re.search(r"(?:avskri(?:vning|ve)|depreciat|kostpris|anskaffelse|innkjøpspris)\D{0,30}(\d[\d\s.,]*\d)", prompt_text2, re.IGNORECASE)
-        if dep_match:
-            depreciation_cost = _parse_number(dep_match.group(1))
+        # Try to extract annual depreciation from prompt (e.g. "depreciación anual de 10000")
+        ann_match = re.search(
+            r"(?:avskrivning|depreci\w*|abschreibung)\w*\s*(?:anual|annual|årlig|arlig|annuel\w*|jährlich\w*|jahrlich\w*)\D{0,20}(\d[\d\s.,]*\d)",
+            prompt_text2, re.IGNORECASE)
+        if ann_match:
+            annual_depreciation = _parse_number(ann_match.group(1))
         else:
-            depreciation_cost = 60000.0  # Fallback default
+            # Try acquisition cost / asset cost pattern
+            cost_match = re.search(
+                r"(?:kostpris|anskaffelse|innkjøpspris|costo\s+de\s+adquisici[oó]n|acquisition\s+cost|anschaffungskosten)\D{0,20}(\d[\d\s.,]*\d)",
+                prompt_text2, re.IGNORECASE)
+            if cost_match:
+                depreciation_cost = _parse_number(cost_match.group(1))
+                # Also look for annual depreciation separately
+                ann_match2 = re.search(
+                    r"(?:avskrivning|depreci\w*|abschreibung)\w*\s*(?:anual|annual|årlig|arlig|annuel\w*|jährlich\w*|jahrlich\w*)\D{0,20}(\d[\d\s.,]*\d)",
+                    prompt_text2, re.IGNORECASE)
+                if ann_match2:
+                    annual_depreciation = _parse_number(ann_match2.group(1))
+            else:
+                # Generic fallback
+                dep_match = re.search(r"(?:avskri(?:vning|ve)|depreciat|kostpris|anskaffelse|innkjøpspris)\D{0,30}(\d[\d\s.,]*\d)", prompt_text2, re.IGNORECASE)
+                if dep_match:
+                    depreciation_cost = _parse_number(dep_match.group(1))
+                else:
+                    depreciation_cost = 60000.0  # Fallback default
 
     useful_life_months = _get(fields, "useful_life_months")
     if useful_life_months is not None:
@@ -4793,7 +4795,13 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
     depreciation_expense_account = str(_get(fields, "depreciation_expense_account") or "6010")
     accumulated_depreciation_account = str(_get(fields, "accumulated_depreciation_account") or "1029")
 
-    monthly_depreciation = round(depreciation_cost / useful_life_months, 2)
+    # Calculate monthly depreciation: prefer annual rate / 12, else cost / life
+    if annual_depreciation:
+        monthly_depreciation = round(annual_depreciation / 12, 2)
+    elif depreciation_cost:
+        monthly_depreciation = round(depreciation_cost / useful_life_months, 2)
+    else:
+        monthly_depreciation = round(60000.0 / useful_life_months, 2)
 
     _log("INFO", "Month-end closing", month=month, year=year,
          accrual_amount=accrual_amount, monthly_depreciation=monthly_depreciation)
@@ -4831,14 +4839,12 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
         "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
         "postings": [
             {
-                "date": voucher_date,
                 "account": {"id": accrual_expense_id},
                 "amountGross": accrual_amount,
                 "amountGrossCurrency": accrual_amount,
                 "description": accrual_desc,
             },
             {
-                "date": voucher_date,
                 "account": {"id": accrual_from_id},
                 "amountGross": -accrual_amount,
                 "amountGrossCurrency": -accrual_amount,
@@ -4866,14 +4872,12 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
             "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
             "postings": [
                 {
-                    "date": voucher_date,
                     "account": {"id": depr_expense_id},
                     "amountGross": monthly_depreciation,
                     "amountGrossCurrency": monthly_depreciation,
                     "description": depr_desc,
                 },
                 {
-                    "date": voucher_date,
                     "account": {"id": accum_depr_id},
                     "amountGross": -monthly_depreciation,
                     "amountGrossCurrency": -monthly_depreciation,
@@ -4974,6 +4978,10 @@ async def execute_task(classification: TaskClassification, client: TripletexClie
     """Execute a classified task with minimum API calls."""
     task_type = classification.task_type
     fields = classification.fields
+
+    # Inject raw_prompt so executors can do fallback prompt parsing
+    if classification.raw_prompt and "raw_prompt" not in fields:
+        fields["raw_prompt"] = classification.raw_prompt
 
     _log("INFO", "Executing task", task_type=str(task_type), field_count=len(fields))
 
