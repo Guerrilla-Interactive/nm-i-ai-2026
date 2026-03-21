@@ -512,9 +512,11 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                             TaskType.UPDATE_SUPPLIER, TaskType.CREATE_SUPPLIER)
     if "name" not in fields and task_type in _SUPPLIER_TASK_TYPES:
         m = re.search(
-            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor)\s+"
-            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
-            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par)\s|$)",
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor|"
+            r"fornitore|dostawc[aę])\s+"
+            r"(\S+(?:\s+(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL))?)"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par|"
+            r"fra|im|nel|no|em|i)\s|$)",
             text, re.I,
         )
         if m:
@@ -523,9 +525,11 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
     # --- Department name extraction (for delete/update department) ---
     if "name" not in fields and task_type in (TaskType.DELETE_DEPARTMENT, TaskType.UPDATE_DEPARTMENT):
         m = re.search(
-            r"(?:avdeling(?:a|en)?|department|département|departamento|abteilung)\s+"
-            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:og\s+[A-ZÆØÅ\u00C0-\u024F][\w]*)?)"
-            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par)\s|$)",
+            r"(?:avdeling(?:a|en)?|department|département|departamento|abteilung|"
+            r"dipartimento|departement)\s+"
+            r"(\S+(?:\s+(?:og|and|och|und|et|e|y)\s+\S+)*)"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par|"
+            r"fra|im|nel|no|em|i)\s|$)",
             text, re.I,
         )
         if m:
@@ -554,23 +558,24 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         )
         if m:
             fields["name"] = m.group(1).strip()
-        # Fallback: unquoted name starting with uppercase
+        # Fallback: unquoted name (capture word(s) after entity keyword, stop at known delimiters)
         if "name" not in fields:
             m = re.search(
-            r"(?i:avdeling\w*|department\w*|département\w*|departamento\w*|abteilung\w*|"
-            r"produkt\w*|product\w*|produit\w*|producto\w*|produto\w*|"
-            r"prosjekt\w*|project\w*|projet\w*|proyecto\w*|projeto\w*|"
-            r"kund(?:e|en)\w*|customer\w*|client\w*|cliente\w*)\s+"
-            r"(?i:med\s+(?:navn\s+)?|named?\s+|called\s+|kalt\s+|appelée?\s+|nommée?\s+|"
-            r"namens\s+|genannt\s+|chamad[oa]\s+|llamad[oa]\s+)?"
-            r"([A-ZÆØÅ\u00C0-\u024F][\w&-]+(?:\s+[A-ZÆØÅ\u00C0-\u024F&][\w&-]+)*)"
-            r"(?:\s*[,.]|\s+(?i:og|and|avec|mit|con|com|med|with|und|et|til|at|for|zu|à|"
-            r"nummer|number|numéro|número|avdelingsnummer|abteilungsnummer|"
-            r"department.?number|e-post|email|telefon|phone|pris|price|start)\b|$)",
-            text,
-        )
-        if m:
-            fields["name"] = m.group(1).strip().rstrip(".,")
+                r"(?:avdeling\w*|department\w*|département\w*|departamento\w*|abteilung\w*|"
+                r"produkt\w*|product\w*|produit\w*|producto\w*|produto\w*|"
+                r"prosjekt\w*|project\w*|projet\w*|proyecto\w*|projeto\w*|"
+                r"kund(?:e|en)\w*|customer\w*|client\w*|cliente\w*)\s+"
+                r"(?:med\s+(?:namn\s+|navn\s+)?|named?\s+|called\s+|kalt\s+|appelée?\s+|nommée?\s+|"
+                r"namens\s+|genannt\s+|chamad[oa]\s+|llamad[oa]\s+)?"
+                r"([A-Za-zÆØÅæøå\u00C0-\u024F][\w&-]+(?:\s+[A-Za-zÆØÅæøå\u00C0-\u024F&][\w&-]+)*)"
+                r"(?:\s*[,.]|\s+(?:og|and|avec|mit|con|com|med|with|und|et|til|at|for|zu|à|"
+                r"nummer|number|numéro|número|avdelingsnummer|abteilungsnummer|"
+                r"department.?number|e-post|email|telefon|phone|pris|price|prix|Preis|precio|preço|"
+                r"ny|new|neu|nouveau|nuevo|novo|start|fra|from|von|de|du|par|por|aus)\b|$)",
+                text, re.I,
+            )
+            if m:
+                fields["name"] = m.group(1).strip().rstrip(".,")
 
     # --- Email ---
     m = re.search(r"[\w.+-]+@[\w.-]+\.\w+", text)
@@ -637,7 +642,14 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 fields["number"] = m.group(1)
 
     # --- Organization number ---
-    m = re.search(r"(?:org\.?(?:anisasjonsnummer|\.?\s*nr\.?)?|organization\s*number)\s*:?\s*([\d\-\s]{9,})", text, re.I)
+    m = re.search(
+        r"(?:org\.?(?:anisasjonsnummer|anisationsnummer|\.?\s*nr\.?)?|organization\s*number|"
+        r"número\s*(?:de\s*)?organización|numéro\s*(?:d['\u2019]\s*)?organisation|"
+        r"Organisationsnummer|organisasjonsnummer|organisationsnummer|"
+        r"numero\s*(?:di\s*)?organizzazione|número\s*(?:de\s*)?organiza[çc][ãa]o)"
+        r"\s*:?\s*([\d\-\s]{9,})",
+        text, re.I,
+    )
     if m:
         fields["organization_number"] = m.group(1).replace("-", "").replace(" ", "").strip()
 
