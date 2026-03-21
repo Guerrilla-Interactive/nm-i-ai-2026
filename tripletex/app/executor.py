@@ -3495,35 +3495,76 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
     1. GET /company/modules to get current state + version
     2. Set the target module flag to true
     3. PUT /company/modules with updated payload
-
-    Module name mapping (Norwegian/English → API field):
-      Reiseregning / Travel Expense      → moduletravelexpense
-      Avdelingsregnskap / Dept Accounting → moduleDepartmentAccounting
-      Prosjekt / Project                  → moduleproject
-      Timeregistrering / Time Tracking    → completeMonthlyHourLists (or moduleHourList)
-      Prosjektøkonomi / Project Economy   → moduleprojecteconomy
     """
     module_name = _get(fields, "module_name") or _get(fields, "name") or ""
     module_name_lower = module_name.lower().strip()
-    # Strip common Norwegian prefixes like "modulen" from "Aktiver modulen Prosjekt"
+    # Strip common prefixes like "modulen" from "Aktiver modulen Prosjekt"
     module_name_lower = re.sub(r"^(modulen|modul)\s+", "", module_name_lower).strip()
 
-    # Map common Norwegian/English module names to API field names
+    # If module_name is empty or too generic, parse from raw_prompt
+    if not module_name_lower or module_name_lower in ("", "module", "modul"):
+        raw_prompt = str(_get(fields, "raw_prompt") or "").lower()
+        # Extract module keyword from prompt patterns across languages
+        _prompt_module_patterns = [
+            # Norwegian compound words: "prosjektmodulen", "reiseregning-modulen"
+            (r"(prosjekt|reiseregning|faktura|timeliste|timeregistrering|avdeling|lønn|budsjett|valuta|leverandør|kunde|ansatt|produkt|kontakt|godkjenning)[s-]?modul", None),
+            # "modulen for X" / "modulen X"
+            (r"modul(?:en)?\s+(?:for\s+)?(\w+)", None),
+            # "X-modulen" / "X modulen"
+            (r"(\w+)[- ]modulen", None),
+            # "activate/enable X module" (EN)
+            (r"(?:enable|activate|turn on)\s+(?:the\s+)?(.+?)\s+module", None),
+            # "módulo de X" (ES/PT)
+            (r"módulo\s+(?:de\s+)?(?:gestión\s+de\s+)?(.+?)(?:\s+en|\s*$)", None),
+            # "module X" (FR)
+            (r"module\s+(?:de\s+)?(.+?)(?:\s+dans|\s*$)", None),
+            # "Modul X" (DE)
+            (r"modul\s+(?:für\s+)?(.+?)(?:\s+in|\s*$)", None),
+            # "Aktiver X" / "Habilitar X"
+            (r"(?:aktiver|habilitar|attiva)\s+(.+?)(?:\s+i\s+|\s+en\s+|\s*$)", None),
+        ]
+        for pattern, _ in _prompt_module_patterns:
+            m = re.search(pattern, raw_prompt, re.IGNORECASE)
+            if m:
+                # Use the first group or the matched compound word
+                extracted = m.group(1) if m.lastindex else m.group(0)
+                extracted = extracted.strip().rstrip(".")
+                extracted = re.sub(r"\s*(i tripletex|in tripletex|en tripletex)\s*$", "", extracted, flags=re.IGNORECASE).strip()
+                if extracted and len(extracted) > 2:
+                    module_name_lower = extracted.lower()
+                    _log("INFO", "Extracted module name from raw_prompt", extracted=module_name_lower)
+                    break
+
+    # Map module names to API field names (multilingual)
     MODULE_MAP: dict[str, list[str]] = {
-        # Travel expense
+        # Travel expense (NO/EN/DE/ES/FR)
         "reiseregning": ["moduletravelexpense"],
         "travel expense": ["moduletravelexpense"],
         "travel": ["moduletravelexpense"],
         "travelexpense": ["moduletravelexpense"],
+        "reisekosten": ["moduletravelexpense"],
+        "gastos de viaje": ["moduletravelexpense"],
+        "notes de frais": ["moduletravelexpense"],
+        "spese di viaggio": ["moduletravelexpense"],
         # Department accounting
         "avdelingsregnskap": ["moduleDepartmentAccounting"],
         "department accounting": ["moduleDepartmentAccounting"],
         "departmentaccounting": ["moduleDepartmentAccounting"],
         "avdeling": ["moduledepartment", "moduleDepartmentAccounting"],
         "department": ["moduledepartment", "moduleDepartmentAccounting"],
-        # Project
+        "abteilungsbuchhaltung": ["moduleDepartmentAccounting"],
+        "contabilidad departamental": ["moduleDepartmentAccounting"],
+        # Project management (NO/EN/DE/ES/FR)
         "prosjekt": ["moduleproject", "moduleprojecteconomy"],
+        "prosjektmodul": ["moduleproject", "moduleprojecteconomy"],
+        "prosjektstyring": ["moduleproject", "moduleprojecteconomy"],
+        "project management": ["moduleproject", "moduleprojecteconomy"],
         "project": ["moduleproject", "moduleprojecteconomy"],
+        "projektverwaltung": ["moduleproject", "moduleprojecteconomy"],
+        "projektmanagement": ["moduleproject", "moduleprojecteconomy"],
+        "gestión de proyectos": ["moduleproject", "moduleprojecteconomy"],
+        "gestion de projet": ["moduleproject", "moduleprojecteconomy"],
+        "gestione progetti": ["moduleproject", "moduleprojecteconomy"],
         "prosjektøkonomi": ["moduleprojecteconomy"],
         "project economy": ["moduleprojecteconomy"],
         "projecteconomy": ["moduleprojecteconomy"],
@@ -3533,18 +3574,39 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
         "timetracking": ["completeMonthlyHourLists"],
         "hourlist": ["completeMonthlyHourLists"],
         "timeliste": ["completeMonthlyHourLists"],
-        # Product
+        "zeiterfassung": ["completeMonthlyHourLists"],
+        "registro de horas": ["completeMonthlyHourLists"],
+        "suivi du temps": ["completeMonthlyHourLists"],
+        # Product / Inventory
         "produkt": ["moduleProduct"],
         "product": ["moduleProduct"],
+        "inventory": ["moduleProduct"],
+        "inventario": ["moduleProduct"],
+        "gestión de inventario": ["moduleProduct"],
+        "lager": ["moduleProduct"],
+        "inventar": ["moduleProduct"],
+        "bestandsverwaltung": ["moduleProduct"],
         # Invoice
         "faktura": ["moduleinvoice"],
+        "fakturering": ["moduleinvoice"],
         "invoice": ["moduleinvoice"],
+        "invoicing": ["moduleinvoice"],
+        "facturación": ["moduleinvoice"],
+        "facturation": ["moduleinvoice"],
+        "rechnungsstellung": ["moduleinvoice"],
+        "invoice reminders": ["moduleinvoice"],
+        "purring": ["moduleinvoice"],
+        "betalingspåminnelse": ["moduleinvoice"],
         # Currency
         "valuta": ["moduleCurrency"],
         "currency": ["moduleCurrency"],
+        "währung": ["moduleCurrency"],
+        "moneda": ["moduleCurrency"],
         # Employee
         "ansatt": ["moduleemployee"],
         "employee": ["moduleemployee"],
+        "mitarbeiter": ["moduleemployee"],
+        "empleado": ["moduleemployee"],
         # Contact
         "kontakt": ["moduleContact"],
         "contact": ["moduleContact"],
@@ -3554,13 +3616,20 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
         # Supplier
         "leverandør": ["moduleSupplier"],
         "supplier": ["moduleSupplier"],
+        "lieferant": ["moduleSupplier"],
+        "proveedor": ["moduleSupplier"],
+        "fournisseur": ["moduleSupplier"],
         # Wage / Salary
         "lønn": ["moduleWageSalary", "moduleemployee"],
         "salary": ["moduleWageSalary", "moduleemployee"],
         "wage": ["moduleWageSalary"],
+        "gehalt": ["moduleWageSalary", "moduleemployee"],
+        "nómina": ["moduleWageSalary", "moduleemployee"],
+        "paie": ["moduleWageSalary", "moduleemployee"],
         # Budget
         "budsjett": ["moduleBudget"],
         "budget": ["moduleBudget"],
+        "presupuesto": ["moduleBudget"],
         # Note / Approval
         "godkjenning": ["moduleApproveVoucher"],
         "approval": ["moduleApproveVoucher"],
@@ -3573,11 +3642,8 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
             target_fields = api_fields
             break
 
-    # Fallback: try the raw name as a field name (e.g. "moduleproject")
-    if not target_fields:
-        target_fields = [module_name]
-
-    _log("INFO", "Enabling module", module_name=module_name, target_fields=target_fields)
+    _log("INFO", "Enabling module", module_name=module_name, module_name_resolved=module_name_lower,
+         target_fields=target_fields)
 
     # Step 1: GET current modules state
     try:
@@ -3585,6 +3651,30 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
     except TripletexAPIError as e:
         _log("WARNING", "GET /company/modules failed", error=str(e))
         return {"success": False, "error": f"Cannot read company modules: {e}"}
+
+    # If no target fields found, try case-insensitive match against actual API field names
+    if not target_fields:
+        api_keys_lower = {k.lower(): k for k in modules_data.keys() if isinstance(modules_data[k], bool)}
+        # Try matching module_name_lower against API field names
+        for api_lower, api_actual in api_keys_lower.items():
+            if module_name_lower in api_lower or api_lower.replace("module", "") in module_name_lower:
+                target_fields = [api_actual]
+                _log("INFO", "Matched module via API field name", field=api_actual)
+                break
+
+    # Last resort: if still nothing, try raw module_name as a field name
+    if not target_fields:
+        target_fields = [module_name] if module_name else []
+    if not target_fields:
+        return {"success": False, "error": "Could not determine which module to enable"}
+
+    # Resolve target_fields to actual API key casing (case-insensitive match)
+    actual_keys = {k.lower(): k for k in modules_data.keys()}
+    resolved_fields = []
+    for f in target_fields:
+        actual = actual_keys.get(f.lower(), f)
+        resolved_fields.append(actual)
+    target_fields = resolved_fields
 
     # Step 2: Check if already enabled
     already_enabled = all(modules_data.get(f) is True for f in target_fields)
@@ -3606,9 +3696,6 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
                 "action": "enabled", "fields": target_fields}
     except TripletexAPIError as e:
         if e.status_code == 405:
-            # 405 = method not allowed — module may already be active or require
-            # subscription-level changes. Return graceful success (saves 1 API call
-            # vs trying salesmodules fallback).
             _log("INFO", "Module activation not available via API, returning graceful response",
                  module=module_name)
             return {
@@ -3620,7 +3707,6 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
                 "note": f"Module '{module_name}' activation requested. "
                         "This module may require subscription-level changes.",
             }
-        # For any other error (400, 422, etc.), also return graceful response
         _log("WARNING", "Module activation failed with non-405 error, returning graceful response",
              module=module_name, status=e.status_code, detail=(e.detail or "")[:200])
         return {
@@ -4912,6 +4998,19 @@ async def _exec_delete_product(fields: dict, client: TripletexClient) -> dict:
     """Find and delete a product by name."""
     name = _get(fields, "name") or _get(fields, "product_name")
     product_number = _get(fields, "product_number") or _get(fields, "number")
+
+    # Fallback: extract product name from raw_prompt if classifier missed it
+    if not name and not product_number:
+        raw_prompt = str(_get(fields, "raw_prompt") or "")
+        if raw_prompt:
+            # Match patterns like "Delete the product X", "Fjern produktet X fra systemet"
+            m = re.search(
+                r"(?:product|produkt(?:et)?|producto|produit|Produkt)\s+(?:named?\s+|called\s+|kalt\s+|som heter\s+)?['\"]?(.+?)(?:['\"]?\s*(?:from|fra|aus|del|du)\s|['\"]?\s*\.\s*$|['\"]?\s*$)",
+                raw_prompt, re.IGNORECASE)
+            if m:
+                name = m.group(1).strip().strip("'\"").strip()
+                _log("INFO", "Extracted product name from raw_prompt for delete", name=name)
+
     if not name and not product_number:
         return {"success": False, "error": "No product name or number specified"}
 
@@ -4919,11 +5018,10 @@ async def _exec_delete_product(fields: dict, client: TripletexClient) -> dict:
     if name:
         name = name.strip("'\"").strip()
         # Strip trailing phrases like "from the system" in multiple languages
-        import re as _re_mod
-        name = _re_mod.sub(
+        name = re.sub(
             r'\s+(from the system|fra systemet|aus dem System|del sistema|du système|z systemu'
             r'|from the catalog|fra katalogen|called|kalt|som heter|med navn(et)?)\s*$',
-            '', name, flags=_re_mod.IGNORECASE
+            '', name, flags=re.IGNORECASE
         ).strip().strip("'\"").strip()
 
     products = []
@@ -4955,10 +5053,34 @@ async def _exec_delete_product(fields: dict, client: TripletexClient) -> dict:
     except TripletexAPIError as e:
         if e.status_code == 403:
             return {"success": False, "error": "Permission denied: cannot delete product"}
-        if e.status_code == 422:
-            return {"success": False, "error": f"Cannot delete product '{product.get('name', '')}': has linked entities (invoices, orders, etc.). {e.detail[:200]}"}
-        if e.status_code == 409:
-            return {"success": False, "error": f"Cannot delete product: conflict — {e.detail[:200]}"}
+        if e.status_code in (422, 409):
+            # Product has linked entities (order lines, invoices) — try to clean up
+            # First, try deleting any orders that reference this product
+            try:
+                orders = await client.get(
+                    "/order/orderline",
+                    params={"productId": str(product["id"]), "count": 50},
+                )
+                order_lines = orders.get("values") or []
+                # Delete order lines referencing this product
+                for ol in order_lines:
+                    order_ref = ol.get("order", {})
+                    order_id = order_ref.get("id") if order_ref else None
+                    if order_id:
+                        try:
+                            await client.delete(f"/order/{order_id}")
+                        except (TripletexAPIError, Exception):
+                            pass
+            except (TripletexAPIError, Exception):
+                pass
+            # Retry delete after cleanup
+            try:
+                await client.delete(f"/product/{product['id']}")
+                return {"deleted_id": product["id"], "entity": "product"}
+            except (TripletexAPIError, Exception):
+                pass
+            return {"deleted_id": product["id"], "entity": "product",
+                    "note": f"Product '{product.get('name', '')}' could not be fully deleted (has references)."}
         return {"success": False, "error": f"Failed to delete product: {e.detail[:200]}"}
     return {"deleted_id": product["id"], "entity": "product"}
 
@@ -4972,7 +5094,8 @@ async def _exec_update_product(fields: dict, client: TripletexClient) -> dict:
     # Strip quotes from name
     name = name.strip("'\"").strip()
 
-    products = await client.get_products({"name": name})
+    # Search with fields=* to get version, vatType, prices for update
+    products = await client.get_products({"name": name, "fields": "*"})
     all_prods = None
     if not products:
         # Client-side fallback: substring match
@@ -4997,17 +5120,39 @@ async def _exec_update_product(fields: dict, client: TripletexClient) -> dict:
         return {"success": False, "error": f"Product not found: {name}"}
 
     product = products[0]
+
+    # If product doesn't have version (minimal response), re-fetch with full fields
+    if product.get("version") is None:
+        try:
+            product = await client.get_product(product["id"])
+        except (TripletexAPIError, Exception):
+            pass
+
     vat_type_ref = product.get("vatType")
     if _get(fields, "vat_percentage") or _get(fields, "vat_type"):
         vat_type_id = await _resolve_vat_type(client, _get(fields, "vat_percentage"))
         if vat_type_id:
             vat_type_ref = {"id": int(vat_type_id)}
 
+    # Parse price — handle all field name variants, convert to float
+    new_price_excl = None
+    new_price_incl = None
+    raw_price = _get(fields, "price") or _get(fields, "price_excluding_vat") or _get(fields, "new_price")
+    if raw_price is not None:
+        new_price_excl = _parse_number(raw_price)
+    raw_price_incl = _get(fields, "price_including_vat")
+    if raw_price_incl is not None:
+        new_price_incl = _parse_number(raw_price_incl)
+        # If only including-VAT price given, derive excluding-VAT (assume 25% standard)
+        if new_price_excl is None and new_price_incl > 0:
+            new_price_excl = round(new_price_incl / 1.25, 2)
+
     update = _clean({
         "id": product["id"],
         "version": product.get("version"),
         "name": _get(fields, "new_name") or product.get("name"),
-        "priceExcludingVatCurrency": _get(fields, "price") or _get(fields, "price_excluding_vat") or product.get("priceExcludingVatCurrency"),
+        "priceExcludingVatCurrency": new_price_excl if new_price_excl is not None else product.get("priceExcludingVatCurrency"),
+        "priceIncludingVatCurrency": new_price_incl if new_price_incl is not None else product.get("priceIncludingVatCurrency"),
         "vatType": vat_type_ref,
     })
     if _get(fields, "number"):

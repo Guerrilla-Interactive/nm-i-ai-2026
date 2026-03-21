@@ -3,6 +3,12 @@ NM i AI 2026 — NorgesGruppen Object Detection: 3-Model Ensemble
 Runs YOLO11x (1280px), YOLOv8m (640px), YOLOv8s (640px) and merges
 detections with Weighted Box Fusion (WBF). Time-budget aware: drops
 slower models as deadline approaches.
+
+Optimizations:
+- Horizontal flip TTA (doubles inference, catches directional bias)
+- Tiling for primary model (improves small object detection)
+- Per-class NMS with IoU=0.65 (packed shelf optimization)
+- MAX_DET=800 safety cap
 """
 import argparse
 import json
@@ -23,11 +29,16 @@ except ImportError:
 
 # --- Constants ---
 CONF_THRESH = 0.005
-NMS_IOU_THRESH = 0.55
-WBF_IOU_THRESH = 0.55
+NMS_IOU_THRESH = 0.65
+WBF_IOU_THRESH = 0.65
 WBF_SKIP_BOX_THRESH = 0.001
 PAD_COLOR = (114, 114, 114)
 TIME_LIMIT = 275.0  # 300s sandbox minus 25s safety margin
+MAX_DET = 800
+
+# Tiling
+TILE_OVERLAP = 0.2
+MIN_TILE_RATIO = 1.5
 
 # Model configs: (filename, WBF weight)
 MODEL_CONFIGS = [
@@ -195,6 +206,28 @@ def load_model(model_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Tiling
+# ---------------------------------------------------------------------------
+
+def get_tile_coords(
+    img_h: int, img_w: int, tile_size: int, overlap: float
+) -> List[Tuple[int, int, int, int]]:
+    """Generate overlapping tile coordinates (x, y, w, h) covering the image."""
+    stride = int(tile_size * (1.0 - overlap))
+    tiles = []
+    for y in range(0, img_h, stride):
+        for x in range(0, img_w, stride):
+            tx = min(x, max(0, img_w - tile_size))
+            ty = min(y, max(0, img_h - tile_size))
+            tw = min(tile_size, img_w - tx)
+            th = min(tile_size, img_h - ty)
+            tile = (tx, ty, tw, th)
+            if tile not in tiles:
+                tiles.append(tile)
+    return tiles
+
+
+# ---------------------------------------------------------------------------
 # Single-model inference
 # ---------------------------------------------------------------------------
 
@@ -204,14 +237,55 @@ def run_single_model(
     input_name: str,
     input_size: int,
     category_map: Dict[int, int],
+    enable_tta: bool = True,
+    enable_tiling: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Run one model on a full image, return COCO detections."""
+    """Run one model on a full image with optional TTA and tiling, return COCO detections."""
     orig_h, orig_w = img_bgr.shape[:2]
+
+    # --- Pass 1: Standard full-image inference ---
     blob, scale, pad_left, pad_top = preprocess(img_bgr, input_size)
     outputs = session.run(None, {input_name: blob})
-    return postprocess(
+    detections = postprocess(
         outputs[0], orig_w, orig_h, scale, pad_left, pad_top, category_map,
     )
+
+    # --- Pass 2: Horizontal flip TTA ---
+    if enable_tta:
+        flipped = cv2.flip(img_bgr, 1)
+        blob_f, scale_f, pl_f, pt_f = preprocess(flipped, input_size)
+        outputs_f = session.run(None, {input_name: blob_f})
+        dets_f = postprocess(
+            outputs_f[0], orig_w, orig_h, scale_f, pl_f, pt_f, category_map,
+        )
+        # Mirror boxes back: x_new = orig_w - (x + w)
+        for det in dets_f:
+            x, y, w, h = det["bbox"]
+            det["bbox"] = [round(orig_w - (x + w), 2), y, w, h]
+        detections.extend(dets_f)
+
+    # --- Pass 3: Tiling for small object detection ---
+    if enable_tiling:
+        max_dim = max(orig_h, orig_w)
+        if max_dim > input_size * MIN_TILE_RATIO:
+            tile_pixel_size = int(max_dim / 2)  # 2x2 grid roughly
+            tiles = get_tile_coords(orig_h, orig_w, tile_pixel_size, TILE_OVERLAP)
+            for tx, ty, tw, th in tiles:
+                if tw < 32 or th < 32:
+                    continue
+                tile_img = img_bgr[ty:ty + th, tx:tx + tw]
+                blob_t, scale_t, pl_t, pt_t = preprocess(tile_img, input_size)
+                outputs_t = session.run(None, {input_name: blob_t})
+                dets_t = postprocess(
+                    outputs_t[0], tw, th, scale_t, pl_t, pt_t, category_map,
+                )
+                # Offset tile detections to full-image coordinates
+                for det in dets_t:
+                    det["bbox"][0] = round(det["bbox"][0] + tx, 2)
+                    det["bbox"][1] = round(det["bbox"][1] + ty, 2)
+                detections.extend(dets_t)
+
+    return detections
 
 
 # ---------------------------------------------------------------------------
@@ -413,13 +487,19 @@ def main():
         elapsed_total = time.monotonic() - total_start
         time_fraction = elapsed_total / TIME_LIMIT
 
-        # Decide which models to run based on time budget
-        # >80% time used: only primary model (best_x)
-        # >60% time used: skip best_s (tertiary)
+        # Decide which models to run and whether TTA is enabled
+        # With TTA each model takes ~2x, so thresholds are tighter
+        # >85% time: primary only, NO TTA (emergency mode)
+        # >70% time: primary only, with TTA
+        # >50% time: skip tertiary model
         # otherwise: run all models
-        if time_fraction > 0.80:
-            active_models = models[:1]   # primary only
-        elif time_fraction > 0.60:
+        enable_tta = True
+        if time_fraction > 0.85:
+            active_models = models[:1]
+            enable_tta = False
+        elif time_fraction > 0.70:
+            active_models = models[:1]
+        elif time_fraction > 0.50:
             active_models = [m for m in models if m["name"] != "best_s.onnx"]
         else:
             active_models = models
@@ -427,10 +507,14 @@ def main():
         # Run each active model
         model_dets_list = []
         model_weights = []
-        for m in active_models:
+        for mi, m in enumerate(active_models):
+            # Tiling only for primary model (index 0 in MODEL_CONFIGS)
+            is_primary = (m["name"] == MODEL_CONFIGS[0][0])
             dets = run_single_model(
                 img_bgr, m["session"], m["input_name"],
                 m["input_size"], category_map,
+                enable_tta=enable_tta,
+                enable_tiling=is_primary,
             )
             model_dets_list.append(dets)
             model_weights.append(m["weight"])
@@ -440,18 +524,23 @@ def main():
             model_dets_list, model_weights, orig_w, orig_h,
         )
 
+        # Enforce MAX_DET cap
+        if len(merged) > MAX_DET:
+            merged.sort(key=lambda d: d["score"], reverse=True)
+            merged = merged[:MAX_DET]
+
         # Tag with image_id
         for det in merged:
             det["image_id"] = image_id
         all_detections.extend(merged)
 
         # Progress
-        img_elapsed = time.monotonic() - (total_start + elapsed_total)
         total_elapsed = time.monotonic() - total_start
         active_names = "+".join(m["name"].replace(".onnx", "") for m in active_models)
-        print("[run] %d/%d (%s) %d dets | elapsed %.1fs | %.1fs left [%s]" % (
+        tta_str = "+TTA" if enable_tta else ""
+        print("[run] %d/%d (%s) %d dets | elapsed %.1fs | %.1fs left [%s%s]" % (
             img_idx + 1, n_images, img_path.name, len(merged),
-            total_elapsed, TIME_LIMIT - total_elapsed, active_names))
+            total_elapsed, TIME_LIMIT - total_elapsed, active_names, tta_str))
 
         # Emergency stop
         if total_elapsed > TIME_LIMIT:
