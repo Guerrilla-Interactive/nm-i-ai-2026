@@ -470,13 +470,37 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             if m:
                 fields["employee_identifier"] = m.group(1).rstrip(",.")
 
+    # --- Supplier name extraction (for find/delete/update supplier) ---
+    _SUPPLIER_TASK_TYPES = (TaskType.FIND_SUPPLIER, TaskType.DELETE_SUPPLIER,
+                            TaskType.UPDATE_SUPPLIER, TaskType.CREATE_SUPPLIER)
+    if "name" not in fields and task_type in _SUPPLIER_TASK_TYPES:
+        m = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par)\s|$)",
+            text, re.I,
+        )
+        if m:
+            fields["name"] = m.group(1).strip().rstrip(",.")
+
+    # --- Department name extraction (for delete department) ---
+    if "name" not in fields and task_type == TaskType.DELETE_DEPARTMENT:
+        m = re.search(
+            r"(?:avdeling(?:a|en)?|department|département|departamento|abteilung)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:og\s+[A-ZÆØÅ\u00C0-\u024F][\w]*)?)"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par)\s|$)",
+            text, re.I,
+        )
+        if m:
+            fields["name"] = m.group(1).strip().rstrip(",.")
+
     # Entity-keyword + name (for departments, products, projects without "med navn"/"named")
     # "avdeling HR", "department Finance", "Abteilung Vertrieb", "produkt Widget"
     _NAME_ENTITY_TYPES = (TaskType.CREATE_DEPARTMENT, TaskType.CREATE_PRODUCT,
                           TaskType.CREATE_PROJECT, TaskType.CREATE_CUSTOMER,
                           TaskType.PROJECT_WITH_CUSTOMER, TaskType.FIND_CUSTOMER,
                           TaskType.UPDATE_CUSTOMER, TaskType.UPDATE_PROJECT,
-                          TaskType.DELETE_PROJECT)
+                          TaskType.DELETE_PROJECT, TaskType.DELETE_DEPARTMENT)
     if "name" not in fields and task_type in _NAME_ENTITY_TYPES:
         # Try quoted name first: 'prosjektet "Foo Bar"' or "prosjektet 'Foo Bar'"
         m = re.search(

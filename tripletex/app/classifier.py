@@ -167,6 +167,12 @@ The goal is to reverse the payment voucher so the invoice is outstanding again.
 - "slett leverandør" / "fjern leverandør" / "delete supplier" → delete_supplier
 - "finn leverandør" / "søk leverandør" / "find supplier" / "search supplier" → find_supplier
 - "slett avdeling" / "fjern avdeling" / "delete department" → delete_department
+- CRITICAL: For find_supplier, delete_supplier, delete_department — you MUST extract the entity name from the prompt into the "name" field. \
+The name is the proper noun after the entity keyword (proveedor, Lieferant, fournisseur, leverandør, department, Abteilung, département, avdeling). \
+NEVER return an empty name field for these task types. Examples: \
+"Buscar el proveedor TestLev AS" → name: "TestLev AS", \
+"Löschen Sie den Lieferanten TestLev AS" → name: "TestLev AS", \
+"Supprimer le département Testdrift og Kommunikasjon" → name: "Testdrift og Kommunikasjon"
 - When a prompt mentions both creating a project AND linking it to a customer → project_with_customer
 - "Legg til rolle" / "set role" / "set access" → set_employee_roles
 - CRITICAL: If the prompt describes a customer with an unpaid invoice and asks to register payment, \
@@ -680,6 +686,7 @@ async def classify_task(
     def _post_process_result(r):
         r.fields = _post_process_fields(r.task_type, r.fields)
         r.fields = _strip_hallucinated_fields(r.fields, prompt)
+        r.fields = _rescue_missing_entity_name(r.task_type, r.fields, prompt)
         return r
 
     def _post_process_any(r):
@@ -824,6 +831,67 @@ async def _call_gemini(client: Any, user_message: str | list) -> str:
 # ---------------------------------------------------------------------------
 # Response parsing
 # ---------------------------------------------------------------------------
+
+
+def _rescue_missing_entity_name(task_type: TaskType, fields: dict, prompt: str) -> dict:
+    """Last-resort extraction of entity name from prompt for supplier/department tasks.
+
+    When Gemini classifies correctly but returns empty name fields (common with
+    non-Norwegian prompts), extract the entity name directly from the prompt text.
+    """
+    _SUPPLIER_TASKS = (TaskType.FIND_SUPPLIER, TaskType.DELETE_SUPPLIER, TaskType.UPDATE_SUPPLIER)
+    _DEPARTMENT_TASKS = (TaskType.DELETE_DEPARTMENT,)
+
+    has_name = any(fields.get(k) for k in ("name", "supplier_name", "department_name",
+                                            "supplier_identifier", "department_identifier",
+                                            "search_query"))
+    if has_name:
+        return fields
+
+    f = dict(fields)
+
+    if task_type in _SUPPLIER_TASKS:
+        # Multilingual supplier keywords
+        m = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par|del|nel)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if m:
+            name = m.group(1).strip().rstrip(",.")
+            if name:
+                f["name"] = name
+                f["supplier_name"] = name
+                logger.info("Rescued supplier name from prompt: %s", name)
+
+    elif task_type in _DEPARTMENT_TASKS:
+        # Multilingual department keywords
+        m = re.search(
+            r"(?:avdeling(?:a|en)?|department|département|departamento|abteilung)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:og\s+[A-ZÆØÅ\u00C0-\u024F][\w]*)?)"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par|del|nel)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if m:
+            name = m.group(1).strip().rstrip(",.")
+            if name:
+                f["name"] = name
+                f["department_name"] = name
+                logger.info("Rescued department name from prompt: %s", name)
+
+    # For FIND_SUPPLIER, also try to extract org number as search criteria
+    if task_type == TaskType.FIND_SUPPLIER and not f.get("name") and not f.get("search_query"):
+        org_match = re.search(r"(?:org(?:anisas?tion(?:s?nummer)?)?\.?\s*(?:n[rº]\.?|nummer|number|numéro|número)?\s*:?\s*)(\d{9,})", prompt, re.IGNORECASE)
+        if not org_match:
+            org_match = re.search(r"(?:número\s+de\s+organización|Organisationsnummer|numéro\s+d.organisation)\s*:?\s*(\d{9,})", prompt, re.IGNORECASE)
+        if org_match:
+            f["organization_number"] = org_match.group(1).replace(" ", "")
+            f["search_query"] = f["organization_number"]
+            f["search_field"] = "organization_number"
+            logger.info("Rescued org number for FIND_SUPPLIER: %s", f["organization_number"])
+
+    return f
 
 
 def _post_process_fields(task_type: TaskType, fields: dict) -> dict:
@@ -2157,6 +2225,34 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
             fields["amount_including_vat"] = amounts[0]
         if dates:
             fields["invoice_date"] = dates[0]
+
+    elif task_type in (TaskType.FIND_SUPPLIER, TaskType.DELETE_SUPPLIER):
+        # Extract supplier name from multilingual prompts
+        sup_match = re.search(
+            r"(?:leverandør(?:en)?|supplier|fournisseur|lieferant(?:en)?|proveedor|fornecedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if sup_match:
+            fields["name"] = sup_match.group(1).strip().rstrip(",.")
+            fields["supplier_name"] = fields["name"]
+        if task_type == TaskType.FIND_SUPPLIER and org_match:
+            fields["organization_number"] = org_match.group(1).replace(" ", "")
+            fields.setdefault("search_query", fields["organization_number"])
+            fields.setdefault("search_field", "organization_number")
+
+    elif task_type == TaskType.DELETE_DEPARTMENT:
+        # Extract department name from multilingual prompts
+        dept_match = re.search(
+            r"(?:avdeling(?:a|en)?|department|département|departamento|abteilung)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:og\s+[A-ZÆØÅ\u00C0-\u024F][\w]*)?)"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if dept_match:
+            fields["name"] = dept_match.group(1).strip().rstrip(",.")
+            fields["department_name"] = fields["name"]
 
     elif task_type == TaskType.YEAR_END_CLOSING:
         # Extract year: "for 2025" / "für 2025" / "pour 2025"
