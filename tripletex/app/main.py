@@ -289,10 +289,11 @@ _KEYWORD_MAP = [
     (TaskType.UPDATE_EMPLOYEE, [r"\b(oppdater|endre|update|modify|ändra|aktualisieren|ändern|actualizar|modificar|modifier|atualizar)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|empregado)\b",
                                  r"\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b.*\b(ansatt|tilsett|employee)\b",
                                  r"\b(ansatt|tilsett|employee)\b.*\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b"]),
-    (TaskType.CREATE_EMPLOYEE, [r"\b(opprett|lag|create|add|erstellen|créer|crear|criar|register|registrer|legg\s+til)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b",
-                                r"\bny\w?\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé)\b",
-                                r"\b(ansatt|tilsett|employee)\b.*\b(som\s+heter|named?|called)\b",
-                                r"\b(ansatt|tilsett|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b"]),
+    (TaskType.CREATE_EMPLOYEE, [r"\b(opprett?|lag|create|add|erstellen|créer|crear|criar|register|registrer|legg\s+til)\b.*\b(ansatt?e?|anstt|tilsett|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b",
+                                r"\bny\w?\b.*\b(ansatt?e?|anstt|tilsett|employee|empleado|mitarbeiter|employé)\b",
+                                r"\b(ansatt?e?|tilsett|employee)\b.*\b(som\s+heter|named?|called)\b",
+                                r"\b(ansatt?e?|tilsett|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b",
+                                r"\boppre\w*\b.*\b(ansatt?|anstt)\b.*\b(e-?post|epost|email)\b"]),
     # --- Payroll (MUST come before employee patterns — "paie de X" should not match employee) ---
     (TaskType.RUN_PAYROLL, [
         r"\b(?:paie|payroll|lønn|lonn|gehalt|nómina|salaire|lønnskjøring|lønnsslipp|lonnsslipp|salary|lønnsutbetaling|lonnsutbetaling)\b",
