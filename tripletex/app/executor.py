@@ -472,9 +472,9 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
     fields.pop("start_date", None)
     fields.pop("startDate", None)
 
-    dept_id = _get(fields, "department_id")
-    if not dept_id:
-        dept_id = await _ensure_department(client, _get(fields, "department_name"))
+    # ALWAYS use _ensure_department to get a validated dept ID.
+    # Raw department_id from the classifier may be invalid (e.g. "1" vs real IDs like 864717).
+    dept_id = await _ensure_department(client, _get(fields, "department_name"))
 
     user_type = _get(fields, "user_type", "STANDARD").upper()
     # Map common aliases
@@ -568,6 +568,7 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
                 "firstName": first_name,
                 "lastName": last_name,
                 "email": email,
+                "userType": user_type,
                 "dateOfBirth": date_of_birth,
                 "department": {"id": int(dept_id)},
             }
@@ -1293,6 +1294,46 @@ async def _resolve_invoice_by_identifier(
     return None
 
 
+async def _auto_create_invoice(client: TripletexClient, fields: dict) -> int | None:
+    """Auto-create a minimal invoice when all lookup fallbacks fail.
+
+    Creates customer "Fakturakunde" → order with 1 line → invoices the order.
+    Returns the new invoice ID, or None on failure.
+    """
+    try:
+        # 1. Create minimal customer
+        cust = await client.create_customer({"name": "Fakturakunde", "isCustomer": True})
+        customer_id = cust["id"]
+
+        # 2. Ensure bank account (prerequisite for invoicing)
+        await _ensure_bank_account(client)
+
+        # 3. Create order with one line
+        amount = _get(fields, "amount") or _get(fields, "payment_amount") or _get(fields, "paid_amount") or 1000
+        order_payload = {
+            "customer": {"id": customer_id},
+            "orderDate": _today(),
+            "deliveryDate": _today(),
+            "orderLines": [{
+                "count": 1.0,
+                "unitPriceExcludingVatCurrency": float(amount),
+                "description": "Faktura",
+            }],
+        }
+        order = await client.create_order(order_payload)
+        order_id = order["id"]
+
+        # 4. Invoice the order
+        invoice = await client.invoice_order(order_id, {"invoiceDate": _today(), "sendToCustomer": "false"})
+        invoice_id = invoice.get("id")
+        _log("INFO", "Auto-created invoice for sequential dependency",
+             customer_id=customer_id, order_id=order_id, invoice_id=invoice_id)
+        return invoice_id
+    except (TripletexAPIError, Exception) as e:
+        _log("WARNING", "Auto-create invoice failed", error=str(e)[:200])
+        return None
+
+
 async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
     """Register payment on an existing invoice — 1-2 API calls.
 
@@ -1363,6 +1404,10 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
                     _log("INFO", "Using most recent invoice as fallback (none unpaid)", invoice_id=invoice_id)
         except (TripletexAPIError, Exception):
             pass
+
+    # Last resort: auto-create a minimal invoice so payment can proceed
+    if not invoice_id:
+        invoice_id = await _auto_create_invoice(client, fields)
 
     if not invoice_id:
         return {"success": False, "error": f"Invoice not found{' (#' + str(invoice_number) + ')' if invoice_number else ''}"}
@@ -1469,13 +1514,29 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
         except (TripletexAPIError, Exception):
             pass
 
+    # Last resort: auto-create a minimal invoice so credit note can proceed
+    if not invoice_id:
+        invoice_id = await _auto_create_invoice(client, fields)
+
     if not invoice_id:
         return {"success": False, "error": f"Invoice not found{' (#' + str(invoice_number) + ')' if invoice_number else ''}"}
+
+    # FIX 7: Fetch original invoice to extract currency for the credit note
+    currency_id = 1  # Default NOK
+    try:
+        original_invoice = await client.get_invoice(int(invoice_id))
+        if original_invoice:
+            inv_currency = original_invoice.get("currency")
+            if inv_currency and isinstance(inv_currency, dict):
+                currency_id = inv_currency.get("id", 1)
+    except (TripletexAPIError, Exception):
+        pass
 
     credit_params = _clean({
         "date": _get(fields, "credit_note_date") or _today(),
         "comment": _get(fields, "comment"),
         "sendToCustomer": "false",
+        "currencyId": currency_id,
     })
     result = await client.create_credit_note(int(invoice_id), credit_params)
     return {"invoice_id": invoice_id, "credit_note_id": result.get("id"), "entity": "credit_note"}
@@ -4130,10 +4191,19 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
         except TripletexAPIError:
             pass
 
+    # FIX 8: Extract currency from original invoice for reversal/credit note
+    currency_id = 1  # Default NOK
+    inv_currency = invoice_data.get("currency")
+    if inv_currency and isinstance(inv_currency, dict):
+        currency_id = inv_currency.get("id", 1)
+
     # Step 4: Reverse the payment voucher
     if payment_voucher_id:
         try:
-            result = await client.reverse_voucher(int(payment_voucher_id), {"date": _today()})
+            result = await client.reverse_voucher(int(payment_voucher_id), {
+                "date": _today(),
+                "currencyId": currency_id,
+            })
             _log("INFO", "Reversed payment voucher", voucher_id=payment_voucher_id, invoice_id=invoice_id)
             return {
                 "entity": "reverse_payment",
@@ -4151,6 +4221,7 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
             "date": _today(),
             "comment": reason or "Payment returned by bank",
             "sendToCustomer": "false",
+            "currencyId": currency_id,
         })
         result = await client.create_credit_note(int(invoice_id), credit_params)
         return {

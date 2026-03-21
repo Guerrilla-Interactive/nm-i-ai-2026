@@ -133,6 +133,14 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 | chiusura annuale | chiusura annuale | - | - | - | - | - | - |
 | correzione | correzione | - | - | - | - | - | - |
 
+## MULTILINGUAL ENTITY EXTRACTION
+CRITICAL: Always extract entity names from prompts in ANY language. The entity name typically follows the language-specific keyword:
+- "proveedor X" / "Lieferanten X" / "fournisseur X" / "leverandør X" → supplier name is "X"
+- "departamento X" / "Abteilung X" / "département X" / "avdeling X" → department name is "X"
+- "número de organización" / "Organisationsnummer" / "numéro d'organisation" / "org.nr" → organization_number
+- "empleado X" / "Mitarbeiter X" / "employé X" / "ansatt X" → employee name is "X"
+Extract the name EXACTLY as written in the prompt, preserving casing and suffixes (AS, GmbH, SA, etc.).
+
 ## IMPORTANT DISAMBIGUATION RULES
 - "Opprett faktura" / "Create invoice" with a NEW customer name → create_invoice
 - "Opprett faktura" / "Create invoice" referencing an EXISTING customer (by name/number) → invoice_existing_customer
@@ -483,6 +491,51 @@ Output:
 Input: "Eseguire la chiusura annuale per il 2025"
 Output:
 {{"task_type": "year_end_closing", "confidence": 0.96, "fields": {{"year": "2025"}}}}
+
+### Example 35 — Find supplier (Spanish)
+Input: "Buscar el proveedor NordTech AS por número de organización 987654321"
+Output:
+{{"task_type": "find_supplier", "confidence": 0.97, "fields": {{"name": "NordTech AS", "organization_number": "987654321"}}}}
+
+### Example 35b — Find supplier (German)
+Input: "Suchen Sie den Lieferanten Fjord Consulting AS"
+Output:
+{{"task_type": "find_supplier", "confidence": 0.96, "fields": {{"name": "Fjord Consulting AS"}}}}
+
+### Example 35c — Find supplier (French)
+Input: "Rechercher le fournisseur Nordic AS par numéro d'organisation 912345678"
+Output:
+{{"task_type": "find_supplier", "confidence": 0.97, "fields": {{"name": "Nordic AS", "organization_number": "912345678"}}}}
+
+### Example 36 — Delete supplier (German)
+Input: "Löschen Sie den Lieferanten Nordlicht GmbH aus dem System"
+Output:
+{{"task_type": "delete_supplier", "confidence": 0.97, "fields": {{"name": "Nordlicht GmbH"}}}}
+
+### Example 36b — Delete supplier (Spanish)
+Input: "Eliminar el proveedor Acme AS del sistema"
+Output:
+{{"task_type": "delete_supplier", "confidence": 0.96, "fields": {{"name": "Acme AS"}}}}
+
+### Example 36c — Delete supplier (French)
+Input: "Supprimer le fournisseur Bergen Konsult AS"
+Output:
+{{"task_type": "delete_supplier", "confidence": 0.96, "fields": {{"name": "Bergen Konsult AS"}}}}
+
+### Example 37 — Delete department (French)
+Input: "Supprimer le département Marketing du système"
+Output:
+{{"task_type": "delete_department", "confidence": 0.97, "fields": {{"name": "Marketing"}}}}
+
+### Example 37b — Delete department (German)
+Input: "Löschen Sie die Abteilung Verwaltung"
+Output:
+{{"task_type": "delete_department", "confidence": 0.96, "fields": {{"name": "Verwaltung"}}}}
+
+### Example 37c — Delete department (Spanish)
+Input: "Eliminar el departamento Ventas del sistema"
+Output:
+{{"task_type": "delete_department", "confidence": 0.96, "fields": {{"name": "Ventas"}}}}
 
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
@@ -937,6 +990,33 @@ def _normalize_fields(task_type: TaskType, fields: dict) -> dict:
                 f.setdefault("email", sq)
             else:
                 f.setdefault("name", sq)
+
+    # --- Supplier identifier → supplier_name / name ---
+    sup_id = f.pop("supplier_identifier", None)
+    if sup_id and isinstance(sup_id, str):
+        f.setdefault("supplier_name", sup_id)
+        f.setdefault("name", sup_id)
+
+    # --- Department identifier → department_name / name ---
+    dept_id = f.pop("department_identifier", None)
+    if dept_id and isinstance(dept_id, str):
+        f.setdefault("department_name", dept_id)
+        f.setdefault("name", dept_id)
+
+    # --- Contact identifier → contact_name ---
+    cont_id = f.pop("contact_identifier", None)
+    if cont_id and isinstance(cont_id, str):
+        f.setdefault("contact_name", cont_id)
+
+    # --- supplier_name → also set name (executor checks both) ---
+    sn = f.get("supplier_name")
+    if sn and isinstance(sn, str):
+        f.setdefault("name", sn)
+
+    # --- department_name → also set name (executor checks both) ---
+    dn = f.get("department_name")
+    if dn and isinstance(dn, str):
+        f.setdefault("name", dn)
 
     # --- project_with_customer: project_name → name for create_project ---
     if task_type == TaskType.PROJECT_WITH_CUSTOMER:

@@ -313,8 +313,15 @@ _KEYWORD_MAP = [
     # REGISTER_SUPPLIER_INVOICE = alias for CREATE_SUPPLIER_INVOICE (same executor)
     # NOTE: Keep patterns narrow — compound words like "leverandørfaktura" should match CREATE_SUPPLIER_INVOICE
     (TaskType.REGISTER_SUPPLIER_INVOICE, [
+        r"\bleverandør(faktura|invoice)\w*\b",
+        r"\bleverandor(faktura|invoice)\w*\b",
+        r"leverandør.*faktura|faktura.*leverandør",
+        r"leverandor.*faktura|faktura.*leverandor",
         r"\b(bokfør|bokfor|book)\w*\b.*\b(leverandør|leverandor|supplier|fournisseur|lieferant)\w*.*\bfaktura\w*\b",
         r"\b(registrer|bokfør|bokfor|book)\w*\b.*\b(inngående|incoming|mottatt)\w*\b.*\bfaktura\w*\b",
+        r"(inngående|inngaaende|incoming|mottatt|motteke|received).*faktura",
+        r"(registrer|register)\w*\s+faktura\w*\s+.*\b(leverandør|leverandor|supplier|fournisseur)\b",
+        r"supplier.*invoice|Eingangsrechnung|facture.*fournisseur",
     ]),
     (TaskType.CREATE_SUPPLIER_INVOICE, [
         r"leverandør.*faktura|faktura.*leverandør",
@@ -1214,18 +1221,60 @@ async def _classify_rule_based(prompt: str, files: Optional[list[dict]] = None) 
 # ---------------------------------------------------------------------------
 
 async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClassification:
-    """Route to the appropriate classifier based on LLM_MODE."""
+    """Route to the appropriate classifier based on LLM_MODE.
+
+    Flow: rule-based first (instant) → if confident, skip LLM → else LLM.
+    """
+    from classifier import _post_process_fields, _normalize_fields
+
+    # STEP 1: Always run rule-based first (instant, <1ms)
+    rule_result = await _classify_rule_based(prompt, files)
+
+    # Handle batch from rule-based
+    if isinstance(rule_result, list):
+        for r in rule_result:
+            r.fields = _post_process_fields(r.task_type, r.fields)
+            r.fields = _normalize_fields(r.task_type, r.fields)
+        return rule_result
+
+    # STEP 2: If rule-based is confident, use it directly (skip LLM)
+    if rule_result.task_type != TaskType.UNKNOWN and rule_result.confidence >= 0.5:
+        rule_result.fields = _post_process_fields(rule_result.task_type, rule_result.fields)
+        rule_result.fields = _normalize_fields(rule_result.task_type, rule_result.fields)
+        log("INFO", "Rule-based classifier confident, skipping LLM",
+            task_type=str(rule_result.task_type), confidence=rule_result.confidence)
+        # Still check for batch
+        if LLM_MODE != "none":
+            batch_items = _detect_batch(prompt, rule_result.task_type)
+            if batch_items:
+                classifications = []
+                for item_fields in batch_items:
+                    base_fields = dict(rule_result.fields)
+                    base_fields.update(item_fields)
+                    base_fields = _post_process_fields(rule_result.task_type, base_fields)
+                    base_fields = _normalize_fields(rule_result.task_type, base_fields)
+                    classifications.append(TaskClassification(
+                        task_type=rule_result.task_type,
+                        confidence=rule_result.confidence,
+                        fields=base_fields,
+                        raw_prompt=prompt,
+                    ))
+                log("INFO", "Rule-based result expanded to batch", count=len(classifications))
+                return classifications  # type: ignore[return-value]
+        return rule_result
+
+    # STEP 3: Low confidence or UNKNOWN → fall through to LLM
     if LLM_MODE == "gemini":
         from classifier import classify_task
         result = await classify_task(prompt, files)  # already applies _post_process_fields
     elif LLM_MODE == "claude":
         result = await _classify_with_claude(prompt, files)
     else:
-        result = await _classify_rule_based(prompt, files)
+        # Already tried rule-based, just return what we got
+        result = rule_result
 
-    # Rule-based may return a list for batch classifications
+    # Handle batch from LLM
     if isinstance(result, list):
-        from classifier import _post_process_fields, _normalize_fields
         for r in result:
             r.fields = _post_process_fields(r.task_type, r.fields)
             r.fields = _normalize_fields(r.task_type, r.fields)
@@ -1233,7 +1282,6 @@ async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClass
 
     # Apply post-processing and normalization to Claude and rule-based paths
     if LLM_MODE != "gemini":
-        from classifier import _post_process_fields, _normalize_fields
         result.fields = _post_process_fields(result.task_type, result.fields)
         result.fields = _normalize_fields(result.task_type, result.fields)
 
@@ -1241,7 +1289,6 @@ async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClass
     if not isinstance(result, list) and LLM_MODE != "none":
         batch_items = _detect_batch(prompt, result.task_type)
         if batch_items:
-            from classifier import _post_process_fields, _normalize_fields
             classifications = []
             for item_fields in batch_items:
                 base_fields = dict(result.fields)
@@ -1256,25 +1303,6 @@ async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClass
                 ))
             log("INFO", "LLM result expanded to batch", count=len(classifications))
             return classifications  # type: ignore[return-value]
-
-    # SAFETY NET: if still UNKNOWN after primary classifier, try rule-based as backup
-    if result.task_type == TaskType.UNKNOWN and LLM_MODE != "none":
-        log("WARNING", "Primary classifier returned UNKNOWN, trying rule-based fallback",
-            prompt_preview=prompt[:150])
-        fallback = await _classify_rule_based(prompt, files)
-        # Handle list from rule-based fallback
-        if isinstance(fallback, list):
-            from classifier import _post_process_fields, _normalize_fields
-            for r in fallback:
-                r.fields = _post_process_fields(r.task_type, r.fields)
-                r.fields = _normalize_fields(r.task_type, r.fields)
-            return fallback
-        if fallback.task_type != TaskType.UNKNOWN:
-            from classifier import _post_process_fields, _normalize_fields
-            fallback.fields = _post_process_fields(fallback.task_type, fallback.fields)
-            fallback.fields = _normalize_fields(fallback.task_type, fallback.fields)
-            log("INFO", "Rule-based fallback recovered", task_type=str(fallback.task_type))
-            return fallback
 
     if result.task_type == TaskType.UNKNOWN:
         log("ERROR", "ALL classifiers returned UNKNOWN — this will score 0",
