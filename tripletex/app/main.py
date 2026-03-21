@@ -279,10 +279,10 @@ _KEYWORD_MAP = [
                                        r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar)\b.*\b(reise|travel|viaje|voyage|reisekostenabrechnung)\b"]),
     # --- Employee (SET_EMPLOYEE_ROLES before UPDATE to catch "endre rolle" before "endre ansatt") ---
     (TaskType.DELETE_EMPLOYEE, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b"]),
-    (TaskType.SET_EMPLOYEE_ROLES, [r"\b(rolle|role|access|tilgang|user.?type|brukertype)\b.*\b(ansatt|tilsett|employee|mitarbeiter|employé)\b",
-                                    r"\b(ansatt|employee|mitarbeiter|employé)\b.*\b(rolle|role|access|tilgang|brukertype)\b",
-                                    r"\b(sett|set|gi|give|assign|tildel|setzen)\b.*\b(ansatt|employee|mitarbeiter)\b.*\b(som|as|to|als)\s+\w+",
-                                    r"\b(endre|change|sett)\b.*\b(rolle|role)\b",
+    (TaskType.SET_EMPLOYEE_ROLES, [r"\b(rolle\w*|role\w*|access|tilgang|user.?type|brukertype)\b.*\b(ansatt|tilsett|employee|mitarbeiter|employé)\b",
+                                    r"\b(ansatt|employee|mitarbeiter|employé)\b.*\b(rolle\w*|role\w*|access|tilgang|brukertype)\b",
+                                    r"\b(sett|set|gi|give|assign|tildel|setzen)\b.*\b(ansatt|employee|mitarbeiter)\b.*\b(rolle\w*|role\w*|som|as|to|als)\b",
+                                    r"\b(endre|change|sett)\b.*\b(rolle\w*|role\w*)\b",
                                     r"\b(eingeschränkt|restricted|begrenz)\w*\b.*\b(benutzer|user|bruker)\b",
                                     r"\b(administrator|admin|kontoadministrator)\b.*\b(ansatt|employee|mitarbeiter|tilsett)\b",
                                     r"\b(ansatt|employee|mitarbeiter|tilsett)\b.*\b(administrator|admin|kontoadministrator)\b"]),
@@ -980,9 +980,11 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 fields["first_name"] = m.group(1).rstrip(",.")
                 fields["last_name"] = m.group(2).rstrip(",.")
                 fields["employee_identifier"] = f"{fields['first_name']} {fields['last_name']}"
-        # Extract user type: "som administrator" / "as STANDARD" / "to EXTENDED" / "tilgang som X"
+        # Extract user type: "som administrator" / "as STANDARD" / "rollen prosjektleder"
         m = re.search(
-            r"(?:som|as|to|til)\s+(administrator|standard|extended|no.?access|begrenset|limited)",
+            r"(?:som|as|to|til|rollen?)\s+(administrator|admin|standard|extended|no.?access|begrenset|limited|"
+            r"prosjektleder|project.?manager|kontoadministrator|account.?administrator|"
+            r"lønnsadministrator|payroll.?administrator|regnskapsfører|accountant)",
             text, re.I,
         )
         if m:
@@ -997,8 +999,16 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 "NOACCESS": "NO_ACCESS",
                 "BEGRENSET": "NO_ACCESS",
                 "LIMITED": "NO_ACCESS",
+                "PROSJEKTLEDER": "EXTENDED",
+                "PROJECT_MANAGER": "EXTENDED",
+                "KONTOADMINISTRATOR": "EXTENDED",
+                "ACCOUNT_ADMINISTRATOR": "EXTENDED",
+                "LØNNSADMINISTRATOR": "EXTENDED",
+                "PAYROLL_ADMINISTRATOR": "EXTENDED",
+                "REGNSKAPSFØRER": "EXTENDED",
+                "ACCOUNTANT": "EXTENDED",
             }
-            fields["user_type"] = role_map.get(role_raw, role_raw)
+            fields["user_type"] = role_map.get(role_raw, "STANDARD")
 
     # --- Payroll: extract employee, salary, bonus ---
     if task_type == TaskType.RUN_PAYROLL:
