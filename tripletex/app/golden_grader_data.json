@@ -1,0 +1,1065 @@
+[
+  {
+    "timestamp": "2026-03-21T16:48:45.076837Z",
+    "prompt_preview": "Créez le projet \"Migration Étoile\" lié au client Étoile SARL (nº org. 964531161). Le chef de projet est Arthur Dubois (a",
+    "file_count": 0,
+    "task_type": "project_with_customer",
+    "fields": {
+      "email": "arthur.dubois@example.org",
+      "name": "Migration Étoile",
+      "organization_number": "964531161",
+      "project_manager_email": "arthur.dubois@example.org",
+      "project_manager_name": "Arthur Dubois"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00145-mc6",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T16:35:54.408700Z",
+    "prompt_preview": "Ejecute la nómina de Fernando López (fernando.lopez@example.org) para este mes. El salario base es de 37850 NOK. Añada u",
+    "file_count": 0,
+    "task_type": "run_payroll",
+    "fields": {
+      "base_salary": 37850,
+      "email": "fernando.lopez@example.org",
+      "first_name": "Fernando",
+      "last_name": "López",
+      "price_excluding_vat": 37850
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00145-mc6",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T14:34:14.082026Z",
+    "prompt_preview": "Opprett en ansatt med navn Test Person",
+    "file_count": 0,
+    "task_type": "CREATE_EMPLOYEE",
+    "fields": {
+      "first_name": "Test",
+      "last_name": "Person",
+      "name": "Test Person"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00135-gpz",
+    "token_length": 4
+  },
+  {
+    "timestamp": "2026-03-21T14:07:25.831111Z",
+    "prompt_preview": "Gjer månavslutninga for mars 2026. Periodiser forskotsbetalt kostnad (11700 kr per månad frå konto 1720 til kostnadskont",
+    "file_count": 0,
+    "task_type": "RUN_PAYROLL",
+    "fields": {
+      "base_salary": 11700,
+      "first_name": "eit",
+      "last_name": "driftsmiddel",
+      "price_excluding_vat": 11700
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T14:06:56.716717Z",
+    "prompt_preview": "El cliente Viento SL (org. nº 908616537) tiene una factura pendiente de 37850 NOK sin IVA por \"Mantenimiento\". Registre ",
+    "file_count": 0,
+    "task_type": "INVOICE_WITH_PAYMENT",
+    "fields": {
+      "amount": 37850,
+      "customer_name": "Viento SL (org",
+      "price_excluding_vat": 37850
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:54:03.926709Z",
+    "prompt_preview": "Vous avez recu une facture fournisseur (voir PDF ci-joint). Enregistrez la facture dans Tripletex. Creez le fournisseur ",
+    "file_count": 1,
+    "task_type": "REGISTER_SUPPLIER_INVOICE",
+    "fields": {},
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:53:26.823097Z",
+    "prompt_preview": "Nous avons besoin de la depense Overnatting de ce recu enregistree au departement HR. Utilisez le bon compte de charges ",
+    "file_count": 1,
+    "task_type": "REGISTER_SUPPLIER_INVOICE",
+    "fields": {
+      "amount_including_vat": 3180,
+      "description": "Overnatting, Whiteboard, Kaffe kunderelasjon",
+      "invoice_date": "2026-05-07",
+      "name": "Scandic Hotels",
+      "organization_number": "940394058",
+      "supplier_name": "Scandic Hotels",
+      "vat_amount": 795,
+      "vat_percentage": 25
+    },
+    "confidence": 0.97,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:52:53.273911Z",
+    "prompt_preview": "Wir haben die Rechnung INV-2026-8810 vom Lieferanten Sonnental GmbH (Org.-Nr. 988926221) über 8050 NOK einschließlich Mw",
+    "file_count": 0,
+    "task_type": "CREATE_INVOICE",
+    "fields": {
+      "price_excluding_vat": 8050
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:52:23.662143Z",
+    "prompt_preview": "Opprett en ordre for kunden Snøhetta AS (org.nr 914443806) med produktene Datarådgivning (7906) til 34450 kr og Systemut",
+    "file_count": 0,
+    "task_type": "INVOICE_WITH_PAYMENT",
+    "fields": {
+      "amount": 34450,
+      "customer_name": "Snøhetta AS (org",
+      "organization_number": "914443806",
+      "price_excluding_vat": 34450
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:52:07.754635Z",
+    "prompt_preview": "Reconcile the bank statement (attached CSV) against open invoices in Tripletex. Match incoming payments to customer invo",
+    "file_count": 1,
+    "task_type": "BANK_RECONCILIATION",
+    "fields": {},
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:51:33.488376Z",
+    "prompt_preview": "Le client Colline SARL (nº org. 879532124) a réclamé concernant la facture pour \"Conseil en données\" (28600 NOK HT). Éme",
+    "file_count": 0,
+    "task_type": "CREATE_CREDIT_NOTE",
+    "fields": {
+      "amount": 28600,
+      "organization_number": "879532124",
+      "price_excluding_vat": 28600
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:51:20.471284Z",
+    "prompt_preview": "Rapprochez le releve bancaire (CSV ci-joint) avec les factures ouvertes dans Tripletex. Associez les paiements entrants ",
+    "file_count": 1,
+    "task_type": "REGISTER_SUPPLIER_INVOICE",
+    "fields": {},
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:50:53.153217Z",
+    "prompt_preview": "Effectuez la clôture mensuelle de mars 2026. Comptabilisez la régularisation (13850 NOK par mois du compte 1700 vers cha",
+    "file_count": 0,
+    "task_type": "MONTH_END_CLOSING",
+    "fields": {
+      "amount": 13850,
+      "month": "03",
+      "price_excluding_vat": 13850,
+      "year": "2026"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:50:25.616380Z",
+    "prompt_preview": "Erstellen Sie das Produkt \"Beratungsstunden\" mit der Produktnummer 3512. Der Preis beträgt 42600 NOK ohne MwSt., mit dem",
+    "file_count": 0,
+    "task_type": "CREATE_PRODUCT",
+    "fields": {
+      "name": "Beratungsstunden",
+      "number": "3512",
+      "price_excluding_vat": 42600
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:50:19.172469Z",
+    "prompt_preview": "Gjer forenkla årsoppgjer for 2025: 1) Rekn ut og bokfør årlege avskrivingar for tre eigedelar: IT-utstyr (472700 kr, 5 å",
+    "file_count": 0,
+    "task_type": "ERROR_CORRECTION",
+    "fields": {
+      "price_excluding_vat": 472700
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:49:31.721689Z",
+    "prompt_preview": "Exécutez le cycle de vie complet du projet 'Mise à Niveau Système Soleil' (Soleil SARL, nº org. 869871079) : 1) Le proje",
+    "file_count": 0,
+    "task_type": "CREATE_SUPPLIER",
+    "fields": {
+      "email": "gabriel.richard@example.org",
+      "name": "de 93950 NOK de Forêt SARL",
+      "organization_number": "869871079",
+      "price_excluding_vat": 475350
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:49:09.110612Z",
+    "prompt_preview": "Du har motteke ein arbeidskontrakt (sjaa vedlagt PDF). Opprett den tilsette i Tripletex med alle detaljar fraa kontrakte",
+    "file_count": 1,
+    "task_type": "RUN_PAYROLL",
+    "fields": {},
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:48:44.069018Z",
+    "prompt_preview": "Precisamos da despesa de Oppbevaringsboks deste recibo registada no departamento Markedsføring. Use a conta de despesas ",
+    "file_count": 1,
+    "task_type": "REGISTER_SUPPLIER_INVOICE",
+    "fields": {
+      "amount_excluding_vat": 10680,
+      "amount_including_vat": 13350,
+      "description": "Oppbevaringsboks for department Markedsføring",
+      "invoice_date": "2026-01-12",
+      "name": "Biltema",
+      "organization_number": "827484202",
+      "supplier_name": "Biltema",
+      "vat_amount": 2670,
+      "vat_percentage": 25
+    },
+    "confidence": 0.97,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:48:21.036799Z",
+    "prompt_preview": "Erstellen Sie den Kunden Grünfeld GmbH mit der Organisationsnummer 835026434. Die Adresse ist Fjordveien 105, 3015 Dramm",
+    "file_count": 0,
+    "task_type": "CREATE_CUSTOMER",
+    "fields": {
+      "address_line1": "ist Fjordveien 105",
+      "city": "Drammen",
+      "email": "post@grunfeld.no",
+      "name": "Grünfeld GmbH",
+      "postal_code": "3015"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:47:58.197245Z",
+    "prompt_preview": "Führen Sie den vollständigen Projektzyklus für 'Digitalportal Brückentor' (Brückentor GmbH, Org.-Nr. 952086421) durch: 1",
+    "file_count": 0,
+    "task_type": "LOG_HOURS",
+    "fields": {
+      "email": "emma.muller@example.org",
+      "employee_email": "Projektleiter, emma.muller@example.org",
+      "first_name": "Sonnental",
+      "hours": 52,
+      "last_name": "GmbH",
+      "price_excluding_vat": 441800,
+      "project_name": "hat ein Budget von 441800 NOK"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:47:38.319140Z",
+    "prompt_preview": "Um dos seus clientes tem uma fatura vencida. Encontre a fatura vencida e registe uma taxa de lembrete de 35 NOK. Debito ",
+    "file_count": 0,
+    "task_type": "CREATE_INVOICE",
+    "fields": {
+      "customer_name": "e envie-a",
+      "price_excluding_vat": 35
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:47:35.376857Z",
+    "prompt_preview": "Wir haben eine Rechnung über 6073 EUR an Flussgold GmbH (Org.-Nr. 849416243) gesendet, als der Wechselkurs 11.50 NOK/EUR",
+    "file_count": 0,
+    "task_type": "INVOICE_WITH_PAYMENT",
+    "fields": {
+      "amount": 11.5,
+      "customer_name": "hat nun bezahlt",
+      "price_excluding_vat": 11.5
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00133-ckz",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:47:01.747989Z",
+    "prompt_preview": "Nous avons découvert des erreurs dans le grand livre de janvier et février 2026. Vérifiez toutes les pièces et trouvez l",
+    "file_count": 0,
+    "task_type": "UNKNOWN",
+    "fields": {},
+    "confidence": 0,
+    "llm_mode": "",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:46:11.380557Z",
+    "prompt_preview": "Descobrimos erros no livro razão de janeiro e fevereiro de 2026. Revise todos os vouchers e encontre os 4 erros: um lanç",
+    "file_count": 0,
+    "task_type": "UNKNOWN",
+    "fields": {},
+    "confidence": 0,
+    "llm_mode": "",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:45:24.095669Z",
+    "prompt_preview": "Has recibido una carta de oferta (ver PDF adjunto) para un nuevo empleado. Completa la incorporacion: crea el empleado, ",
+    "file_count": 1,
+    "task_type": "CREATE_EMPLOYEE",
+    "fields": {
+      "date_of_birth": "1988-05-19",
+      "department_name": "Produksjon",
+      "first_name": "Carmen",
+      "last_name": "Pérez",
+      "name": "Produksjon"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:45:03.331145Z",
+    "prompt_preview": "Exécutez la paie de Sarah Moreau (sarah.moreau@example.org) pour ce mois. Le salaire de base est de 56900 NOK. Ajoutez u",
+    "file_count": 0,
+    "task_type": "RUN_PAYROLL",
+    "fields": {
+      "base_salary": 56900,
+      "bonus": 15800,
+      "email": "sarah.moreau@example.org",
+      "first_name": "Sarah",
+      "last_name": "Moreau",
+      "price_excluding_vat": 56900
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:43:53.804876Z",
+    "prompt_preview": "Realize o encerramento anual simplificado de 2025: 1) Calcule e registe a depreciação anual de três ativos: IT-utstyr (4",
+    "file_count": 0,
+    "task_type": "YEAR_END_CLOSING",
+    "fields": {
+      "price_excluding_vat": 470650,
+      "year": "2025"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:42:53.658879Z",
+    "prompt_preview": "Totalkostnadene auka monaleg frå januar til februar 2026. Analyser hovudboka og finn dei tre kostnadskontoane med størst",
+    "file_count": 0,
+    "task_type": "CREATE_PROJECT",
+    "fields": {},
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:42:14.074239Z",
+    "prompt_preview": "Opprett ein faktura til kunden Fossekraft AS (org.nr 913494253) med tre produktlinjer: Skylagring (4508) til 1050 kr med",
+    "file_count": 0,
+    "task_type": "INVOICE_EXISTING_CUSTOMER",
+    "fields": {
+      "customer_name": "Fossekraft AS (org",
+      "organization_number": "913494253",
+      "price_excluding_vat": 1050,
+      "vat_percentage": 25
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:42:08.244296Z",
+    "prompt_preview": "Einer Ihrer Kunden hat eine uberfallige Rechnung. Finden Sie die uberfallige Rechnung und buchen Sie eine Mahngebuhr von",
+    "file_count": 0,
+    "task_type": "INVOICE_EXISTING_CUSTOMER",
+    "fields": {
+      "customer_name": "hat eine uberfallige Rechnung",
+      "price_excluding_vat": 40
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:41:49.906451Z",
+    "prompt_preview": "Ejecute el ciclo de vida completo del proyecto 'Actualización Sistema Dorada' (Dorada SL, org. nº 888398554): 1) El proy",
+    "file_count": 0,
+    "task_type": "INVOICE_EXISTING_CUSTOMER",
+    "fields": {
+      "customer_name": "por el proyecto",
+      "email": "carlos.garcia@example.org",
+      "price_excluding_vat": 460950
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:41:13.797407Z",
+    "prompt_preview": "Precisamos da despesa de Kaffemøte deste recibo registada no departamento Utvikling. Use a conta de despesas correta e g",
+    "file_count": 1,
+    "task_type": "REGISTER_SUPPLIER_INVOICE",
+    "fields": {
+      "amount_excluding_vat": 5452.5,
+      "amount_including_vat": 7270,
+      "description": "Kaffemøte",
+      "invoice_date": "2026-01-04",
+      "name": "Starbucks",
+      "organization_number": "894014253",
+      "supplier_name": "Starbucks",
+      "vat_amount": 1817.5,
+      "vat_percentage": 25
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:40:19.705117Z",
+    "prompt_preview": "Registre 15 horas para Miguel Torres (miguel.torres@example.org) en la actividad \"Design\" del proyecto \"Rediseño web\" pa",
+    "file_count": 0,
+    "task_type": "INVOICE_EXISTING_CUSTOMER",
+    "fields": {
+      "customer_name": "basada en las horas registradas",
+      "email": "miguel.torres@example.org",
+      "price_excluding_vat": 1800
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:38:23.158364Z",
+    "prompt_preview": "Create the product \"Web Design\" with product number 9780. The price is 30200 NOK excluding VAT, using the standard 25% V",
+    "file_count": 0,
+    "task_type": "CREATE_PRODUCT",
+    "fields": {
+      "name": "Web Design",
+      "number": "9780",
+      "price_excluding_vat": 30200,
+      "vat_percentage": 25
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:38:21.671770Z",
+    "prompt_preview": "Has recibido un contrato de trabajo (ver PDF adjunto). Crea el empleado en Tripletex con todos los datos del contrato: n",
+    "file_count": 1,
+    "task_type": "CREATE_EMPLOYEE",
+    "fields": {
+      "bank_account_number": "37262474683",
+      "date_of_birth": "1996-08-18",
+      "department_name": "Utvikling",
+      "first_name": "Pablo",
+      "last_name": "Torres",
+      "name": "Utvikling",
+      "national_identity_number": "18089648714"
+    },
+    "confidence": 0.99,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:38:12.224889Z",
+    "prompt_preview": "Opprett kunden Snøhetta AS med organisasjonsnummer 969719878. Adressen er Industriveien 148, 2317 Hamar. E-post: post@sn",
+    "file_count": 0,
+    "task_type": "CREATE_CUSTOMER",
+    "fields": {
+      "address_line1": "n er Industriveien 148",
+      "city": "Hamar",
+      "email": "post@snhetta.no",
+      "name": "Snøhetta AS",
+      "organization_number": "969719878",
+      "postal_code": "2317"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T13:37:06.130091Z",
+    "prompt_preview": "Os custos totais aumentaram significativamente de janeiro a fevereiro de 2026. Analise o livro razão e identifique as tr",
+    "file_count": 0,
+    "task_type": "CREATE_PROJECT",
+    "fields": {
+      "customer_name": "cada uma das três contas",
+      "name": "interno",
+      "project_name": "interno"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00132-h6b",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-21T12:59:50.772513Z",
+    "prompt_preview": "Realice el cierre mensual de marzo de 2026. Registre la periodificación (12500 NOK por mes de la cuenta 1720 a gasto). C",
+    "file_count": 0,
+    "task_type": "UNKNOWN",
+    "fields": {},
+    "confidence": 0,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00128-pw4",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T18:05:41.214135Z",
+    "prompt_preview": "test",
+    "file_count": 0,
+    "task_type": "UNKNOWN",
+    "fields": {},
+    "confidence": 0,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00090-fjj",
+    "token_length": 4
+  },
+  {
+    "timestamp": "2026-03-20T17:35:29.747740Z",
+    "prompt_preview": "Erfassen Sie 5 Stunden für Jonas Müller (jonas.muller@example.org) auf der Aktivität \"Analyse\" im Projekt \"E-Commerce-Entwicklung\" für Waldstein GmbH (Org.-Nr. 983707777). Stundensatz: 1850 NOK/h. Erstellen Sie eine Projektrechnung an den Kunden basierend auf den erfassten Stunden.",
+    "file_count": 0,
+    "task_type": "CREATE_INVOICE",
+    "fields": {
+      "customer_name": "Jonas",
+      "email": "jonas.muller@example.org",
+      "lines": [
+        {
+          "quantity": 5,
+          "unit_price": 1850
+        }
+      ],
+      "phone": "983707777"
+    },
+    "confidence": 0.75,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00083-pfp",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:35:13.942085Z",
+    "prompt_preview": "Registrer leverandøren Vestfjord AS med organisasjonsnummer 914908787. E-post: faktura@vestfjord.no.",
+    "file_count": 0,
+    "task_type": "CREATE_SUPPLIER",
+    "fields": {
+      "email": "faktura@vestfjord.no",
+      "name": "Vestfjord AS",
+      "organization_number": "914908787"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00083-pfp",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:34:41.722660Z",
+    "prompt_preview": "Opprett produktet \"Lærebok i matematikk\" med produktnummer 5696. Prisen er 23250 kr eksklusiv MVA, og MVA-sats for bøker på 0 % skal brukes.",
+    "file_count": 0,
+    "task_type": "CREATE_PRODUCT",
+    "fields": {
+      "name": "Lærebok i matematikk",
+      "number": "5696",
+      "price_excluding_vat": 23250,
+      "vat_percentage": 0
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00083-pfp",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:23:45.449687Z",
+    "prompt_preview": "Fixez un prix forfaitaire de 170650 NOK sur le projet \"Projet d'automatisation\" pour Rivière SARL (nº org. 852968737). L",
+    "file_count": 0,
+    "task_type": "PROJECT_BILLING",
+    "fields": {
+      "lines": [
+        {
+          "description": "Paiement d'étape (25% du prix fixe)",
+          "quantity": 1,
+          "unit_price": 42662.5
+        }
+      ],
+      "project_name": "Projet d'automatisation"
+    },
+    "confidence": 0.95,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00080-qwj",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:23:33.401888Z",
+    "prompt_preview": "The customer Oakwood Ltd (org no. 950705337) has complained about the invoice for \"Training Session\" (26700 NOK excl. VA",
+    "file_count": 0,
+    "task_type": "CREATE_CREDIT_NOTE",
+    "fields": {
+      "amount": 26700,
+      "customer_name": "Oakwood Ltd",
+      "description": "Training Session",
+      "organization_number": "950705337"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00080-qwj",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:23:14.793015Z",
+    "prompt_preview": "Opprett en avdeling med navn Markedsføring og avdelingsnummer 42",
+    "file_count": 0,
+    "task_type": "CREATE_DEPARTMENT",
+    "fields": {
+      "department_number": "42",
+      "name": "Markedsføring"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00080-qwj",
+    "token_length": 5
+  },
+  {
+    "timestamp": "2026-03-20T17:23:06.406865Z",
+    "prompt_preview": "Crie um pedido para o cliente Rio Azul Lda (org. nº 942366108) com os produtos Sessão de formação (5517) a 15250 NOK e C",
+    "file_count": 0,
+    "task_type": "INVOICE_WITH_PAYMENT",
+    "fields": {
+      "customer_name": "Rio Azul Lda",
+      "lines": [
+        {
+          "number": "5517",
+          "product_name": "Sessão de formação",
+          "quantity": 1,
+          "unit_price": 15250
+        },
+        {
+          "number": "3392",
+          "product_name": "Consultoria de dados",
+          "quantity": 1,
+          "unit_price": 19750
+        }
+      ],
+      "organization_number": "942366108",
+      "paid_amount": 35000
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00080-qwj",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:22:51.278364Z",
+    "prompt_preview": "Nous avons un nouvel employé nommé Jules Richard, né le 2. August 1986. Veuillez le créer en tant qu'employé avec l'e-ma",
+    "file_count": 0,
+    "task_type": "CREATE_EMPLOYEE",
+    "fields": {
+      "date_of_birth": "1986-08-02",
+      "email": "jules.richard@example.org",
+      "first_name": "Jules",
+      "last_name": "Richard"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00080-qwj",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:22:22.011639Z",
+    "prompt_preview": "Créez une facture pour le client Cascade SARL (nº org. 875483811) avec trois lignes de produit : Heures de conseil (5679",
+    "file_count": 0,
+    "task_type": "INVOICE_EXISTING_CUSTOMER",
+    "fields": {
+      "customer_name": "Cascade SARL",
+      "lines": [
+        {
+          "number": "5679",
+          "product_name": "Heures de conseil",
+          "quantity": 1,
+          "unit_price": 10950,
+          "vat_percentage": 25
+        },
+        {
+          "number": "9191",
+          "product_name": "Maintenance",
+          "quantity": 1,
+          "unit_price": 13750,
+          "vat_percentage": 15
+        },
+        {
+          "number": "5577",
+          "product_name": "Rapport d'analyse",
+          "quantity": 1,
+          "unit_price": 16400,
+          "vat_percentage": 0
+        }
+      ],
+      "name": "Cascade SARL",
+      "organization_number": "875483811"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00080-qwj",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:21:53.456435Z",
+    "prompt_preview": "Crea un pedido para el cliente Montaña SL (org. nº 828967452) con los productos Asesoría de datos (5142) a 22000 NOK y D",
+    "file_count": 0,
+    "task_type": "INVOICE_WITH_PAYMENT",
+    "fields": {
+      "customer_name": "Montaña SL",
+      "lines": [
+        {
+          "number": "5142",
+          "product_name": "Asesoría de datos",
+          "quantity": 1,
+          "unit_price": 22000
+        },
+        {
+          "number": "4554",
+          "product_name": "Desarrollo de sistemas",
+          "quantity": 1,
+          "unit_price": 1000
+        }
+      ],
+      "organization_number": "828967452",
+      "paid_amount": 23000
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00080-qwj",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T17:21:35.711364Z",
+    "prompt_preview": "Registre 26 horas para Lucía Martínez (lucia.martinez@example.org) en la actividad \"Utvikling\" del proyecto \"Desarrollo ",
+    "file_count": 0,
+    "task_type": "INVOICE_WITH_PAYMENT",
+    "fields": {
+      "customer_name": "Montaña SL",
+      "lines": [
+        {
+          "number": "5142",
+          "product_name": "Asesoría de datos",
+          "quantity": 1,
+          "unit_price": 22000
+        },
+        {
+          "number": "4554",
+          "product_name": "Desarrollo de sistemas",
+          "quantity": 1,
+          "unit_price": 1000
+        }
+      ],
+      "organization_number": "828967452",
+      "paid_amount": 23000
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00080-qwj",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T15:43:44.685829Z",
+    "prompt_preview": "Me har motteke faktura INV-2026-4995 frå leverandøren Fossekraft AS (org.nr 949805727) på 62850 kr inklusiv MVA. Beløpet gjeld kontortenester (konto 7000). Registrer leverandørfakturaen med korrekt inngåande MVA (25 %).",
+    "file_count": 0,
+    "task_type": "CREATE_INVOICE",
+    "fields": {
+      "lines": [
+        {
+          "unit_price": 62850
+        }
+      ],
+      "organization_number": "949805727",
+      "phone": "2026-4995"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00074-27j",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T15:22:01.322424Z",
+    "prompt_preview": "Registrer en reiseregning for Ragnhild Bakken (ragnhild.bakken@example.org) for \"Kundebesøk Kristiansand\". Reisen varte 4 dager med diett (dagsats 800 kr). Utlegg: flybillett 5450 kr og taxi 550 kr.",
+    "file_count": 0,
+    "task_type": "CREATE_TRAVEL_EXPENSE",
+    "fields": {
+      "costs": [
+        {
+          "amount": 5450,
+          "description": "flybillett"
+        },
+        {
+          "amount": 550,
+          "description": "taxi"
+        }
+      ],
+      "destination": "Kristiansand",
+      "first_name": "Ragnhild",
+      "last_name": "Bakken",
+      "per_diem_compensations": [
+        {
+          "days": 4,
+          "description": "Diett",
+          "rate": 800
+        }
+      ],
+      "title": "Kundebesøk Kristiansand"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00066-rsg",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T15:21:10.202269Z",
+    "prompt_preview": "Exécutez la paie de Manon Durand (manon.durand@example.org) pour ce mois. Le salaire de base est de 57150 NOK. Ajoutez une prime unique de 14200 NOK en plus du salaire de base.",
+    "file_count": 0,
+    "task_type": "UNKNOWN",
+    "fields": {},
+    "confidence": 0,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00066-rsg",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T14:50:27.065526Z",
+    "prompt_preview": "Opprett og send en faktura til kunden Brattli AS (org.nr 845762686) på 26450 kr eksklusiv MVA. Fakturaen gjelder Skylagring.",
+    "file_count": 0,
+    "task_type": "INVOICE_EXISTING_CUSTOMER",
+    "fields": {
+      "customer_name": "Brattli AS",
+      "lines": [
+        {
+          "description": "Skylagring",
+          "quantity": 1,
+          "unit_price": 26450
+        }
+      ],
+      "name": "Brattli AS",
+      "organization_number": "845762686",
+      "send_to_customer": true
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00061-tmp",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T14:49:55.433399Z",
+    "prompt_preview": "Betalingen fra Havbris AS (org.nr 998536561) for fakturaen \"Programvarelisens\" (32350 kr ekskl. MVA) ble returnert av banken. Reverser betalingen slik at fakturaen igjen viser utestående beløp.",
+    "file_count": 0,
+    "task_type": "ERROR_CORRECTION",
+    "fields": {
+      "correction_description": "Betalingen fra Havbris AS ble returnert av banken. Reverser betalingen slik at fakturaen igjen viser utestående beløp.",
+      "voucher_identifier": "Betaling for faktura 'Programvarelisens' fra Havbris AS"
+    },
+    "confidence": 0.92,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00061-tmp",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T14:49:29.652657Z",
+    "prompt_preview": "The customer Windmill Ltd (org no. 830362894) has an outstanding invoice for 32200 NOK excluding VAT for \"System Development\". Register full payment on this invoice.",
+    "file_count": 0,
+    "task_type": "INVOICE_WITH_PAYMENT",
+    "fields": {
+      "customer_name": "Windmill Ltd",
+      "lines": [
+        {
+          "description": "System Development",
+          "quantity": 1,
+          "unit_price": 32200
+        }
+      ],
+      "organization_number": "830362894",
+      "paid_amount": 32200
+    },
+    "confidence": 0.97,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00061-tmp",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T14:49:12.296819Z",
+    "prompt_preview": "Crea el cliente Río Verde SL con número de organización 975181626. La dirección es Solveien 97, 3015 Drammen. Correo: post@rio.no.",
+    "file_count": 0,
+    "task_type": "CREATE_CUSTOMER",
+    "fields": {
+      "address_line1": "Solveien 97",
+      "city": "Drammen",
+      "email": "post@rio.no",
+      "name": "Río Verde SL",
+      "organization_number": "975181626",
+      "postal_code": "3015"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00061-tmp",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T14:48:39.224763Z",
+    "prompt_preview": "Register a travel expense for William Wilson (william.wilson@example.org) for \"Client visit Trondheim\". The trip lasted 2 days with per diem (daily rate 800 NOK). Expenses: flight ticket 7600 NOK and taxi 700 NOK.",
+    "file_count": 0,
+    "task_type": "CREATE_TRAVEL_EXPENSE",
+    "fields": {
+      "costs": [
+        {
+          "amount": 7600,
+          "description": "flight ticket"
+        },
+        {
+          "amount": 700,
+          "description": "taxi"
+        }
+      ],
+      "destination": "Trondheim",
+      "first_name": "William",
+      "last_name": "Wilson",
+      "per_diem_compensations": [
+        {
+          "days": 2,
+          "rate": 800
+        }
+      ],
+      "title": "Client visit Trondheim"
+    },
+    "confidence": 0.98,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00061-tmp",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T14:04:34.899498Z",
+    "prompt_preview": "Le client Montagne SARL (nº org. 882988155) a réclamé concernant la facture pour \"Heures de conseil\" (40900 NOK HT). Éme",
+    "file_count": 0,
+    "task_type": "CREATE_CREDIT_NOTE",
+    "fields": {
+      "comment": "Émettre un avoir complet qui annule l'intégralité de la facture.",
+      "invoice_number": "Facture pour 'Heures de conseil' (Client: Montagne SARL)"
+    },
+    "confidence": 0.97,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00055-bmv",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T13:57:52.614657Z",
+    "prompt_preview": "Enregistrez le fournisseur Prairie SARL avec le numéro d'organisation 807616722. E-mail : faktura@prairiesarl.no.",
+    "file_count": 0,
+    "task_type": "CREATE_CUSTOMER",
+    "fields": {
+      "email": "faktura@prairiesarl.no",
+      "invoice_email": "faktura@prairiesarl.no",
+      "name": "Prairie SARL",
+      "organization_number": "807616722"
+    },
+    "confidence": 0.97,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00053-lrq",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T13:30:56.147125Z",
+    "prompt_preview": "Wir haben die Rechnung INV-2026-8172 vom Lieferanten Nordlicht GmbH (Org.-Nr. 803273723) über 19100 NOK einschließlich M",
+    "file_count": 0,
+    "task_type": "CREATE_INVOICE",
+    "fields": {
+      "lines": [
+        {
+          "unit_price": 19100
+        }
+      ],
+      "phone": "2026-8172"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00050-rcq",
+    "token_length": 43
+  },
+  {
+    "timestamp": "2026-03-20T13:04:59.618841Z",
+    "prompt_preview": "Registe uma despesa de viagem para Inês Sousa (ines.sousa@example.org) referente a \"Visita cliente Bergen\". A viagem dur",
+    "file_count": 0,
+    "task_type": "CREATE_TRAVEL_EXPENSE",
+    "fields": {
+      "email": "ines.sousa@example.org"
+    },
+    "confidence": 0.6,
+    "llm_mode": "gemini",
+    "revision": "tripletex-agent-00042-5tw",
+    "token_length": 43
+  }
+]
