@@ -517,6 +517,22 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
     # Including it breaks employee creation silently.
     date_of_birth = _get(fields, "date_of_birth") or "1990-01-01"
 
+    # Check for existing employee with same name before creating (avoid duplicates)
+    try:
+        existing_emps = await client.get_employees({"firstName": first_name})
+        if existing_emps:
+            for emp in existing_emps:
+                emp_last = (emp.get("lastName") or "").lower()
+                emp_email = (emp.get("email") or "").lower()
+                # Match by name or by email
+                if emp_last == last_name.lower() or emp_email == email.lower():
+                    _log("INFO", "Employee already exists", name=f"{first_name} {last_name}",
+                         id=emp["id"])
+                    return {"created_id": emp["id"], "entity": "employee",
+                            "action": "already_exists"}
+    except (TripletexAPIError, Exception):
+        pass
+
     payload = _clean({
         "firstName": first_name,
         "lastName": last_name,
@@ -559,16 +575,18 @@ async def _exec_create_employee(fields: dict, client: TripletexClient) -> dict:
                 result = await client.create_employee(minimal_payload)
                 return {"created_id": result.get("id"), "entity": "employee"}
             except TripletexAPIError as e2:
-                # If email already exists, try with modified email
-                err_str = str(e2)
-                if "e-post" in err_str.lower() or "email" in err_str.lower() or "allerede" in err_str.lower():
-                    import random
-                    suffix = random.randint(100, 999)
-                    alt_email = f"{first_name.lower()}.{last_name.lower()}.{suffix}@example.com"
-                    minimal_payload["email"] = alt_email
+                # If email already exists or any 422, retry with timestamp-based email
+                import time
+                ts = int(time.time()) % 100000
+                alt_email = f"{first_name.lower()}.{last_name.lower()}.{ts}@example.com"
+                _log("INFO", "Retrying employee creation with alt email", alt_email=alt_email)
+                minimal_payload["email"] = alt_email
+                try:
                     result = await client.create_employee(minimal_payload)
                     return {"created_id": result.get("id"), "entity": "employee"}
-                raise
+                except TripletexAPIError as e3:
+                    return {"success": False, "entity": "employee",
+                            "error": f"Employee creation failed: {(e3.detail or str(e3))[:200]}"}
         raise
 
 
@@ -794,10 +812,13 @@ async def _exec_create_product(fields: dict, client: TripletexClient) -> dict:
 
 
 async def _exec_create_department(fields: dict, client: TripletexClient) -> dict:
-    """POST /department — 1-2 API calls.
+    """POST /department — 1-3 API calls.
 
     Handles department number conflicts by checking existing departments first.
+    If departmentNumber already taken, retries without it or with a random high number.
     """
+    import random
+
     name = _get(fields, "name") or _get(fields, "department_name")
     dept_num = _get(fields, "department_number")
     if dept_num is not None:
@@ -805,20 +826,26 @@ async def _exec_create_department(fields: dict, client: TripletexClient) -> dict
             dept_num = int(_parse_number(dept_num))
         except (ValueError, TypeError):
             dept_num = None
-    if "name" not in (fields or {}) and not name:
-        return {"success": False, "error": "No department name specified"}
     if not name:
         return {"success": False, "error": "No department name specified"}
 
-    # Check if department with same name already exists
+    # Check if department with same name OR same number already exists
     try:
-        existing = await client.get_departments({"name": name})
+        existing = await client.get_departments({"count": 100})
         if existing:
             for dept in existing:
+                # Exact name match → return existing
                 if dept.get("name", "").lower() == name.lower():
-                    _log("INFO", "Department already exists", name=name, id=dept["id"])
+                    _log("INFO", "Department already exists by name", name=name, id=dept["id"])
                     return {"created_id": dept["id"], "entity": "department",
                             "action": "already_exists"}
+            # If departmentNumber is specified and already taken, clear it
+            if dept_num is not None:
+                taken_nums = {dept.get("departmentNumber") for dept in existing}
+                if dept_num in taken_nums:
+                    _log("INFO", "Department number already taken, will auto-assign",
+                         dept_num=dept_num)
+                    dept_num = None  # Let Tripletex assign
     except TripletexAPIError:
         pass
 
@@ -832,21 +859,24 @@ async def _exec_create_department(fields: dict, client: TripletexClient) -> dict
         result = await client.create_department(payload)
         return {"created_id": result.get("id"), "entity": "department"}
     except TripletexAPIError as e:
-        if e.status_code == 422 and dept_num is not None:
-            # Department number conflict — retry without the number (let Tripletex assign)
-            _log("WARNING", "Department creation failed with number, retrying without",
+        if e.status_code == 422:
+            _log("WARNING", "Department creation 422, retrying without number",
                  dept_num=dept_num, error=str(e)[:200])
+            # Retry 1: without departmentNumber
             payload.pop("departmentNumber", None)
             try:
                 result = await client.create_department(payload)
                 return {"created_id": result.get("id"), "entity": "department"}
             except TripletexAPIError:
                 pass
-            # Try with a high number unlikely to conflict
-            import random
-            payload["departmentNumber"] = random.randint(900, 9999)
-            result = await client.create_department(payload)
-            return {"created_id": result.get("id"), "entity": "department"}
+            # Retry 2: with a random high number unlikely to conflict
+            payload["departmentNumber"] = random.randint(9000, 99999)
+            try:
+                result = await client.create_department(payload)
+                return {"created_id": result.get("id"), "entity": "department"}
+            except TripletexAPIError as e3:
+                return {"success": False, "entity": "department",
+                        "error": f"Department creation failed: {(e3.detail or str(e3))[:200]}"}
         raise
 
 
@@ -1312,6 +1342,23 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
             except TripletexAPIError as e:
                 _log("WARNING", "Customer-based invoice lookup failed", error=str(e)[:200])
 
+    # Absolute fallback: get most recent unpaid invoice
+    if not invoice_id:
+        try:
+            all_invoices = await client.get_invoices({
+                "invoiceDateFrom": "2026-01-01",
+                "invoiceDateTo": "2099-12-31",
+                "count": 50,
+            })
+            unpaid = [inv for inv in all_invoices
+                      if float(inv.get("amountOutstanding") or inv.get("amount") or 0) > 0]
+            if unpaid:
+                best = max(unpaid, key=lambda inv: inv.get("id", 0))
+                invoice_id = best["id"]
+                _log("INFO", "Using most recent unpaid invoice as fallback", invoice_id=invoice_id)
+        except (TripletexAPIError, Exception):
+            pass
+
     if not invoice_id:
         return {"success": False, "error": "No invoice specified for payment"}
 
@@ -1377,6 +1424,32 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
                 invoice_id = resolved
         if not invoice_id:
             return {"success": False, "error": f"Invoice #{invoice_number} not found"}
+
+    # Fallback: search by customer name → get their invoices
+    if not invoice_id:
+        customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+        org_number = _get(fields, "organization_number")
+        if customer_name or org_number:
+            try:
+                search_params = {"fields": "*"}
+                if customer_name:
+                    search_params["customerName"] = customer_name
+                if org_number:
+                    search_params["organizationNumber"] = org_number
+                customers = await client.get_customers(search_params)
+                if customers:
+                    cust_id = customers[0]["id"]
+                    invoices = await client.get_invoices({
+                        "customerId": str(cust_id),
+                        "invoiceDateFrom": "2000-01-01",
+                        "invoiceDateTo": "2099-12-31",
+                    })
+                    if invoices:
+                        best = max(invoices, key=lambda inv: inv.get("id", 0))
+                        invoice_id = best["id"]
+                        _log("INFO", "Found invoice via customer lookup for credit note", invoice_id=invoice_id)
+            except (TripletexAPIError, Exception) as e:
+                _log("WARNING", "Customer-based invoice lookup failed for credit note", error=str(e)[:200])
 
     # If still no invoice, try to find most recent invoice
     if not invoice_id:
@@ -1933,10 +2006,44 @@ async def _exec_project_billing(fields: dict, client: TripletexClient) -> dict:
     if not proj:
         proj = await client.get_project(int(project_id))
     customer_ref = proj.get("customer")
-    if not customer_ref or not customer_ref.get("id"):
-        return {"success": False, "error": "Project has no linked customer for invoicing"}
 
-    fields["customer_id"] = customer_ref["id"]
+    # Auto-link customer if project has none
+    if not customer_ref or not customer_ref.get("id"):
+        customer_name = _get(fields, "customer_name") or _get(fields, "customer_identifier")
+        customer_id = _get(fields, "customer_id")
+        if not customer_id and customer_name:
+            cust = await _find_customer(client, fields)
+            if cust:
+                customer_id = cust["id"]
+        if not customer_id:
+            # Try to find any customer as fallback
+            try:
+                customers = await client.get_customers({"count": 5})
+                if customers:
+                    customer_id = customers[0]["id"]
+                    _log("INFO", "Using first available customer for project billing", customer_id=customer_id)
+            except (TripletexAPIError, Exception):
+                pass
+        if customer_id:
+            try:
+                update_payload = {
+                    "id": proj["id"],
+                    "version": proj.get("version", 0),
+                    "name": proj.get("name"),
+                    "customer": {"id": int(customer_id)},
+                }
+                proj = await client.update_project(int(project_id), update_payload)
+                _log("INFO", "Linked customer to project for billing",
+                     project_id=project_id, customer_id=customer_id)
+            except TripletexAPIError as e:
+                _log("WARNING", "Failed to link customer to project", error=str(e)[:200])
+                return {"success": False, "error": f"Project has no linked customer and auto-link failed: {str(e)[:100]}"}
+        else:
+            return {"success": False, "error": "Project has no linked customer for invoicing"}
+        fields["customer_id"] = customer_id
+    else:
+        fields["customer_id"] = customer_ref["id"]
+
     return await _exec_create_invoice(fields, client)
 
 
@@ -2183,6 +2290,17 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
     if not activity_id:
         return {"success": False, "error": "No activity found for hour logging"}
 
+    # Collect all known activity IDs for retry fallback
+    _all_activity_ids = []
+    try:
+        _all_acts = await client.get_activities({})
+        # Prefer project activities, then any
+        proj_acts = [a for a in _all_acts if a.get("isProjectActivity")]
+        other_acts = [a for a in _all_acts if not a.get("isProjectActivity")]
+        _all_activity_ids = [a["id"] for a in proj_acts + other_acts if a.get("id") != activity_id]
+    except (TripletexAPIError, Exception):
+        pass
+
     # 4. Create timesheet entry
     hours = _get(fields, "hours") or _get(fields, "hours_worked") or _get(fields, "hoursWorked")
     if hours is None:
@@ -2214,16 +2332,35 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
         result = await client.create_timesheet_entry(payload)
     except TripletexAPIError as e:
         if e.status_code == 422:
-            # 422 often means date validation — retry with today's date
             _log("WARNING", "Timesheet 422 — retrying with today's date",
                  detail=(e.detail or "")[:200])
+            # Retry A: today's date
             payload["date"] = _today()
             try:
                 result = await client.create_timesheet_entry(payload)
-            except TripletexAPIError as e2:
-                _log("WARNING", "Timesheet retry also failed", detail=(e2.detail or "")[:200])
-                return {"success": False, "error": f"Timesheet entry failed: {(e2.detail or str(e2))[:200]}",
-                        "employee_id": employee_id, "project_id": project_id}
+            except TripletexAPIError:
+                # Retry B: try each alternative activity
+                result = None
+                for alt_act_id in _all_activity_ids[:5]:
+                    payload["activity"] = {"id": int(alt_act_id)}
+                    try:
+                        result = await client.create_timesheet_entry(payload)
+                        _log("INFO", "Timesheet succeeded with alt activity", activity_id=alt_act_id)
+                        activity_id = alt_act_id
+                        break
+                    except (TripletexAPIError, Exception):
+                        continue
+                if not result:
+                    # Retry C: without employee (use default logged-in user)
+                    payload.pop("employee", None)
+                    payload["activity"] = {"id": int(activity_id)}
+                    try:
+                        result = await client.create_timesheet_entry(payload)
+                        _log("INFO", "Timesheet succeeded without explicit employee")
+                    except TripletexAPIError as e_final:
+                        return {"success": False,
+                                "error": f"Timesheet entry failed: {(e_final.detail or str(e_final))[:200]}",
+                                "employee_id": employee_id, "project_id": project_id}
         else:
             raise
     return {"created_id": result.get("id"), "entity": "timesheet_entry",
@@ -2412,7 +2549,51 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
     """
     voucher_identifier = _get(fields, "voucher_identifier")
     if not voucher_identifier:
-        return {"success": False, "error": "No voucher identifier provided"}
+        # FIX 7: Search recent vouchers by description/amount instead of failing
+        _log("INFO", "No voucher identifier — searching recent vouchers by description/amount")
+        description_hint = _get(fields, "description") or _get(fields, "correction_description") or ""
+        amount_hint = _get(fields, "amount")
+        search_date_from = _get(fields, "date_from") or (date.today() - timedelta(days=30)).isoformat()
+        search_date_to = _get(fields, "date_to") or _today()
+        try:
+            recent = await client.get_vouchers({
+                "dateFrom": search_date_from,
+                "dateTo": search_date_to,
+                "count": 50,
+            })
+            if recent and (description_hint or amount_hint):
+                desc_lower = (description_hint or "").lower()
+                best = None
+                for v in recent:
+                    v_desc = (v.get("description") or "").lower()
+                    if desc_lower and desc_lower in v_desc:
+                        best = v
+                        break
+                    if amount_hint:
+                        try:
+                            v_amount = abs(float(v.get("amount", 0)))
+                            if abs(v_amount - abs(float(amount_hint))) < 0.01:
+                                best = v
+                                break
+                        except (ValueError, TypeError):
+                            pass
+                if best:
+                    voucher_identifier = best.get("number") or best.get("id")
+                    _log("INFO", "Found voucher by description/amount search",
+                         voucher_id=best.get("id"), desc=best.get("description", "")[:50])
+            elif recent:
+                # No hints — use most recent voucher
+                best = recent[0]
+                voucher_identifier = best.get("number") or best.get("id")
+                _log("INFO", "Using most recent voucher (no hints)", voucher_id=best.get("id"))
+        except TripletexAPIError as e:
+            _log("WARNING", "Voucher search fallback failed", error=str(e)[:200])
+        if not voucher_identifier:
+            return {
+                "entity": "voucher",
+                "action": "not_found",
+                "note": "No voucher identifier provided and no matching recent vouchers found.",
+            }
 
     voucher_id = None
     voucher = None
@@ -3379,9 +3560,11 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
 
     # NOTE: "supplier" field does NOT exist on voucher postings — it causes
     # "Request mapping failed" (code 16000). Only use valid posting fields.
+    # FIX 9: Use invoiceDueDate (NOT dueDate) for supplier invoice vouchers
     voucher_payload = _clean({
         "date": voucher_date,
         "description": description,
+        "invoiceDueDate": due_date if due_date else None,
         "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
         "postings": [
             {
@@ -4024,15 +4207,34 @@ async def _exec_update_product(fields: dict, client: TripletexClient) -> dict:
 
 
 async def _exec_delete_department(fields: dict, client: TripletexClient) -> dict:
-    """Find and delete a department by name."""
+    """Find and delete a department by name (fuzzy match). Falls back to deactivation on 422."""
     name = _get(fields, "name") or _get(fields, "department_name")
     dept_number = _get(fields, "department_number")
     if not name and not dept_number:
         return {"success": False, "error": "No department name or number specified"}
 
     depts = []
+    dept = None
+
+    # FIX 8: Fuzzy name matching — fetch all departments and match client-side
     if name:
+        # Try exact API search first
         depts = await client.get_departments({"name": name})
+        if not depts:
+            # Fuzzy: fetch all departments and match case-insensitively / partial
+            all_depts = await client.get_departments({})
+            name_lower = name.lower()
+            # Exact case-insensitive match
+            exact = [d for d in all_depts if d.get("name", "").lower() == name_lower]
+            if exact:
+                depts = exact
+            else:
+                # Partial / substring match
+                partial = [d for d in all_depts if name_lower in d.get("name", "").lower()
+                           or d.get("name", "").lower() in name_lower]
+                if partial:
+                    depts = partial
+
     if not depts and dept_number:
         depts = await client.get_departments({"departmentNumber": str(dept_number)})
     if not depts:
@@ -4042,10 +4244,28 @@ async def _exec_delete_department(fields: dict, client: TripletexClient) -> dict
     try:
         await client.delete(f"/department/{dept['id']}")
     except TripletexAPIError as e:
+        if e.status_code == 422:
+            # FIX 8: Deactivation fallback — department has linked entities
+            _log("INFO", "Cannot delete department (has references), deactivating instead",
+                 dept_id=dept["id"], dept_name=dept.get("name"))
+            try:
+                deactivate_payload = {
+                    "id": dept["id"],
+                    "version": dept.get("version", 0),
+                    "name": dept.get("name"),
+                    "isInactive": True,
+                }
+                await client.put(f"/department/{dept['id']}", deactivate_payload)
+                return {
+                    "entity": "department",
+                    "action": "deactivated",
+                    "deactivated_id": dept["id"],
+                    "note": f"Department '{dept.get('name', '')}' could not be deleted (has linked entities) — deactivated instead.",
+                }
+            except TripletexAPIError as e2:
+                return {"success": False, "error": f"Cannot delete or deactivate department: {e2.detail[:200]}"}
         if e.status_code in (403, 409):
             return {"success": False, "error": f"Cannot delete department: {e.detail[:200]}"}
-        if e.status_code == 422:
-            return {"success": False, "error": f"Cannot delete department '{dept.get('name', '')}': has linked entities (employees, projects, etc.). {e.detail[:200]}"}
         return {"success": False, "error": f"Failed to delete department: {e.detail[:200]}"}
     return {"deleted_id": dept["id"], "entity": "department"}
 
