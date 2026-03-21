@@ -409,7 +409,16 @@ _KEYWORD_MAP = [
                                 # Nynorsk: "opprett den tilsette" / "motteke arbeidskontrakt"
                                 r"\barbeidskontrakt\b.*\b(opprett|registrer)",
                                 r"\b(opprett|registrer)\b.*\barbeidskontrakt\b",
-                                r"\boppre\w*\b.*\b(ansatt?|anstt)\b.*\b(e-?post|epost|email)\b"]),
+                                r"\boppre\w*\b.*\b(ansatt?|anstt)\b.*\b(e-?post|epost|email)\b",
+                                # Onboarding / offer letter patterns (must beat RUN_PAYROLL)
+                                r"\blettre\s+d.offre\b",
+                                r"\bcarta\s+de\s+oferta\b",
+                                r"\boffer\s+letter\b",
+                                r"\bint[eé]gration\b.*\b(employ[eé]|ansatt|tilsett|mitarbeiter|empleado)\b",
+                                r"\b(employ[eé]|ansatt|tilsett|mitarbeiter|empleado)\b.*\bint[eé]gration\b",
+                                r"\bcontrat\s+de\s+travail\b",
+                                r"\bcontrato\s+de\s+trabajo\b",
+                                r"\barbeitsvertrag\b"]),
     # --- Payroll (MUST come before employee patterns — "paie de X" should not match employee) ---
     (TaskType.RUN_PAYROLL, [
         r"\b(?:paie|payroll|lønn|lonn|gehalt|nómina|salaire|lønnskjøring|lønnsslipp|lonnsslipp|salary|lønnsutbetaling|lonnsutbetaling)\b",
@@ -1691,12 +1700,51 @@ async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClass
         has_csv = True
 
     override_type = None
+
+    # PROJECT LIFECYCLE detection — must come FIRST before supplier invoice overrides
+    # These compound prompts contain "facture fournisseur" / "Lieferantenrechnung" but
+    # are actually project lifecycle tasks (T3 compound: project + supplier + bill + pay)
+    _project_lifecycle_signals = [
+        "cycle de vie",           # French
+        "projektzyklus",          # German
+        "ciclo de vida",          # Spanish/Portuguese
+        "project lifecycle",      # English
+        "full project cycle",     # English
+        "prosjektets livssyklus", # Norwegian
+    ]
+    if any(sig in p_lower for sig in _project_lifecycle_signals):
+        override_type = TaskType.PROJECT_WITH_CUSTOMER
+
+    # ONBOARDING / OFFER LETTER → CREATE_EMPLOYEE (not run_payroll)
+    # These prompts mention salary but the task is employee creation from an offer letter/contract
+    elif any(sig in p_lower for sig in [
+        "lettre d'offre",        # French: offer letter
+        "lettre d offre",        # French: without apostrophe
+        "carta de oferta",       # Spanish: offer letter
+        "carta de oferecimento", # Portuguese: offer letter
+        "offer letter",          # English
+        "angebotsschreiben",     # German: offer letter
+        "tilbudsbrev",           # Norwegian: offer letter
+        "arbeidskontrakt",       # Norwegian: employment contract
+        "contrato de trabajo",   # Spanish: employment contract
+        "contrat de travail",    # French: employment contract
+        "arbeitsvertrag",        # German: employment contract
+        "contrato de trabalho",  # Portuguese: employment contract
+    ]) and any(sig in p_lower for sig in [
+        "employé", "employe", "empleado", "funcionário", "funcionario",
+        "mitarbeiter", "ansatt", "tilsett", "employee",
+        "intégration", "integration", "incorporaci", "onboarding",
+        "créez", "creez", "crea ", "criar", "erstellen", "opprett",
+    ]):
+        override_type = TaskType.CREATE_EMPLOYEE
+
     # CSV + bank signals → BANK_RECONCILIATION (fixes French bank recon misclassification)
-    bank_signals = ["banque", "bancaire", "bank", "konto", "compte", "relevé",
-                    "releve", "solde", "transact", "kontoutskrift", "kontoauszug",
-                    "rapproch", "reconcil", "avstem", "abgleich"]
-    if has_csv and any(sig in p_lower for sig in bank_signals):
-        override_type = TaskType.BANK_RECONCILIATION
+    elif has_csv:
+        bank_signals = ["banque", "bancaire", "bank", "konto", "compte", "relevé",
+                        "releve", "solde", "transact", "kontoutskrift", "kontoauszug",
+                        "rapproch", "reconcil", "avstem", "abgleich"]
+        if any(sig in p_lower for sig in bank_signals):
+            override_type = TaskType.BANK_RECONCILIATION
     # German: "Rechnung" + supplier signal → REGISTER_SUPPLIER_INVOICE
     elif "rechnung" in p_lower and any(s in p_lower for s in [
         "lieferant", "zulieferer", "vom lieferant", "des lieferant",
@@ -1817,7 +1865,7 @@ API_KEY = os.environ.get("API_KEY")
 async def root():
     return {
         "service": "Tripletex AI Accounting Agent",
-        "version": "1.0.0",
+        "version": "1.1.0-lifecycle-fix",
         "llm_mode": LLM_MODE,
         "status": "running",
     }

@@ -3004,7 +3004,7 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
                     "postings": postings,
                 }
                 _normalize_postings(voucher_data)
-                voucher = await client.create_voucher(voucher_data)
+                voucher = await client.create_voucher(voucher_data, send_to_ledger=True)
                 voucher_ids.append(voucher.get("id"))
             except TripletexAPIError as e:
                 _log("WARNING", "Failed to create voucher for bank txn",
@@ -3041,7 +3041,9 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
 async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
     """Correct an error in the ledger.
 
-    Two modes:
+    Three modes:
+    0) Cost analysis: if the prompt asks to analyze cost increases between months,
+       query the ledger and return a summary (no corrections needed).
     A) Difference correction: if original + correct amounts are known, create a
        correcting voucher for just the difference (don't reverse the original).
     B) Full reversal: reverse or delete the original voucher.
@@ -3049,6 +3051,168 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
     API calls: 1-4 depending on mode.
     """
     prompt_text = _get(fields, "raw_prompt") or _get(fields, "description") or ""
+    prompt_lower = prompt_text.lower()
+
+    # ── Mode 0: Cost analysis — "find the N cost accounts with biggest increase" ──
+    cost_analysis_signals = [
+        "kostnadskontoane med størst",    # Nynorsk
+        "kostnadskontoen med størst",     # Bokmål
+        "kostnadene som auka",            # Nynorsk
+        "kostnader som økte",             # Bokmål
+        "custos totais aumentaram",       # Portuguese
+        "contas de custos com maior",     # Portuguese
+        "costes? totales aumentaron",     # Spanish
+        "cuentas de costos? con mayor",   # Spanish
+        "comptes de charges? avec la plus grande", # French
+        "coûts totaux ont augmenté",      # French
+        "Gesamtkosten stiegen",           # German
+        "Kostenkonten mit dem größten",   # German
+        "cost accounts with.*biggest",    # English
+        "total costs increased",          # English
+        "analyser hovudboka.*kostnads",   # Nynorsk
+        "analise o livro razão.*custos",  # Portuguese
+    ]
+    is_cost_analysis = any(sig in prompt_lower for sig in cost_analysis_signals)
+    if not is_cost_analysis:
+        # Also check regex patterns
+        is_cost_analysis = bool(re.search(
+            r"(?:kostnad|custos?|coûts?|costes?|kosten|costs?).*(?:auk[ae]|økt|aumentar|increase|augment|stieg|größt|maior|biggest)",
+            prompt_lower,
+        ))
+
+    if is_cost_analysis:
+        _log("INFO", "Cost analysis mode — querying ledger for cost account changes")
+
+        # Parse months from prompt (default: January→February of current year)
+        year = 2026
+        year_m = re.search(r"20\d{2}", prompt_text)
+        if year_m:
+            year = int(year_m.group())
+
+        # Detect month pair
+        month_from, month_to = 1, 2  # default: January→February
+        month_names = {
+            "januar": 1, "january": 1, "enero": 1, "janvier": 1, "janeiro": 1, "januar": 1,
+            "februar": 2, "february": 2, "febrero": 2, "février": 2, "fevereiro": 2,
+            "mars": 3, "march": 3, "marzo": 3, "mars": 3, "março": 3, "marz": 3, "märz": 3,
+            "april": 4, "abril": 4, "avril": 4,
+            "mai": 5, "may": 5, "mayo": 5, "maio": 5,
+            "juni": 6, "june": 6, "junio": 6, "juin": 6, "junho": 6,
+        }
+        found_months = []
+        for name, num in month_names.items():
+            if name in prompt_lower:
+                found_months.append(num)
+        found_months = sorted(set(found_months))
+        if len(found_months) >= 2:
+            month_from = found_months[0]
+            month_to = found_months[1]
+
+        # Parse how many accounts to find (default: 3)
+        top_n = 3
+        n_m = re.search(r"(?:tre|drei|três|tres|three|3)\b", prompt_lower)
+        if n_m:
+            top_n = 3
+        n_m2 = re.search(r"(?:fem|fünf|cinco|cinq|five|5)\b", prompt_lower)
+        if n_m2:
+            top_n = 5
+
+        # Query postings for month_from
+        from_start = f"{year}-{month_from:02d}-01"
+        from_end = f"{year}-{month_from:02d}-28"  # safe end for all months
+        if month_from in (1, 3, 5, 7, 8, 10, 12):
+            from_end = f"{year}-{month_from:02d}-31"
+        elif month_from in (4, 6, 9, 11):
+            from_end = f"{year}-{month_from:02d}-30"
+
+        to_start = f"{year}-{month_to:02d}-01"
+        to_end = f"{year}-{month_to:02d}-28"
+        if month_to in (1, 3, 5, 7, 8, 10, 12):
+            to_end = f"{year}-{month_to:02d}-31"
+        elif month_to in (4, 6, 9, 11):
+            to_end = f"{year}-{month_to:02d}-30"
+
+        try:
+            postings_m1 = await client.get_postings({
+                "dateFrom": from_start, "dateTo": from_end,
+                "accountNumberFrom": "4000", "accountNumberTo": "7999",
+                "count": 10000, "fields": "account(number,name),amountGross",
+            })
+        except Exception as e:
+            _log("WARNING", "Failed to get month1 postings", error=str(e)[:200])
+            postings_m1 = []
+
+        try:
+            postings_m2 = await client.get_postings({
+                "dateFrom": to_start, "dateTo": to_end,
+                "accountNumberFrom": "4000", "accountNumberTo": "7999",
+                "count": 10000, "fields": "account(number,name),amountGross",
+            })
+        except Exception as e:
+            _log("WARNING", "Failed to get month2 postings", error=str(e)[:200])
+            postings_m2 = []
+
+        # Aggregate by account
+        def _aggregate(postings):
+            totals: dict[str, dict] = {}
+            for p in postings:
+                acct = p.get("account") or {}
+                num = str(acct.get("number", ""))
+                name = acct.get("name", "")
+                amt = float(p.get("amountGross", 0) or 0)
+                if num not in totals:
+                    totals[num] = {"number": num, "name": name, "total": 0.0}
+                totals[num]["total"] += amt
+            return totals
+
+        totals_m1 = _aggregate(postings_m1)
+        totals_m2 = _aggregate(postings_m2)
+
+        # Find accounts with biggest increase
+        all_accounts = set(list(totals_m1.keys()) + list(totals_m2.keys()))
+        changes = []
+        for acct_num in all_accounts:
+            if not acct_num:
+                continue
+            m1_total = totals_m1.get(acct_num, {}).get("total", 0.0)
+            m2_total = totals_m2.get(acct_num, {}).get("total", 0.0)
+            increase = m2_total - m1_total
+            name = totals_m2.get(acct_num, totals_m1.get(acct_num, {})).get("name", "")
+            changes.append({
+                "account_number": acct_num,
+                "account_name": name,
+                "month1_total": round(m1_total, 2),
+                "month2_total": round(m2_total, 2),
+                "change": round(increase, 2),
+            })
+
+        # Sort by biggest increase (absolute cost increase)
+        changes.sort(key=lambda x: x["change"], reverse=True)
+        top_changes = changes[:top_n]
+
+        month_names_no = {1: "januar", 2: "februar", 3: "mars", 4: "april", 5: "mai", 6: "juni",
+                          7: "juli", 8: "august", 9: "september", 10: "oktober", 11: "november", 12: "desember"}
+        summary_lines = []
+        for c in top_changes:
+            summary_lines.append(
+                f"Konto {c['account_number']} ({c['account_name']}): "
+                f"endring {c['change']:+,.0f} kr "
+                f"({month_names_no.get(month_from, str(month_from))}: {c['month1_total']:,.0f} → "
+                f"{month_names_no.get(month_to, str(month_to))}: {c['month2_total']:,.0f})"
+            )
+
+        _log("INFO", "Cost analysis complete",
+             top_n=top_n, accounts_found=len(changes), top=top_changes)
+
+        return {
+            "entity": "cost_analysis",
+            "action": "analysis_complete",
+            "period_from": f"{month_names_no.get(month_from, str(month_from))} {year}",
+            "period_to": f"{month_names_no.get(month_to, str(month_to))} {year}",
+            "top_cost_increases": top_changes,
+            "summary": "\n".join(summary_lines),
+            "total_cost_accounts_analyzed": len(changes),
+        }
 
     # ── Parse original and correct amounts from prompt ──────────────────
     original_amount = _get(fields, "original_amount") or _get(fields, "wrong_amount")
@@ -3174,7 +3338,7 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
         _normalize_postings(correction_payload)
 
         try:
-            new_v = await client.create_voucher(correction_payload)
+            new_v = await client.create_voucher(correction_payload, send_to_ledger=True)
             return {
                 "entity": "voucher",
                 "action": "difference_correction",
@@ -3451,7 +3615,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
         }
         _normalize_postings(voucher_data)
 
-        voucher = await client.create_voucher(voucher_data)
+        voucher = await client.create_voucher(voucher_data, send_to_ledger=True)
         _log("INFO", "Closing voucher created", voucher_id=voucher.get("id"), year=year)
         return {
             "entity": "year_end_closing",
@@ -3962,7 +4126,7 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
 
     voucher_id = None
     try:
-        voucher = await client.create_voucher(voucher_payload)
+        voucher = await client.create_voucher(voucher_payload, send_to_ledger=True)
         voucher_id = voucher.get("id")
     except TripletexAPIError as e:
         # Single fallback: try without voucherType (let Tripletex pick default)
@@ -3970,7 +4134,7 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
              error=str(e)[:200])
         voucher_payload.pop("voucherType", None)
         try:
-            voucher = await client.create_voucher(voucher_payload)
+            voucher = await client.create_voucher(voucher_payload, send_to_ledger=True)
             voucher_id = voucher.get("id")
         except TripletexAPIError:
             pass
@@ -4333,7 +4497,7 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
     })
     _normalize_postings(voucher_payload)
     try:
-        voucher = await client.create_voucher(voucher_payload)
+        voucher = await client.create_voucher(voucher_payload, send_to_ledger=True)
         voucher_id = voucher.get("id")
         return {
             "entity": "supplier_invoice",
@@ -4347,7 +4511,7 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
     # Approach 4: Direct voucher without voucherType
     try:
         voucher_payload.pop("voucherType", None)
-        voucher = await client.create_voucher(voucher_payload)
+        voucher = await client.create_voucher(voucher_payload, send_to_ledger=True)
         voucher_id = voucher.get("id")
         return {
             "entity": "supplier_invoice",
@@ -4504,7 +4668,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
         _normalize_postings(voucher_payload)
 
         try:
-            voucher = await client.create_voucher(voucher_payload)
+            voucher = await client.create_voucher(voucher_payload, send_to_ledger=True)
             return {
                 "entity": "dimension_voucher",
                 "voucher_id": voucher.get("id"),
@@ -4708,7 +4872,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
         "description": description,
     }
 
-    # Link dimension value to the debit posting
+    # Link dimension value to both postings
     if linked_value_id and dim_number:
         dim_field = f"freeAccountingDimension{dim_number}"
         debit_posting[dim_field] = {"id": linked_value_id}
@@ -4730,7 +4894,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     _normalize_postings(voucher_payload)
 
     try:
-        voucher = await client.create_voucher(voucher_payload)
+        voucher = await client.create_voucher(voucher_payload, send_to_ledger=True)
         voucher_id = voucher.get("id")
     except TripletexAPIError as e:
         _log("WARNING", "Voucher with dimension failed", error=str(e)[:200])
@@ -5618,7 +5782,7 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
 
     accrual_voucher_id = None
     try:
-        result = await client.create_voucher(accrual_payload)
+        result = await client.create_voucher(accrual_payload, send_to_ledger=True)
         accrual_voucher_id = result.get("id")
         _log("INFO", "Accrual voucher created", voucher_id=accrual_voucher_id)
     except TripletexAPIError as e:
@@ -5650,7 +5814,7 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
         _normalize_postings(depr_payload)
 
         try:
-            result = await client.create_voucher(depr_payload)
+            result = await client.create_voucher(depr_payload, send_to_ledger=True)
             depr_voucher_id = result.get("id")
             _log("INFO", "Depreciation voucher created", voucher_id=depr_voucher_id)
         except TripletexAPIError as e:
@@ -5714,7 +5878,7 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
                 })
                 _normalize_postings(closing_payload)
                 try:
-                    result = await client.create_voucher(closing_payload)
+                    result = await client.create_voucher(closing_payload, send_to_ledger=True)
                     closing_voucher_id = result.get("id")
                     _log("INFO", "Closing voucher created", voucher_id=closing_voucher_id)
                 except TripletexAPIError as e:
