@@ -55,6 +55,7 @@ class TaskType(str, Enum):
     ERROR_CORRECTION = "error_correction"
     YEAR_END_CLOSING = "year_end_closing"
     ENABLE_MODULE = "enable_module"
+    REGISTER_SUPPLIER_INVOICE = "register_supplier_invoice"
     CREATE_DIMENSION_VOUCHER = "create_dimension_voucher"
 
     # Fallback
@@ -351,6 +352,14 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
         "required": ["module_name"],
         "optional": [],
     },
+    TaskType.REGISTER_SUPPLIER_INVOICE: {
+        "required": ["supplier_name"],
+        "optional": [
+            "organization_number", "invoice_number", "amount_including_vat",
+            "amount_excluding_vat", "vat_amount", "vat_percentage",
+            "invoice_date", "due_date", "description", "account_number",
+        ],
+    },
     TaskType.CREATE_DIMENSION_VOUCHER: {
         "required": ["dimension_name"],
         "optional": [
@@ -412,6 +421,7 @@ TASK_TYPE_DESCRIPTIONS: dict[TaskType, str] = {
     TaskType.ERROR_CORRECTION: "Correct an error in the ledger (reverse or adjust a voucher)",
     TaskType.YEAR_END_CLOSING: "Perform year-end closing procedures",
     TaskType.ENABLE_MODULE: "Enable a company module or feature in Tripletex",
+    TaskType.REGISTER_SUPPLIER_INVOICE: "Register/record an incoming supplier or vendor invoice (leverandørfaktura / Lieferantenrechnung)",
     TaskType.CREATE_DIMENSION_VOUCHER: "Create a custom accounting dimension with values, and optionally post a voucher linked to a dimension value",
     TaskType.UNKNOWN: "Could not determine the task type — use fallback logic",
 }

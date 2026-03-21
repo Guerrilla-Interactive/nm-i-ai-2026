@@ -2136,19 +2136,13 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
     voucher_id = None
     voucher = None
 
-    # Default date range: extract from fields or use current month
+    # Default date range: extract from fields or use full current year
     date_from = _get(fields, "date_from")
     date_to = _get(fields, "date_to")
     if not date_from or not date_to:
         today = date.today()
-        first_of_month = today.replace(day=1)
-        # Last day of current month
-        if today.month == 12:
-            last_of_month = today.replace(day=31)
-        else:
-            last_of_month = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
-        date_from = date_from or first_of_month.isoformat()
-        date_to = date_to or last_of_month.isoformat()
+        date_from = date_from or f"{today.year}-01-01"
+        date_to = date_to or f"{today.year}-12-31"
 
     voucher_search_params = {
         "number": str(voucher_identifier),
@@ -3222,6 +3216,17 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
     # If no amount specified, try a minimal voucher (1000 NOK default) if we have values
     # The prompt may request "opprett dimensjon ... og før bilag" (create dimension and post voucher)
     create_voucher = _get(fields, "create_voucher")
+
+    # Detect voucher intent from original prompt/description even when create_voucher not explicitly set
+    if not create_voucher:
+        # Use original description from fields (before fallback default) to detect intent
+        orig_desc = _get(fields, "description") or ""
+        prompt_text = _get(fields, "prompt") or _get(fields, "original_prompt") or ""
+        intent_text = f"{orig_desc} {prompt_text}".lower()
+        voucher_keywords = ("bilag", "bokfør", "bokfor", "før bilag")
+        if any(kw in intent_text for kw in voucher_keywords):
+            create_voucher = True
+
     if (amount is None or amount == 0) and not create_voucher:
         return {
             "entity": "dimension",
@@ -3241,6 +3246,11 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             if cv["name"].lower() == linked_dim_value.lower():
                 linked_value_id = cv.get("id")
                 break
+
+    # If no linked_dim_value specified, default to the first created value
+    if not linked_value_id and created_values:
+        linked_value_id = created_values[0].get("id")
+        linked_dim_value = created_values[0].get("name")
 
     # Step 5: Look up accounts
     try:
@@ -3722,6 +3732,7 @@ _EXECUTORS: dict[TaskType, Any] = {
     TaskType.ERROR_CORRECTION: _exec_error_correction,
     TaskType.YEAR_END_CLOSING: _exec_year_end_closing,
     TaskType.ENABLE_MODULE: _exec_enable_module,
+    TaskType.REGISTER_SUPPLIER_INVOICE: _exec_create_supplier_invoice,
     TaskType.CREATE_DIMENSION_VOUCHER: _exec_create_dimension_voucher,
     # Fallback
     TaskType.UNKNOWN: _exec_unknown,

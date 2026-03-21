@@ -137,8 +137,9 @@ English (en), Spanish (es), Portuguese (pt), German (de), French (fr) — you mu
 - If unsure between create_invoice and invoice_existing_customer, prefer invoice_existing_customer \
 when the prompt implies the customer already exists in the system.
 - Travel expense keywords: "reiseregning", "reise", "diett", "kjøregodtgjørelse", "utlegg"
-- leverandør/supplier + faktura/invoice → create_supplier_invoice (NOT create_invoice)
-- "inngående faktura", "mottatt faktura", "leverandørfaktura", "Eingangsrechnung", "facture fournisseur" → create_supplier_invoice
+- leverandør/supplier + faktura/invoice → register_supplier_invoice (NOT create_invoice)
+- "inngående faktura", "mottatt faktura", "leverandørfaktura", "Eingangsrechnung", "facture fournisseur" → register_supplier_invoice
+- "vendor invoice", "supplier invoice", "Lieferantenrechnung" → register_supplier_invoice (NOT create_invoice)
 - CRITICAL: "Registrieren Sie den Lieferanten" / "registrer leverandør" / "register supplier" → create_supplier (NOT create_customer)
 - CRITICAL: "Exécutez la paie" / "kjør lønn" / "run payroll" / "Gehaltsabrechnung" / "ejecutar nómina" → run_payroll
 - CRITICAL: "reverser betaling" / "payment returned/bounced by bank" / "Zahlung rückerstattet" → reverse_payment (NOT create_credit_note or error_correction). \
@@ -161,6 +162,10 @@ register_payment is ONLY for registering payment on an ALREADY EXISTING invoice 
 AND mentions payment → invoice_with_payment
 - dimension/Buchhaltungsdimension/dimensjon + values/voucher/Beleg → create_dimension_voucher
 - "fri dimensjon", "custom dimension", "Kostsenter", "Kostenstelle", "cost center" → create_dimension_voucher
+- CRITICAL: "aktiver modul" / "enable module" / "activer le module" → enable_module (NOT create_project, NOT create_travel_expense, NOT run_payroll). \
+Even if the module name contains "Reiseregning" / "Travel Expense" / "Prosjekt" / "lønn", classify as enable_module.
+- CRITICAL: "årsavslutning" / "arsavslutning" / "årsoppgjør" / "avslutt år" / "year-end closing" → year_end_closing
+- CRITICAL: "leverandørfaktura" / "leverandorfaktura" / "inngående faktura" / "Eingangsrechnung" / "facture fournisseur" / "supplier invoice" → register_supplier_invoice (NOT create_invoice)
 
 ## FEW-SHOT EXAMPLES
 
@@ -338,6 +343,46 @@ Output:
 Input: "Betalingen fra Tindra AS ble returnert av banken. Reverser betalingen slik at fakturaen igjen vises som utestående."
 Output:
 {{"task_type": "reverse_payment", "confidence": 0.97, "fields": {{"customer_name": "Tindra AS"}}}}
+
+### Example 26 — Year-end closing (Norwegian)
+Input: "Utfør årsavslutning for 2025"
+Output:
+{{"task_type": "year_end_closing", "confidence": 0.97, "fields": {{"year": "2025"}}}}
+
+### Example 26b — Year-end closing (Norwegian ASCII)
+Input: "Utfor arsavslutning for 2025"
+Output:
+{{"task_type": "year_end_closing", "confidence": 0.95, "fields": {{"year": "2025"}}}}
+
+### Example 26c — Year-end closing (German)
+Input: "Jahresabschluss für 2025 durchführen"
+Output:
+{{"task_type": "year_end_closing", "confidence": 0.96, "fields": {{"year": "2025"}}}}
+
+### Example 27 — Enable module (Norwegian)
+Input: "Aktiver modul Reiseregning"
+Output:
+{{"task_type": "enable_module", "confidence": 0.97, "fields": {{"module_name": "Reiseregning"}}}}
+
+### Example 27b — Enable module (English — note: NOT create_travel_expense!)
+Input: "Enable module Travel Expense"
+Output:
+{{"task_type": "enable_module", "confidence": 0.97, "fields": {{"module_name": "Travel Expense"}}}}
+
+### Example 27c — Enable module (French — note: NOT create_travel_expense!)
+Input: "Activer le module Frais de voyage"
+Output:
+{{"task_type": "enable_module", "confidence": 0.96, "fields": {{"module_name": "Frais de voyage"}}}}
+
+### Example 28 — Register supplier invoice (Norwegian)
+Input: "Registrer leverandørfaktura fra Bygg AS på 45000 kr inkl. mva"
+Output:
+{{"task_type": "register_supplier_invoice", "confidence": 0.97, "fields": {{"supplier_name": "Bygg AS", "amount_including_vat": 45000.0}}}}
+
+### Example 28b — Register supplier invoice (German)
+Input: "Eingangsrechnung von Müller GmbH über 12000 NOK"
+Output:
+{{"task_type": "register_supplier_invoice", "confidence": 0.96, "fields": {{"supplier_name": "Müller GmbH", "amount_including_vat": 12000.0}}}}
 
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
@@ -1005,6 +1050,34 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "send faktura til kunde", "facturar cliente", "facturer client",
         ],
     },
+    TaskType.REGISTER_SUPPLIER_INVOICE: {
+        "keywords": [
+            # Norwegian (bokmål)
+            "leverandørfaktura", "registrer leverandørfaktura", "registrer leverandorfaktura",
+            "inngående faktura", "faktura fra leverandør",
+            # Nynorsk
+            "leverandørfaktura", "innkomande faktura", "motteke faktura",
+            # English
+            "supplier invoice", "vendor invoice", "register supplier invoice",
+            "incoming invoice", "received invoice",
+            # German
+            "lieferantenrechnung", "eingangsrechnung",
+            # French
+            "facture fournisseur",
+            # Spanish
+            "factura proveedor", "factura de proveedor", "factura del proveedor",
+            # Portuguese
+            "fatura de fornecedor", "fatura do fornecedor",
+            # ASCII variants
+            "leverandorfaktura", "inngaaende faktura",
+            "faktura fra leverandor", "registrer faktura fra",
+            # Swedish / Danish
+            "leverantörsfaktura", "inkommande faktura",
+            "indgående faktura",
+            # Additional
+            "mottatt faktura",
+        ],
+    },
     TaskType.CREATE_INVOICE: {
         "keywords": [
             "opprett faktura", "opprett en faktura", "opprett ein faktura",
@@ -1019,7 +1092,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "skapa faktura", "ny faktura", "opret faktura",
             "maak factuur", "nieuwe factuur", "luo lasku", "uusi lasku",
         ],
-        "anti_keywords": ["betalt", "paid", "innbetaling", "payment", "kreditnota", "credit note"],
+        "anti_keywords": ["betalt", "paid", "innbetaling", "payment", "kreditnota", "credit note",
+                          "leverandør", "supplier", "vendor", "lieferant", "fournisseur",
+                          "leverandor", "leverantör"],
     },
     TaskType.CREATE_PRODUCT: {
         "keywords": [
@@ -1097,7 +1172,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "reseräkning", "resa", "rejseafregning", "rejse",
             "reisdeclaratie", "reis", "matkakulut", "matka", "matkalasku",
         ],
-        "anti_keywords": ["slett", "delete", "fjern", "remove"],
+        "anti_keywords": ["slett", "delete", "fjern", "remove",
+                          "aktiver modul", "enable module", "activer module", "activer le module",
+                          "modul aktivieren", "activate module", "slå på modul"],
     },
     TaskType.CREATE_CONTACT: {
         "keywords": [
@@ -1150,18 +1227,25 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             # ASCII variants (no special chars)
             "arsavslutning", "aarsavslutning", "year.end", "arsslutt",
             "aarsoppgjor", "arsoppgjor",
+            # Additional Norwegian variants
+            "årsslutt", "year end closing", "annual close",
+            "avslutt år", "avslutt aar",
         ],
     },
     TaskType.ENABLE_MODULE: {
         "keywords": [
-            "aktiver modul", "enable module", "slå på modul", "activate module",
-            "activar módulo", "activer module",
+            "aktiver modul", "aktivere modul", "enable module", "slå på modul", "activate module",
+            "activar módulo", "activer module", "activer le module",
             # German / Portuguese
             "modul aktivieren", "ativar módulo",
             # Swedish / Danish
             "aktivera modul", "aktiver modul",
             # ASCII variants
             "slaa paa modul", "aktiver modulen",
+            # Compound patterns to win over competing keywords
+            "enable module travel", "enable module for",
+            "activer le module frais", "activer module frais",
+            "slå på modul for",
         ],
         "anti_keywords": ["opprett prosjekt", "create project", "nytt prosjekt", "new project"],
     },
@@ -1207,7 +1291,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
     TaskType.RUN_PAYROLL: {
         "keywords": [
             "kjør lønn", "utbetal lønn", "lønnskjøring", "lønnsslipp",
-            "run payroll", "execute payroll", "process payroll", "salary payment",
+            "run payroll", "payroll run", "execute payroll", "process payroll", "salary payment",
             "paie", "exécutez la paie", "exécuter la paie", "fiche de paie", "bulletin de paie",
             "gehalt", "gehaltsabrechnung", "lohnabrechnung", "lohn auszahlen",
             "nómina", "ejecutar nómina", "procesar nómina",
@@ -1222,6 +1306,8 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "lonnskjoring", "loennskjoering", "kjor lonn", "loennsslipp",
             "lonn", "lonnsutbetaling",
         ],
+        "anti_keywords": ["aktiver modul", "enable module", "activer module",
+                          "modul aktivieren", "activate module", "slå på modul"],
     },
     TaskType.CREATE_SUPPLIER: {
         "keywords": [
@@ -1868,6 +1954,45 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
         if dates:
             fields["invoice_date"] = dates[0]
 
+    elif task_type == TaskType.REGISTER_SUPPLIER_INVOICE:
+        # Extract supplier name: "leverandøren X" / "fra leverandør X" / "supplier X"
+        # Also match "leverandorfaktura fra X" / "leverandørfaktura fra X"
+        sup_match = re.search(
+            r"(?:leverandør(?:en)?|leverandor(?:en)?|supplier|vendor|fournisseur|lieferant|proveedor|fornecedor)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if not sup_match:
+            # Try "faktura fra X" pattern
+            sup_match = re.search(
+                r"(?:faktura|invoice|rechnung|facture?)\s+(?:fra|from|von|de)\s+"
+                r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:AS|ASA|SA|GmbH|Ltd|Inc|Corp|AB|ApS|AG|SRL|SARL|Lda|SL)?)\b"
+                r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til)\s|$)",
+                prompt, re.IGNORECASE,
+            )
+        if sup_match:
+            fields["supplier_name"] = sup_match.group(1).strip().rstrip(",.")
+        if amounts:
+            fields["amount_including_vat"] = amounts[0]
+        if dates:
+            fields["invoice_date"] = dates[0]
+
+    elif task_type == TaskType.YEAR_END_CLOSING:
+        # Extract year: "for 2025" / "für 2025" / "pour 2025"
+        year_match = re.search(r"\b(20\d{2})\b", prompt)
+        if year_match:
+            fields["year"] = year_match.group(1)
+
+    elif task_type == TaskType.ENABLE_MODULE:
+        # Extract module name: text after "modul"/"module"
+        mod_match = re.search(
+            r"(?:modul(?:en)?|module)\s+(?:for\s+)?(.+?)(?:\s*$|\s*[,.])",
+            prompt, re.IGNORECASE,
+        )
+        if mod_match:
+            fields["module_name"] = mod_match.group(1).strip().rstrip(",.")
+
     elif task_type == TaskType.REVERSE_PAYMENT:
         # Extract customer name
         cust = _guess_customer_name(prompt)
@@ -2001,8 +2126,8 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         # Dimension/voucher before invoice/voucher
         (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon", "custom dimension"], TaskType.CREATE_DIMENSION_VOUCHER),
         (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "lønnsslipp", "lonnsslipp", "salary"], TaskType.RUN_PAYROLL),
-        (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice", "facture fournisseur"], TaskType.CREATE_SUPPLIER_INVOICE),
-        (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
+        (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "inngaaende faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung", "facture fournisseur"], TaskType.REGISTER_SUPPLIER_INVOICE),
+        (["leverandør", "leverandor", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
         # Reverse payment before credit note (both deal with "undo" but reverse_payment is for bank returns)
         (["reverser", "reverse payment", "tilbakefør", "stornere", "rückbuchung", "bounced", "returned by bank", "returnert av banken", "devolvido pelo banco", "pago devuelto", "paiement retourné"], TaskType.REVERSE_PAYMENT),
         # Credit note before invoice
@@ -2015,7 +2140,7 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         (["timer", "hours", "stunden", "heures", "horas", "timesheet", "timeliste", "timefør", "logg"], TaskType.LOG_HOURS),
         # Bank/year-end/error
         (["bankavstem", "reconcil", "abgleich", "rapprochement"], TaskType.BANK_RECONCILIATION),
-        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture"], TaskType.YEAR_END_CLOSING),
+        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture", "avslutt år"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct", "feil", "error correction"], TaskType.ERROR_CORRECTION),
         (["aktiver modul", "enable module", "slå på", "slaa paa", "activate module"], TaskType.ENABLE_MODULE),
         # Delete patterns (check before create)
@@ -2126,7 +2251,7 @@ def _classify_with_keywords(
         _LAST_RESORT = [
             (["dimensjon", "dimension", "buchhaltungsdimension", "kostsenter", "kostenstelle", "cost center", "fri dimensjon"], TaskType.CREATE_DIMENSION_VOUCHER),
             (["lønn", "lonn", "payroll", "paie", "gehalt", "nómina", "salaire", "lønnskjøring", "lonnskjoring", "salary"], TaskType.RUN_PAYROLL),
-            (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice"], TaskType.CREATE_SUPPLIER_INVOICE),
+            (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung"], TaskType.REGISTER_SUPPLIER_INVOICE),
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["reverser", "reverse payment", "tilbakefør", "stornere", "bounced", "rückbuchung", "returnert av banken"], TaskType.REVERSE_PAYMENT),
             (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "year-end", "year.end", "arsslutt", "jahresabschluss"], TaskType.YEAR_END_CLOSING),
