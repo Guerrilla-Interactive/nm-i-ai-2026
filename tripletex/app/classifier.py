@@ -200,6 +200,88 @@ A supplier/vendor invoice is an INCOMING invoice from a supplier, not an outgoin
 - CRITICAL: 'lønnsdimensjon' / 'prosjektdimensjon' / any Norwegian compound ending in '-dimensjon' → create_dimension_voucher. The compound word describes the dimension name.
 - CRITICAL: 'dimensión' (ES) / 'dimensão' (PT) / 'dimensione' (IT) in the context of accounting dimensions → create_dimension_voucher (NOT unknown)
 
+## TIER 3 TASK TYPES — MULTILINGUAL RECOGNITION GUIDE
+
+CRITICAL: These 7 task types are Tier 3 (highest value). You MUST recognize them in ALL 7 languages. NEVER return "unknown" for any of these.
+
+### MONTH_END_CLOSING — month-end closing / periodification / accruals / monthly depreciation
+| Language | Keywords |
+|----------|----------|
+| nb | månedsslutt, periodisering, månedlig avskrivning |
+| nn | månedsslutt, periodisering |
+| en | month-end closing, accrual, monthly depreciation, periodification |
+| es | cierre mensual, periodificación, depreciación mensual, acumulación mensual |
+| pt | fechamento mensal, encerramento mensal, provisão mensal, depreciação mensal |
+| de | Monatsabschluss, Periodenabgrenzung, monatliche Abschreibung |
+| fr | clôture mensuelle, régularisation, provision mensuelle, amortissement mensuel |
+If the prompt says "cierre mensual" or "periodificación" → ALWAYS month_end_closing.
+
+### YEAR_END_CLOSING — year-end closing / annual closing
+| Language | Keywords |
+|----------|----------|
+| nb | årsavslutning, årsoppgjør |
+| nn | årsavslutning |
+| en | year-end closing, annual closing |
+| es | cierre anual, cierre del ejercicio |
+| pt | encerramento anual, fechamento anual |
+| de | Jahresabschluss |
+| fr | clôture annuelle |
+
+### BANK_RECONCILIATION — reconcile bank account
+| Language | Keywords |
+|----------|----------|
+| nb | bankavstemming, bankavstemmning |
+| nn | bankavstemming |
+| en | bank reconciliation |
+| es | conciliación bancaria, reconciliación bancaria |
+| pt | conciliação bancária, reconciliação bancária |
+| de | Kontoabstimmung, Bankabstimmung |
+| fr | rapprochement bancaire |
+
+### ERROR_CORRECTION — correct a ledger error / reverse a voucher
+| Language | Keywords |
+|----------|----------|
+| nb | feilretting, korrigering, korriger bilag |
+| nn | feilretting |
+| en | error correction, correct error |
+| es | corrección de error, corregir comprobante, corrección contable |
+| pt | correção de erro, corrigir lançamento |
+| de | Fehlerkorrektur, Buchungskorrektur, Korrektur |
+| fr | correction d'erreur, corriger écriture |
+
+### ENABLE_MODULE — enable/activate a Tripletex module
+| Language | Keywords |
+|----------|----------|
+| nb | aktiver modul, aktivere modulen |
+| nn | aktiver modul |
+| en | enable module, activate module |
+| es | activar módulo, habilitar módulo |
+| pt | ativar módulo, habilitar módulo |
+| de | Modul aktivieren |
+| fr | activer le module, activer module |
+
+### REGISTER_SUPPLIER_INVOICE — record an incoming supplier invoice
+| Language | Keywords |
+|----------|----------|
+| nb | leverandørfaktura, inngående faktura |
+| nn | leverandørfaktura |
+| en | supplier invoice, vendor invoice |
+| es | factura de proveedor, factura del proveedor |
+| pt | fatura de fornecedor, nota fiscal de entrada |
+| de | Eingangsrechnung, Lieferantenrechnung |
+| fr | facture fournisseur, facture du fournisseur |
+
+### CREATE_DIMENSION_VOUCHER — create accounting dimension + optional voucher
+| Language | Keywords |
+|----------|----------|
+| nb | dimensjon, fri dimensjon, kostsenter |
+| nn | dimensjon |
+| en | dimension, custom dimension, cost center |
+| es | dimensión contable, centro de costos |
+| pt | dimensão contábil, centro de custo |
+| de | Buchhaltungsdimension, Kostenstelle |
+| fr | dimension comptable, centre de coût |
+
 ## FEW-SHOT EXAMPLES
 
 ### Example 1 — Create employee (Bokmål)
@@ -330,7 +412,7 @@ Output:
 ### Example 19b — Supplier invoice (Nynorsk)
 Input: "Me har motteke faktura frå leverandøren Vestfjord AS (org.nr 923456789) på 45000 kr inkl. mva for konsulenttjenester"
 Output:
-{{"task_type": "create_supplier_invoice", "confidence": 0.97, "fields": {{"supplier_name": "Vestfjord AS", "organization_number": "923456789", "amount_including_vat": 45000.0, "description": "konsulenttjenester"}}}}
+{{"task_type": "register_supplier_invoice", "confidence": 0.97, "fields": {{"supplier_name": "Vestfjord AS", "organization_number": "923456789", "amount_including_vat": 45000.0, "description": "konsulenttjenester"}}}}
 
 ### Example 20 — Set employee roles (English)
 Input: "Set employee John Doe as a standard user with no access"
@@ -1258,6 +1340,18 @@ def _parse_single(data: dict, original_prompt: str) -> TaskClassification:
         data = {}
 
     task_type_str = data.get("task_type", "unknown")
+    # Map common LLM aliases to canonical enum values
+    _TASK_TYPE_ALIASES = {
+        "create_supplier_invoice": "register_supplier_invoice",
+        "supplier_invoice": "register_supplier_invoice",
+        "month_end": "month_end_closing",
+        "year_end": "year_end_closing",
+        "bank_reconcile": "bank_reconciliation",
+        "correct_error": "error_correction",
+        "activate_module": "enable_module",
+        "dimension_voucher": "create_dimension_voucher",
+    }
+    task_type_str = _TASK_TYPE_ALIASES.get(task_type_str, task_type_str)
     try:
         task_type = TaskType(task_type_str)
     except ValueError:
@@ -1597,6 +1691,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "riconciliazione bancaria",
             # Swedish / Danish
             "bankavstämning", "bankafstemning",
+            # Additional Spanish / Portuguese
+            "reconciliacion bancaria", "conciliacion bancaria",
+            "reconciliacao bancaria", "conciliacao bancaria",
         ],
     },
     TaskType.ERROR_CORRECTION: {
@@ -1610,6 +1707,10 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "correzione", "correggere registrazione",
             # Additional Norwegian
             "korrigere bilag", "endre bilag", "rett opp feil",
+            # Additional Spanish / Portuguese
+            "corregir comprobante", "corrección contable",
+            "corrigir lançamento", "correcao de erro",
+            "correccion de error",
         ],
     },
     TaskType.YEAR_END_CLOSING: {
@@ -1618,6 +1719,7 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "annual closing", "cierre anual", "cierre del ejercicio",
             # German / French / Portuguese
             "jahresabschluss", "clôture annuelle", "encerramento anual",
+            "fechamento anual",
             # Italian
             "chiusura annuale",
             # Swedish / Danish
@@ -1639,10 +1741,14 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "monatsabschluss", "monatsabschluß",
             # French
             "clôture mensuelle", "cloture mensuelle",
+            "régularisation", "amortissement mensuel",
             # Spanish
             "cierre mensual", "periodificación", "depreciación mensual",
+            "periodificacion", "depreciacion mensual", "acumulación mensual",
             # Portuguese
             "fechamento mensal", "encerramento mensal",
+            "provisão mensal", "depreciação mensal",
+            "provisao mensal", "depreciacao mensal",
             # Italian
             "chiusura mensile",
             # Swedish / Danish
@@ -1658,6 +1764,9 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "activar módulo", "activer module", "activer le module",
             # German / Portuguese
             "modul aktivieren", "ativar módulo",
+            # Additional Spanish / Portuguese
+            "habilitar módulo", "habilitar modulo",
+            "activar modulo", "ativar modulo",
             # Italian
             "attivare modulo", "attivare il modulo",
             # Swedish / Danish
@@ -1704,6 +1813,8 @@ _TASK_PATTERNS: dict[TaskType, dict] = {
             "dimensjonsbilag", "dimension voucher",
             # Spanish / Portuguese / Italian
             "dimensión", "dimensão", "dimensione",
+            "dimensión contable", "dimensão contábil",
+            "dimension contable", "dimensao contabil",
             # Norwegian accounting: "bokfør bilag" / "bokför bilag" (Swe spelling)
             "bokfør bilag", "bokför bilag", "bokfør et bilag",
             "bokför ett bilag",
@@ -2709,11 +2820,11 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         # Hours/timesheet
         (["timer", "hours", "stunden", "heures", "horas", "timesheet", "timeliste", "timefør", "logg"], TaskType.LOG_HOURS),
         # Bank/year-end/error
-        (["bankavstem", "reconcil", "abgleich", "rapprochement"], TaskType.BANK_RECONCILIATION),
-        (["månedsslutt", "maanedsslutt", "month-end", "month end clos", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodenabgrenzung"], TaskType.MONTH_END_CLOSING),
-        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture", "avslutt år"], TaskType.YEAR_END_CLOSING),
-        (["korriger", "correct", "feil", "error correction"], TaskType.ERROR_CORRECTION),
-        (["aktiver modul", "aktiver modulen", "enable module", "slå på", "slaa paa", "slaa paa modul", "activate module"], TaskType.ENABLE_MODULE),
+        (["bankavstem", "reconcil", "abgleich", "rapprochement", "conciliación bancaria", "conciliacao bancaria", "conciliação bancária"], TaskType.BANK_RECONCILIATION),
+        (["månedsslutt", "maanedsslutt", "month-end", "month end clos", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodenabgrenzung", "periodificación", "periodificacion", "fechamento mensal", "encerramento mensal"], TaskType.MONTH_END_CLOSING),
+        (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture annuelle", "avslutt år", "cierre anual", "encerramento anual", "fechamento anual"], TaskType.YEAR_END_CLOSING),
+        (["korriger", "correct", "feil", "error correction", "corrección", "correccion", "correção", "correcao", "korrektur"], TaskType.ERROR_CORRECTION),
+        (["aktiver modul", "aktiver modulen", "enable module", "slå på", "slaa paa", "slaa paa modul", "activate module", "activar módulo", "activar modulo", "habilitar módulo", "habilitar modulo", "ativar módulo", "ativar modulo"], TaskType.ENABLE_MODULE),
         # Delete patterns (check before create)
         (["slett kunde", "delete customer", "fjern kunde"], TaskType.DELETE_CUSTOMER),
         (["slett ansatt", "delete employee", "fjern ansatt"], TaskType.DELETE_EMPLOYEE),
@@ -2825,9 +2936,9 @@ def _classify_with_keywords(
             (["leverandørfaktura", "leverandorfaktura", "inngående faktura", "eingangsrechnung", "supplier invoice", "vendor invoice", "lieferantenrechnung"], TaskType.REGISTER_SUPPLIER_INVOICE),
             (["leverandør", "supplier", "fournisseur", "lieferant", "lieferanten", "proveedor", "fornecedor"], TaskType.CREATE_SUPPLIER),
             (["reverser", "reverse payment", "tilbakefør", "stornere", "bounced", "rückbuchung", "returnert av banken"], TaskType.REVERSE_PAYMENT),
-            (["månedsslutt", "maanedsslutt", "month-end", "month end", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering"], TaskType.MONTH_END_CLOSING),
-            (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "year-end", "year.end", "arsslutt", "jahresabschluss"], TaskType.YEAR_END_CLOSING),
-            (["aktiver modul", "enable module", "slaa paa modul", "activate module", "aktiver modul"], TaskType.ENABLE_MODULE),
+            (["månedsslutt", "maanedsslutt", "month-end", "month end", "monatsabschluss", "clôture mensuelle", "cierre mensual", "periodisering", "periodificación", "periodificacion", "fechamento mensal", "encerramento mensal"], TaskType.MONTH_END_CLOSING),
+            (["årsavslutning", "arsavslutning", "aarsavslutning", "årsoppgjør", "year-end", "year.end", "arsslutt", "jahresabschluss", "cierre anual", "encerramento anual", "fechamento anual", "clôture annuelle"], TaskType.YEAR_END_CLOSING),
+            (["aktiver modul", "enable module", "slaa paa modul", "activate module", "aktiver modul", "activar módulo", "activar modulo", "habilitar módulo", "habilitar modulo", "ativar módulo", "ativar modulo"], TaskType.ENABLE_MODULE),
             (["faktura", "invoice", "factura", "rechnung", "facture", "fatura"], TaskType.CREATE_INVOICE),
             (["ansatt", "tilsett", "employee", "empleado", "mitarbeiter", "employé", "funcionário", "empregado"], TaskType.CREATE_EMPLOYEE),
             (["kunde", "customer", "client", "cliente", "kunden"], TaskType.CREATE_CUSTOMER),

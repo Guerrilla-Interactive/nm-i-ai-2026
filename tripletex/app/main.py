@@ -231,13 +231,13 @@ async def _classify_with_claude(prompt: str, files: Optional[list[dict]] = None)
 
 _KEYWORD_MAP = [
     # --- Enable Module (MUST come before travel — "Aktiver modul Reiseregning" must not match travel) ---
-    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare)\w*\b.*\b(modul|module)\w*\b",
-                               r"\w*(modul|module)\w*\b.*\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare)\w*\b",
-                               r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare)\w*\b",
-                               r"\w+(modul|module)(en|e|n)?\b",
-                               r"\bslå\s+på\b.*\b(modul|module)\w*\b",
-                               r"\bslaa\s+paa\b.*\b(modul|module)\w*\b",
-                               r"\bsla\s+pa\b.*\b(modul|module)\w*\b",
+    (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare|habilitar)\w*\b.*\b(modul|module|módulo)\w*\b",
+                               r"\w*(modul|module|módulo)\w*\b.*\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare|habilitar)\w*\b",
+                               r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate|attivare|habilitar)\w*\b",
+                               r"\w+(modul|module|módulo)(en|e|n)?\b",
+                               r"\bslå\s+på\b.*\b(modul|module|módulo)\w*\b",
+                               r"\bslaa\s+paa\b.*\b(modul|module|módulo)\w*\b",
+                               r"\bsla\s+pa\b.*\b(modul|module|módulo)\w*\b",
                                r"\b(slå|slaa|sla)\s+(på|paa|pa)\b"]),
     # --- T3: Bank / Year-end / Error (before travel/employee to catch compound words) ---
     (TaskType.BANK_RECONCILIATION, [r"\bbankavstem\w*\b",
@@ -249,7 +249,10 @@ _KEYWORD_MAP = [
                                      r"\bconcilia[çc][aã]o\s+banc[aá]ria\b",
                                      r"\briconciliazione\s+bancaria\b",
                                      r"\brapprochement\s+bancaire\b",
-                                     r"\b(afstemming|bankafstemming|bankabstimmung)\w*\b"]),
+                                     r"\b(afstemming|bankafstemming|bankabstimmung)\w*\b",
+                                     r"\bbankavstämning\w*\b",
+                                     r"\breconciliaci[oó]n\s+bancaria\b",
+                                     r"\breconcilia[çc][aã]o\s+banc[aá]ria\b"]),
     # --- Payment returned / bounced / reversed → reverse_payment (before error correction) ---
     (TaskType.REVERSE_PAYMENT, [r"\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b.*\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b",
                                  r"\b(pagamento|payment|betaling|zahlung|paiement|pago)\w*\b.*\b(devolvid|returned|bounced|rückerstattet|retourné|devuelto)\w*\b",
@@ -260,13 +263,19 @@ _KEYWORD_MAP = [
                                    r"\b(reverser|reverse|tilbakefør)\w*\b.*\b(bilag|voucher|postering)\b",
                                    r"\b(korrigier|corrigir|correggere|corriger|corregir)\w*\b.*\b(buchung|écriture|scrittura|comprobante|lançamento|registrazione|postering|voucher|bilag|beleg)\b",
                                    r"\b(feilpostering|fehlbuchung|erreur\s+comptable|error\s+contable|erro\s+contábil)\w*\b",
-                                   r"\b(korriger|rett|correct)\w*\b.*\b(feilpostering|fehlbuchung)\w*\b"]),
+                                   r"\b(korriger|rett|correct)\w*\b.*\b(feilpostering|fehlbuchung)\w*\b",
+                                   r"\bcorrecci[oó]n\s+de\s+error\b",
+                                   r"\bcorre[çc][aã]o\s+de\s+erro\b",
+                                   r"\bfehlerkorrekt\w*\b",
+                                   r"\bcorrection\s+d['\u2019]erreur\b",
+                                   r"\b(feilretting|korreksjon|korrigering)\w*\b"]),
     (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\barsavslut\w*\b", r"\baarsavslut\w*\b",
                                    r"\bårsoppgjør\w*\b", r"\barsoppgjor\w*\b", r"\baarsoppgjor\w*\b",
                                    r"\byear.?end\b", r"\bannual.?clos\w*\b",
                                    r"\bjahresabschluss\w*\b", r"\bclôture\b(?!\s*mensuel)", r"\bcierre\s+anual\b",
                                    r"\bencerramento\s+anual\b",
                                    r"\bchiusura\s+(annuale|d[ie]l?\s+esercizio)\b",
+                                   r"\bfechamento\s+anual\b",
                                    r"\b(bokslut|årsbokslut|arsbokslut)\w*\b",
                                    r"\bclôture\s+annuelle\b",
                                    r"\b(fiscal\s+year|accounting\s+year)\b.*\b(clos|end|avslutt)\w*\b",
@@ -277,6 +286,7 @@ _KEYWORD_MAP = [
                                    r"\bmonatsabschluss\w*\b",
                                    r"\bclôture\s*mensuel\w*\b", r"\bcloture\s*mensuel\w*\b",
                                    r"\bcierre\s*mensual\b",
+                                   r"\bfechamento\s*mensal\b",
                                    r"\bperiodisering\w*\b", r"\bperiodifikasjon\w*\b",
                                    r"\bperiodificación\w*\b",
                                    r"\bmonthly\s*accrual\w*\b", r"\bperiodenabgrenzung\w*\b",
@@ -328,6 +338,10 @@ _KEYWORD_MAP = [
         r"\b(?:kostsenter|kostenstelle|cost\s*center|kostnadssenter)\b",
         r"\b(?:dimensjonsverdier|dimensionswert|dimension\s*values?)\b",
         r"\b(?:regnskaps|accounting|buchhalter)\w*\s*dimensjon\w*\b",
+        r"\bdimensjonsbilag\w*\b",
+        r"\bprosjektdimensjon\w*\b",
+        r"\bdimensi[oó]n\s+contable\b",
+        r"\baccounting\s+dimension\b",
     ]),
     # --- Supplier Invoice (more specific — MUST come before supplier and regular invoice) ---
     # REGISTER_SUPPLIER_INVOICE = alias for CREATE_SUPPLIER_INVOICE (same executor)
@@ -342,6 +356,9 @@ _KEYWORD_MAP = [
         r"(inngående|inngaaende|incoming|mottatt|motteke|received).*faktura",
         r"(registrer|register)\w*\s+faktura\w*\s+.*\b(leverandør|leverandor|supplier|fournisseur)\b",
         r"supplier.*invoice|Eingangsrechnung|facture.*fournisseur",
+        r"registrar\s+factura\s+de\s+proveedor",
+        r"registrar\s+fatura\s+de\s+fornecedor",
+        r"registrere\s+leverandørfaktura",
     ]),
     # --- Credit Note (MUST come before CREATE_SUPPLIER_INVOICE to avoid "invoice" matching supplier invoice) ---
     (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b",
@@ -828,6 +845,17 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         m = re.search(r"\b(20\d{2})\b", text)
         if m:
             fields["year"] = m.group(1)
+        # Extract profit/loss amount
+        m = re.search(
+            r"(?:resultat|profit|loss|gewinn|verlust|bénéfice|perte|ganancia|pérdida|lucro|prejuízo|overskudd|underskudd)\s*:?\s*[-−]?\s*(\d[\d\s.,]*)\s*(?:kr|NOK|EUR|USD)?",
+            text, re.I,
+        )
+        if m:
+            amt_str = m.group(1).replace(",", ".").replace(" ", "")
+            try:
+                fields["profit_loss"] = float(amt_str)
+            except ValueError:
+                pass
 
     if task_type == TaskType.MONTH_END_CLOSING:
         # Extract year
@@ -847,6 +875,9 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             "enero": "01", "febrero": "02", "marzo": "03", "mayo": "05",
             "junio": "06", "julio": "07", "agosto": "08", "septiembre": "09",
             "octubre": "10", "noviembre": "11", "diciembre": "12",
+            "janeiro": "01", "fevereiro": "02", "março": "03", "maio": "05",
+            "junho": "06", "julho": "07", "setembro": "09",
+            "outubro": "10", "dezembro": "12",
         }
         for name, num in month_map.items():
             if re.search(rf"\b{name}\b", text, re.I):
@@ -916,15 +947,28 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 pass
 
     if task_type == TaskType.BANK_RECONCILIATION:
-        # Extract account number: "konto 1920" / "account 1920"
-        m = re.search(r"(?:konto|account|Konto|compte|cuenta)\s*:?\s*(\d+)", text, re.I)
+        # Extract account number: "konto 1920" / "account 1920" / "cuenta 1920"
+        m = re.search(r"(?:konto|account|Konto|compte|cuenta|conta)\s*:?\s*(\d+)", text, re.I)
         if m:
             fields["account_number"] = m.group(1)
         # Extract period: "mars 2026" / "March 2026" / "2026-03"
         m = re.search(r"(?:for\s+)?(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|"
-                      r"january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})", text, re.I)
+                      r"january|february|march|april|may|june|july|august|september|october|november|december|"
+                      r"enero|febrero|marzo|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|"
+                      r"janeiro|fevereiro|março|maio|junho|julho|setembro|outubro|dezembro|"
+                      r"januar|februar|märz|marz|juin|juillet|août|aout|septembre|octobre|novembre|décembre)\s+(\d{4})", text, re.I)
         if m:
             fields["period"] = m.group(0).strip()
+        # Extract date range: "fra 2026-03-01 til 2026-03-31" / "from ... to ..."
+        m = re.search(r"(?:fra|from|von|de|du|desde)\s+(\d{4}-\d{2}-\d{2})\s+(?:til|to|bis|à|hasta|até)\s+(\d{4}-\d{2}-\d{2})", text, re.I)
+        if m:
+            fields["from_date"] = m.group(1)
+            fields["to_date"] = m.group(2)
+        # Extract single date: "dato 2026-03-15" / "date 2026-03-15"
+        if "from_date" not in fields:
+            m = re.search(r"(?:dato|date|Datum|fecha|data)\s*:?\s*(\d{4}-\d{2}-\d{2})", text, re.I)
+            if m:
+                fields["date"] = m.group(1)
 
     if task_type == TaskType.ERROR_CORRECTION:
         m = re.search(r"(?:bilag|voucher|postering|posting)\s*(?:nr\.?\s*)?(\d+)", text, re.I)
@@ -1612,7 +1656,10 @@ async def solve(request: Request):
     # Include details for our debugging.
     response = {"status": "completed"}
     if task_type:
-        response["task_type"] = task_type
+        response["task_type"] = task_type.value if hasattr(task_type, 'value') else str(task_type)
     if isinstance(result, dict):
         response["details"] = result
+        # Mirror success at top level for grader compatibility
+        if "success" in result:
+            response["success"] = result["success"]
     return JSONResponse(response)
