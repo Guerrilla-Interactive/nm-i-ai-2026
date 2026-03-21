@@ -415,6 +415,10 @@ class TripletexClient:
         resp = await self._request("POST", "/travelExpense/perDiemCompensation", json=data)
         return self._extract_value(resp)
 
+    # Alias used by executor.py
+    async def create_travel_expense_per_diem_compensation(self, data: dict) -> dict:
+        return await self.create_per_diem_compensation(data)
+
     async def get_rate_categories(self, params: dict | None = None) -> list:
         """GET /travelExpense/rateCategory — rate categories for per diem and mileage."""
         p = dict(params or {})
@@ -426,6 +430,10 @@ class TripletexClient:
         """POST /travelExpense/mileageAllowance — add mileage allowance to travel expense."""
         resp = await self._request("POST", "/travelExpense/mileageAllowance", json=data)
         return self._extract_value(resp)
+
+    # Alias used by executor.py
+    async def create_travel_expense_mileage_allowance(self, data: dict) -> dict:
+        return await self.create_mileage_allowance(data)
 
     # ------------------------------------------------------------------
     # Ledger Account (for bank account setup before invoicing)

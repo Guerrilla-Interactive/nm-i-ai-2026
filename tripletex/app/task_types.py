@@ -365,6 +365,7 @@ TASK_FIELD_SPECS: dict[TaskType, dict] = {
         "optional": [
             "dimension_values", "account_number", "contra_account_number",
             "amount", "linked_dimension_value", "description", "voucher_date",
+            "create_voucher",
         ],
     },
 

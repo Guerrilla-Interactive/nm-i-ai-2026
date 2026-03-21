@@ -233,7 +233,8 @@ _KEYWORD_MAP = [
     # --- Enable Module (MUST come before travel — "Aktiver modul Reiseregning" must not match travel) ---
     (TaskType.ENABLE_MODULE, [r"\b(aktiver|enable|aktivieren|activer|activar|ativar|activate)\w*\b.*\b(modul|module)\w*\b",
                                r"\bslå\s+på\b.*\b(modul|module)\w*\b",
-                               r"\bslaa\s+paa\b.*\b(modul|module)\w*\b"]),
+                               r"\bslaa\s+paa\b.*\b(modul|module)\w*\b",
+                               r"\bsla\s+pa\b.*\b(modul|module)\w*\b"]),
     # --- T3: Bank / Year-end / Error (before travel/employee to catch compound words) ---
     (TaskType.BANK_RECONCILIATION, [r"\bbankavstem\w*\b",
                                      r"\bbank\w*\b.*\bavstem\w*\b",
@@ -249,7 +250,8 @@ _KEYWORD_MAP = [
                                    r"\b(reverser|reverse|tilbakefør)\w*\b.*\b(bilag|voucher|postering)\b"]),
     (TaskType.YEAR_END_CLOSING, [r"\bårsavslut\w*\b", r"\barsavslut\w*\b", r"\baarsavslut\w*\b",
                                    r"\bårsoppgjør\w*\b", r"\barsoppgjor\w*\b", r"\baarsoppgjor\w*\b",
-                                   r"\byear.?end\b", r"\bjahresabschluss\w*\b", r"\bclôture\b",
+                                   r"\byear.?end\b", r"\bannual.?clos\w*\b",
+                                   r"\bjahresabschluss\w*\b", r"\bclôture\b", r"\bcierre\s+anual\b",
                                    r"\b(avslutt|close|lukk)\w*\b.*\b(år|year|ar|regnskapsår|regnskapsar)\w*\b"]),
     # --- Travel (after enable_module — "reiseregning" alone should match travel) ---
     # NOTE: "reise" without trailing \b so it matches "reiseregning" as substring
@@ -270,8 +272,10 @@ _KEYWORD_MAP = [
                                 r"\b(ansatt|tilsett|employee)\b.*\b(fornavn|first.?name|etternavn|last.?name)\b"]),
     # --- Payroll (MUST come before employee patterns — "paie de X" should not match employee) ---
     (TaskType.RUN_PAYROLL, [
-        r"\b(?:paie|payroll|lønn|lonn|gehalt|nómina|salaire|lønnskjøring|lonnskjoring|lønnsslipp|lonnsslipp|salary|lønnsutbetaling|lonnsutbetaling)\b",
+        r"\b(?:paie|payroll|lønn|lonn|gehalt|nómina|salaire|lønnskjøring|lønnsslipp|lonnsslipp|salary|lønnsutbetaling|lonnsutbetaling)\b",
+        r"\b(?:lonnskjoring|loennskjoering)\b",
         r"\b(?:kjør|kjor|run|execute|exécutez|exécuter|ejecutar|processar|utfor|utfør)\b.*\b(?:lønn|lonn|payroll|paie|gehalt|nómina)\b",
+        r"\bkjør\w*\s+lønn\w*\b",
     ]),
     # --- Dimension + Voucher (MUST come before invoice/voucher patterns — "Beleg" alone could trigger invoice) ---
     (TaskType.CREATE_DIMENSION_VOUCHER, [
@@ -282,10 +286,10 @@ _KEYWORD_MAP = [
     # --- Supplier Invoice (more specific — MUST come before supplier and regular invoice) ---
     (TaskType.CREATE_SUPPLIER_INVOICE, [
         r"leverandør.*faktura|faktura.*leverandør",
+        r"leverandorfaktura|leverandørfaktura",
         r"leverandor.*faktura|faktura.*leverandor",
         r"(inngående|inngaaende|incoming|mottatt|motteke|received).*faktura|invoice",
-        r"leverandørfaktura",
-        r"leverandorfaktura",
+        r"(registrer|register)\w*\s+faktura\w*\s+.*\b(leverandør|leverandor|supplier|fournisseur)\b",
         r"supplier.*invoice|Eingangsrechnung|facture.*fournisseur",
     ]),
     # --- Supplier (register supplier entity — after supplier invoice, before customer) ---
@@ -330,8 +334,16 @@ _KEYWORD_MAP = [
                                 r"\bny\w?\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
                                 r"\b(kund(?:e|en)|customer|client|cliente)\b.*\b(opprett|create|lag)\b"]),
     # --- Product / Department ---
+    (TaskType.DELETE_PRODUCT, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(produkt|product|producto|produit|produto)\b"]),
+    (TaskType.UPDATE_PRODUCT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(produkt|product|producto|produit|produto)\b"]),
     (TaskType.CREATE_PRODUCT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(produkt|product|producto|produit|produto)\b",
                                 r"\bny\w?\b.*\b(produkt|product|producto|produit|produto)\b"]),
+    # --- Supplier management (after supplier invoice) ---
+    (TaskType.DELETE_SUPPLIER, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(leverandør\w*|supplier\w*|fournisseur\w*|lieferant\w*|proveedor\w*|fornecedor\w*)\b"]),
+    (TaskType.FIND_SUPPLIER, [r"\b(finn|find|search|søk|suchen|buscar|chercher|procurar)\b.*\b(leverandør\w*|supplier\w*|fournisseur\w*|lieferant\w*|proveedor\w*|fornecedor\w*)\b"]),
+    (TaskType.UPDATE_SUPPLIER, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(leverandør\w*|supplier\w*|fournisseur\w*|lieferant\w*|proveedor\w*|fornecedor\w*)\b"]),
+    # --- Department ---
+    (TaskType.DELETE_DEPARTMENT, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b"]),
     (TaskType.UPDATE_DEPARTMENT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b"]),
     (TaskType.CREATE_DEPARTMENT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b",
                                    r"\bny\w?\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b",

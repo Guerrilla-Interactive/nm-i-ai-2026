@@ -162,10 +162,12 @@ register_payment is ONLY for registering payment on an ALREADY EXISTING invoice 
 AND mentions payment → invoice_with_payment
 - dimension/Buchhaltungsdimension/dimensjon + values/voucher/Beleg → create_dimension_voucher
 - "fri dimensjon", "custom dimension", "Kostsenter", "Kostenstelle", "cost center" → create_dimension_voucher
-- CRITICAL: "aktiver modul" / "enable module" / "activer le module" → enable_module (NOT create_project, NOT create_travel_expense, NOT run_payroll). \
+- CRITICAL: "aktiver modul" / "enable module" / "activer le module" / "Modul aktivieren" → enable_module (NOT create_project, NOT create_travel_expense, NOT run_payroll). \
 Even if the module name contains "Reiseregning" / "Travel Expense" / "Prosjekt" / "lønn", classify as enable_module.
-- CRITICAL: "årsavslutning" / "arsavslutning" / "årsoppgjør" / "avslutt år" / "year-end closing" → year_end_closing
-- CRITICAL: "leverandørfaktura" / "leverandorfaktura" / "inngående faktura" / "Eingangsrechnung" / "facture fournisseur" / "supplier invoice" → register_supplier_invoice (NOT create_invoice)
+- CRITICAL: "årsavslutning" / "arsavslutning" / "årsoppgjør" / "avslutt år" / "year-end closing" / "Jahresabschluss" / "clôture annuelle" → year_end_closing (NOT unknown)
+- CRITICAL: "leverandørfaktura" / "leverandorfaktura" / "inngående faktura" / "Eingangsrechnung" / "facture fournisseur" / "supplier invoice" → register_supplier_invoice (NOT create_invoice). \
+A supplier/vendor invoice is an INCOMING invoice from a supplier, not an outgoing invoice to a customer.
+- CRITICAL: "lønnskjøring" / "lonnskjoring" / "kjør lønn" / "kjor lonn" / "run payroll" / "salary payment" → run_payroll (NOT unknown)
 
 ## FEW-SHOT EXAMPLES
 
@@ -312,7 +314,12 @@ Output:
 ### Example 22b — Create dimension (Norwegian)
 Input: "Opprett en fri dimensjon 'Kostsenter' med verdiene 'Salg' og 'Drift', og bokfør et bilag på konto 6000 for 5000 NOK knyttet til 'Salg'"
 Output:
-{{"task_type": "create_dimension_voucher", "confidence": 0.96, "fields": {{"dimension_name": "Kostsenter", "dimension_values": ["Salg", "Drift"], "account_number": "6000", "amount": 5000.0, "linked_dimension_value": "Salg"}}}}
+{{"task_type": "create_dimension_voucher", "confidence": 0.96, "fields": {{"dimension_name": "Kostsenter", "dimension_values": ["Salg", "Drift"], "account_number": "6000", "amount": 5000.0, "linked_dimension_value": "Salg", "create_voucher": true}}}}
+
+### Example 22c — Create dimension with voucher, no amount (Norwegian)
+Input: "Opprett dimensjon Avdeling med verdi Oslo og før bilag"
+Output:
+{{"task_type": "create_dimension_voucher", "confidence": 0.95, "fields": {{"dimension_name": "Avdeling", "dimension_values": ["Oslo"], "create_voucher": true}}}}
 
 ### Example 23 — Register supplier (German)
 Input: "Registrieren Sie den Lieferanten Nordlicht GmbH mit der Organisationsnummer 922976457. E-Mail: faktura@nordlichtgmbh.no."
@@ -383,6 +390,16 @@ Output:
 Input: "Eingangsrechnung von Müller GmbH über 12000 NOK"
 Output:
 {{"task_type": "register_supplier_invoice", "confidence": 0.96, "fields": {{"supplier_name": "Müller GmbH", "amount_including_vat": 12000.0}}}}
+
+### Example 29 — Run payroll (Norwegian)
+Input: "Kjor lonnskjoring for mars 2026"
+Output:
+{{"task_type": "run_payroll", "confidence": 0.95, "fields": {{"month": "03", "year": "2026"}}}}
+
+### Example 29b — Run payroll (Norwegian with employee)
+Input: "Kjør lønnskjøring for ansatt Per Hansen for mars 2026, grunnlønn 45000 kr"
+Output:
+{{"task_type": "run_payroll", "confidence": 0.97, "fields": {{"employee_identifier": "Per Hansen", "first_name": "Per", "last_name": "Hansen", "base_salary": 45000.0, "month": "03", "year": "2026"}}}}
 
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
@@ -2026,6 +2043,27 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
                         seen.add(q.lower())
                         dim_values.append(q)
                 fields["dimension_values"] = dim_values
+        else:
+            # Unquoted: "Opprett dimensjon Avdeling med verdi Oslo"
+            dim_match = re.search(
+                r"(?:dimensjon|dimension|Dimension)\s+([A-ZÆØÅa-zæøå]\w+)",
+                prompt, re.IGNORECASE,
+            )
+            if dim_match:
+                fields["dimension_name"] = dim_match.group(1)
+            # Extract values: "med verdi/verdier X" or "with value(s) X"
+            val_match = re.search(
+                r"(?:med\s+verdi(?:er)?|with\s+values?|mit\s+Wert(?:en)?|avec\s+valeurs?|con\s+valores?)\s+(.+?)(?:\s+(?:og|und|and|et|y|e)\s+(?:før|post|erstell|créer|crear)\s|$)",
+                prompt, re.IGNORECASE,
+            )
+            if val_match:
+                raw_vals = val_match.group(1).strip()
+                # Split on commas or "og"/"and"/"und" etc
+                vals = re.split(r'\s*[,]\s*|\s+(?:og|and|und|et|y|e)\s+', raw_vals)
+                fields["dimension_values"] = [v.strip() for v in vals if v.strip()]
+        # Detect if voucher creation is requested
+        if re.search(r"\b(?:bilag|voucher|Beleg|pièce|asiento|lançamento|før bilag|post voucher|erstell.*Beleg)\b", prompt, re.IGNORECASE):
+            fields["create_voucher"] = True
         # Account number: "Konto 7000" / "account 7000" / "konto 6000"
         acct_match = re.search(r"(?:Konto|konto|account|compte|cuenta|conta|Buchungskonto)\s+(\d{4})", prompt, re.IGNORECASE)
         if acct_match:
@@ -2035,6 +2073,27 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
             fields["amount"] = amounts[0]
         if dates:
             fields["voucher_date"] = dates[0]
+
+    elif task_type == TaskType.YEAR_END_CLOSING:
+        # Extract year: "for 2025" / "for året 2025" / "für das Jahr 2025"
+        year_match = re.search(r"(?:for\s+(?:året\s+)?|für\s+(?:das\s+)?(?:Jahr\s+)?|pour\s+(?:l'année\s+)?|para\s+(?:el\s+año\s+)?|para\s+(?:o\s+ano\s+)?)(\d{4})", prompt, re.IGNORECASE)
+        if year_match:
+            fields["year"] = year_match.group(1)
+        elif not year_match:
+            # Fallback: find any 4-digit year in the prompt
+            any_year = re.search(r"\b(20\d{2})\b", prompt)
+            if any_year:
+                fields["year"] = any_year.group(1)
+
+    elif task_type == TaskType.ENABLE_MODULE:
+        # Extract module name: "modulen X" / "modul X" / "module X"
+        mod_match = re.search(
+            r"(?:modulen|modul|module|módulo|le\s+module)\s+['\"]?([A-ZÆØÅa-zæøåÀ-ÿ][\w\s-]+?)['\"]?"
+            r"(?:\s*[,.]|\s+(?:i|in|dans|en|im)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if mod_match:
+            fields["module_name"] = mod_match.group(1).strip().rstrip(",.")
 
     return fields
 
@@ -2142,7 +2201,7 @@ def _last_resort_classify(prompt: str) -> TaskClassification:
         (["bankavstem", "reconcil", "abgleich", "rapprochement"], TaskType.BANK_RECONCILIATION),
         (["årsavslut", "arsavslut", "aarsavslut", "årsoppgjør", "arsoppgjor", "aarsoppgjor", "year-end", "year end", "jahresabschluss", "clôture", "avslutt år"], TaskType.YEAR_END_CLOSING),
         (["korriger", "correct", "feil", "error correction"], TaskType.ERROR_CORRECTION),
-        (["aktiver modul", "enable module", "slå på", "slaa paa", "activate module"], TaskType.ENABLE_MODULE),
+        (["aktiver modul", "aktiver modulen", "enable module", "slå på", "slaa paa", "slaa paa modul", "activate module"], TaskType.ENABLE_MODULE),
         # Delete patterns (check before create)
         (["slett kunde", "delete customer", "fjern kunde"], TaskType.DELETE_CUSTOMER),
         (["slett ansatt", "delete employee", "fjern ansatt"], TaskType.DELETE_EMPLOYEE),
