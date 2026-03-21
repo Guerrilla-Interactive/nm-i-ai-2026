@@ -381,18 +381,18 @@ _KEYWORD_MAP = [
     # --- Customer (after invoice and project to avoid false matches) ---
     (TaskType.DELETE_CUSTOMER, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(kund(?:e|en)|customer|client|cliente)\b"]),
     (TaskType.UPDATE_CUSTOMER, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(kund(?:e|en)|customer|client|cliente)\b"]),
-    (TaskType.FIND_CUSTOMER, [r"\b(finn|find|search|søk|suchen|buscar|chercher|procurar)\b.*\b(kund(?:e|en)|customer|client|cliente)\b"]),
+    (TaskType.FIND_CUSTOMER, [r"\b(finn|find|search|søk|suchen|buscar|chercher|procurar|encontrar)\b.*\b(kund(?:e|en)|customer|client|cliente)\b"]),
     (TaskType.CREATE_CUSTOMER, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add|set\s+up)\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
                                 r"\bny\w?\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
                                 r"\b(kund(?:e|en)|customer|client|cliente)\b.*\b(opprett|create|lag)\b"]),
     # --- Product / Department ---
-    (TaskType.DELETE_PRODUCT, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(produkt|product|producto|produit|produto)\b"]),
-    (TaskType.UPDATE_PRODUCT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(produkt|product|producto|produit|produto)\b"]),
-    (TaskType.CREATE_PRODUCT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(produkt|product|producto|produit|produto)\b",
-                                r"\bny\w?\b.*\b(produkt|product|producto|produit|produto)\b"]),
+    (TaskType.DELETE_PRODUCT, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(produkt\w*|product\w*|producto\w*|produit\w*|produto\w*)\b"]),
+    (TaskType.UPDATE_PRODUCT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(produkt\w*|product\w*|producto\w*|produit\w*|produto\w*)\b"]),
+    (TaskType.CREATE_PRODUCT, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar|registrer|register|legg\s+til|add)\b.*\b(produkt\w*|product\w*|producto\w*|produit\w*|produto\w*)\b",
+                                r"\bny\w?\b.*\b(produkt\w*|product\w*|producto\w*|produit\w*|produto\w*)\b"]),
     # --- Supplier management (after supplier invoice) ---
     (TaskType.DELETE_SUPPLIER, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(leverandør\w*|supplier\w*|fournisseur\w*|lieferant\w*|proveedor\w*|fornecedor\w*)\b"]),
-    (TaskType.FIND_SUPPLIER, [r"\b(finn|find|search|søk|suchen|buscar|chercher|procurar)\b.*\b(leverandør\w*|supplier\w*|fournisseur\w*|lieferant\w*|proveedor\w*|fornecedor\w*)\b"]),
+    (TaskType.FIND_SUPPLIER, [r"\b(finn|find|search|søk|suchen|buscar|chercher|procurar|encontrar)\b.*\b(leverandør\w*|supplier\w*|fournisseur\w*|lieferant\w*|proveedor\w*|fornecedor\w*)\b"]),
     (TaskType.UPDATE_SUPPLIER, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(leverandør\w*|supplier\w*|fournisseur\w*|lieferant\w*|proveedor\w*|fornecedor\w*)\b"]),
     # --- Department ---
     (TaskType.DELETE_DEPARTMENT, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(avdeling\w*|department\w*|departamento\w*|abteilung\w*|département\w*)\b"]),
