@@ -261,11 +261,16 @@ _KEYWORD_MAP = [
                                        r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar)\b.*\b(reise|travel|viaje|voyage|reisekostenabrechnung)\b"]),
     # --- Employee (SET_EMPLOYEE_ROLES before UPDATE to catch "endre rolle" before "endre ansatt") ---
     (TaskType.DELETE_EMPLOYEE, [r"\b(slett|fjern|delete|remove|löschen|entfernen|eliminar|supprimer|excluir)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b"]),
-    (TaskType.SET_EMPLOYEE_ROLES, [r"\b(rolle|role|access|tilgang|user.?type)\b.*\b(ansatt|tilsett|employee)\b",
-                                    r"\b(ansatt|employee)\b.*\b(rolle|role|access|tilgang)\b",
-                                    r"\b(sett|set|gi|give|assign)\b.*\b(ansatt|employee)\b.*\b(som|as|to)\s+\w+",
-                                    r"\b(endre|change|sett)\b.*\b(rolle|role)\b"]),
-    (TaskType.UPDATE_EMPLOYEE, [r"\b(oppdater|endre|update|modify|ändra|aktualisieren|ändern|actualizar|modificar|modifier|atualizar)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|empregado)\b"]),
+    (TaskType.SET_EMPLOYEE_ROLES, [r"\b(rolle|role|access|tilgang|user.?type|brukertype)\b.*\b(ansatt|tilsett|employee|mitarbeiter|employé)\b",
+                                    r"\b(ansatt|employee|mitarbeiter|employé)\b.*\b(rolle|role|access|tilgang|brukertype)\b",
+                                    r"\b(sett|set|gi|give|assign|tildel|setzen)\b.*\b(ansatt|employee|mitarbeiter)\b.*\b(som|as|to|als)\s+\w+",
+                                    r"\b(endre|change|sett)\b.*\b(rolle|role)\b",
+                                    r"\b(eingeschränkt|restricted|begrenz)\w*\b.*\b(benutzer|user|bruker)\b",
+                                    r"\b(administrator|admin|kontoadministrator)\b.*\b(ansatt|employee|mitarbeiter|tilsett)\b",
+                                    r"\b(ansatt|employee|mitarbeiter|tilsett)\b.*\b(administrator|admin|kontoadministrator)\b"]),
+    (TaskType.UPDATE_EMPLOYEE, [r"\b(oppdater|endre|update|modify|ändra|aktualisieren|ändern|actualizar|modificar|modifier|atualizar)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|empregado)\b",
+                                 r"\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b.*\b(ansatt|tilsett|employee)\b",
+                                 r"\b(ansatt|tilsett|employee)\b.*\b(legg\s+til|add)\b.*\b(e-post|epost|email|telefon|phone|tlf)\b"]),
     (TaskType.CREATE_EMPLOYEE, [r"\b(opprett|lag|create|add|erstellen|créer|crear|criar|register|registrer|legg\s+til)\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário|empregado)\b",
                                 r"\bny\w?\b.*\b(ansatt|tilsett|employee|empleado|mitarbeiter|employé)\b",
                                 r"\b(ansatt|tilsett|employee)\b.*\b(som\s+heter|named?|called)\b",
@@ -284,6 +289,12 @@ _KEYWORD_MAP = [
         r"\b(?:dimensjonsverdier|dimensionswert|dimension\s*values?)\b",
     ]),
     # --- Supplier Invoice (more specific — MUST come before supplier and regular invoice) ---
+    # REGISTER_SUPPLIER_INVOICE = alias for CREATE_SUPPLIER_INVOICE (same executor)
+    # NOTE: Keep patterns narrow — compound words like "leverandørfaktura" should match CREATE_SUPPLIER_INVOICE
+    (TaskType.REGISTER_SUPPLIER_INVOICE, [
+        r"\b(bokfør|bokfor|book)\w*\b.*\b(leverandør|leverandor|supplier|fournisseur|lieferant)\w*.*\bfaktura\w*\b",
+        r"\b(registrer|bokfør|bokfor|book)\w*\b.*\b(inngående|incoming|mottatt)\w*\b.*\bfaktura\w*\b",
+    ]),
     (TaskType.CREATE_SUPPLIER_INVOICE, [
         r"leverandør.*faktura|faktura.*leverandør",
         r"leverandorfaktura|leverandørfaktura",
@@ -298,17 +309,23 @@ _KEYWORD_MAP = [
         r"\b(?:leverandør|supplier|fournisseur|lieferant|proveedor|fornecedor)\w*\b.*\b(?:registrer|opprett|create|register|add|ny|new|erstellen|registrieren|enregistre)\w*\b",
     ]),
     # --- Invoice (MUST come before customer to avoid "opprett faktura for kunde" → CREATE_CUSTOMER) ---
-    (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b"]),
+    (TaskType.CREATE_CREDIT_NOTE, [r"\b(kreditnota|credit.?note|gutschrift|avoir|nota de crédito)\b",
+                                    r"\bkreditere?\b.*\b(faktura|invoice)\b",
+                                    r"\bkrediter\w*\s+faktura\b"]),
     (TaskType.INVOICE_WITH_PAYMENT, [r"\b(faktura|invoice|factura|rechnung|facture)\b.*\b(betaling|payment|betalt|paid|pago|zahlung|paiement)\b",
                                      r"\b(facture|faktura|invoice|rechnung)\s+impayée?\b",
                                      r"\b(unbezahlte|impayée?|unpaid)\b.*\b(rechnung|facture|invoice|faktura)\b",
                                      r"\bclient\w*\b.*\bfacture\b.*\bimpayée?\b"]),
-    (TaskType.REGISTER_PAYMENT, [r"\b(registrer|register)\b.*\b(betaling|innbetaling|payment|pago)\b",
-                                  r"\b(betaling|payment)\b.*\b(faktura|invoice)\b"]),
+    (TaskType.REGISTER_PAYMENT, [r"\b(registrer|register|registreer)\w*\b.*\b(betaling|innbetaling|payment|pago|zahlung|paiement)\b",
+                                  r"\b(betaling|payment|pago|zahlung|paiement)\b.*\b(faktura|invoice|factuur|factura|rechnung|facture)\b",
+                                  r"\bbetal\w*\s+faktura\b",
+                                  r"\bpay\w*\s+invoice\b",
+                                  r"\binnbetaling\b.*\b(faktura|invoice)\b"]),
     (TaskType.INVOICE_EXISTING_CUSTOMER, [r"\b(faktura|invoice|factura|rechnung)\b.*\b(kund(?:e|en)|customer|client|cliente)\b",
                                           r"\b(faktura|invoice)\b\s+(?:til|to|for|an)\s+[A-ZÆØÅ]",
                                           r"\bfaktur\w*\b.*\b(kund(?:e|en)|customer|client|cliente)\b"]),
     (TaskType.CREATE_INVOICE, [r"\b(opprett\w*|create|lag\w?|erstellen|créer|crear|criar)\b.*\b(faktura|invoice|factura|rechnung|facture|fatura)\b",
+                                r"\b(sende?|send)\b.*\b(regning|faktura|invoice)\b",
                                 r"\b(faktura|invoice|factura|rechnung|facture|fatura)\b"]),
     # --- Contact (use "kontaktperson" not bare "kontakt" to avoid matching email addresses like kontakt@...) ---
     (TaskType.UPDATE_CONTACT, [r"\b(oppdater|endre|update|modify|aktualisieren|ändern|actualizar|modifier|atualizar)\b.*\b(kontaktperson|contact(?!@)|contacto|contato)\b"]),

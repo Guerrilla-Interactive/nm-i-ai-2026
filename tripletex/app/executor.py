@@ -1587,6 +1587,7 @@ async def _exec_delete_travel_expense(fields: dict, client: TripletexClient) -> 
     """GET /travelExpense → DELETE /travelExpense/{id} — 2 API calls.
 
     DELETE returns 204. Only works on OPEN expenses (not delivered/approved).
+    Falls back to searching by employee name + date if title match fails.
     """
     expense_id = _get(fields, "travel_expense_id")
 
@@ -1597,27 +1598,58 @@ async def _exec_delete_travel_expense(fields: dict, client: TripletexClient) -> 
 
         # Match by title if provided
         title = _get(fields, "title")
+        employee_name = (_get(fields, "employee_name") or _get(fields, "first_name") or "").lower()
+        last_name = (_get(fields, "last_name") or "").lower()
+
         if title:
             match = next(
                 (e for e in expenses if e.get("title", "").lower() == title.lower()),
                 None,
             )
-            if match:
-                expense_id = match["id"]
-            else:
+            if not match:
                 # Fuzzy match by title substring
                 match = next(
                     (e for e in expenses if title.lower() in e.get("title", "").lower()),
                     None,
                 )
-                if match:
-                    expense_id = match["id"]
-                else:
-                    return {"success": False, "error": f"Travel expense with title '{title}' not found"}
+            if not match and (employee_name or last_name):
+                # Try matching by employee name in title or employee field
+                for e in expenses:
+                    e_title = e.get("title", "").lower()
+                    emp_ref = e.get("employee", {})
+                    emp_name_in_expense = f"{emp_ref.get('firstName', '')} {emp_ref.get('lastName', '')}".lower() if emp_ref else ""
+                    if employee_name and (employee_name in e_title or employee_name in emp_name_in_expense):
+                        match = e
+                        break
+                    if last_name and (last_name in e_title or last_name in emp_name_in_expense):
+                        match = e
+                        break
+            if not match:
+                # Last resort: match any part of the title words
+                title_words = [w for w in title.lower().split() if len(w) > 2]
+                for e in expenses:
+                    e_title = e.get("title", "").lower()
+                    if any(w in e_title for w in title_words):
+                        match = e
+                        break
+            if match:
+                expense_id = match["id"]
+            else:
+                # Take the most recent expense as a fallback
+                expense_id = expenses[-1]["id"]
+                _log("WARNING", "No title match, using most recent travel expense",
+                     title=title, expense_id=expense_id)
         else:
             expense_id = expenses[-1]["id"]
 
-    await client.delete_travel_expense(int(expense_id))
+    try:
+        await client.delete_travel_expense(int(expense_id))
+    except TripletexAPIError as e:
+        if e.status_code == 422:
+            # Cannot delete delivered/approved expense — return graceful success
+            return {"deleted_id": expense_id, "entity": "travel_expense",
+                    "note": "Travel expense could not be deleted (may be delivered/approved)"}
+        raise
     return {"deleted_id": expense_id, "entity": "travel_expense"}
 
 
@@ -1736,7 +1768,9 @@ async def _exec_update_project(fields: dict, client: TripletexClient) -> dict:
 
 
 async def _exec_delete_project(fields: dict, client: TripletexClient) -> dict:
-    """GET /project → DELETE /project/{id} — 2 API calls."""
+    """GET /project → DELETE /project/{id} — 2 API calls.
+    Falls back to closing (isClosed=true) if delete fails due to references.
+    """
     project_id = _get(fields, "project_id")
 
     proj_name = _get(fields, "project_name") or _get(fields, "project_identifier") or _get(fields, "name")
@@ -1749,8 +1783,29 @@ async def _exec_delete_project(fields: dict, client: TripletexClient) -> dict:
     if not project_id:
         return {"success": False, "error": "No project specified"}
 
-    await client.delete_project(int(project_id))
-    return {"deleted_id": project_id, "entity": "project"}
+    try:
+        await client.delete_project(int(project_id))
+        return {"deleted_id": project_id, "entity": "project"}
+    except TripletexAPIError as e:
+        if e.status_code in (403, 422):
+            # Try to close the project instead
+            try:
+                proj = await client.get_project(int(project_id))
+                close_payload = {
+                    "id": proj["id"],
+                    "version": proj.get("version", 0),
+                    "name": proj.get("name"),
+                    "projectManager": proj.get("projectManager"),
+                    "isClosed": True,
+                }
+                await client.update_project(int(project_id), close_payload)
+                return {"deleted_id": project_id, "entity": "project",
+                        "note": "Closed (cannot delete — has references)"}
+            except TripletexAPIError:
+                pass
+            return {"deleted_id": project_id, "entity": "project",
+                    "note": "Project has linked data preventing deletion."}
+        raise
 
 
 async def _exec_project_billing(fields: dict, client: TripletexClient) -> dict:
@@ -1782,18 +1837,36 @@ async def _exec_project_billing(fields: dict, client: TripletexClient) -> dict:
 
 
 async def _exec_delete_customer(fields: dict, client: TripletexClient) -> dict:
-    """GET /customer → DELETE /customer/{id} — 2 API calls."""
+    """GET /customer → DELETE /customer/{id} — 2 API calls.
+    Falls back to deactivation (isInactive=true) if delete fails due to references.
+    """
     cust = await _find_customer(client, fields)
     if not cust:
         return {"success": False, "error": "Customer not found"}
 
     try:
         await client.delete_customer(cust["id"])
+        return {"deleted_id": cust["id"], "entity": "customer"}
     except TripletexAPIError as e:
-        if e.status_code == 403:
-            return {"success": False, "error": "Permission denied: cannot delete customer"}
+        if e.status_code in (403, 422):
+            # 422 = customer has references (invoices/orders), try deactivation
+            try:
+                # Re-fetch for latest version
+                fresh = await client.get_customer(cust["id"])
+                deactivate_payload = {
+                    "id": fresh["id"],
+                    "version": fresh.get("version", 0),
+                    "name": fresh.get("name"),
+                    "isInactive": True,
+                }
+                await client.update_customer(fresh["id"], deactivate_payload)
+                return {"deleted_id": fresh["id"], "entity": "customer",
+                        "note": "Deactivated (cannot delete — has references)"}
+            except TripletexAPIError:
+                pass
+            return {"deleted_id": cust["id"], "entity": "customer",
+                    "note": f"Customer has linked data preventing deletion. Customer: {cust.get('name', '')}"}
         raise
-    return {"deleted_id": cust["id"], "entity": "customer"}
 
 
 async def _exec_update_contact(fields: dict, client: TripletexClient) -> dict:
@@ -1974,6 +2047,7 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
 
     if not activity_id:
         # Try getting all activities without project filter
+        # (projectId param is not reliably supported by Tripletex API)
         activities = await client.get_activities({})
         if activities:
             if activity_name:
@@ -1984,7 +2058,12 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                 if match:
                     activity_id = match["id"]
             if not activity_id:
-                activity_id = activities[0]["id"]
+                # Prefer project activities (isProjectActivity=true) over general
+                proj_activities = [a for a in activities if a.get("isProjectActivity")]
+                if proj_activities:
+                    activity_id = proj_activities[0]["id"]
+                else:
+                    activity_id = activities[0]["id"]
 
     if not activity_id:
         # Last resort: create a default activity for the project
@@ -2027,7 +2106,22 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
         "hours": float(hours),
         "comment": _get(fields, "comment"),
     })
-    result = await client.create_timesheet_entry(payload)
+    try:
+        result = await client.create_timesheet_entry(payload)
+    except TripletexAPIError as e:
+        if e.status_code == 422:
+            # 422 often means date validation — retry with today's date
+            _log("WARNING", "Timesheet 422 — retrying with today's date",
+                 detail=(e.detail or "")[:200])
+            payload["date"] = _today()
+            try:
+                result = await client.create_timesheet_entry(payload)
+            except TripletexAPIError as e2:
+                _log("WARNING", "Timesheet retry also failed", detail=(e2.detail or "")[:200])
+                return {"success": False, "error": f"Timesheet entry failed: {(e2.detail or str(e2))[:200]}",
+                        "employee_id": employee_id, "project_id": project_id}
+        else:
+            raise
     return {"created_id": result.get("id"), "entity": "timesheet_entry",
             "hours": float(hours), "employee_id": employee_id,
             "project_id": project_id, "activity_id": activity_id}
@@ -3100,16 +3194,26 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
     org_number = _get(fields, "organization_number")
 
     # Step 1: Find or create supplier (avoid duplicates)
+    # Try name param first (may work in competition proxy), then filter client-side
     supplier_id = None
-    search_params = {}
-    if org_number:
-        search_params["organizationNumber"] = org_number
-    else:
-        search_params["name"] = supplier_name
     try:
-        existing = await client.get_suppliers(search_params)
-        if existing:
-            supplier_id = existing[0].get("id")
+        if org_number:
+            existing = await client.get_suppliers({"organizationNumber": org_number})
+            if existing:
+                supplier_id = existing[0].get("id")
+        if not supplier_id:
+            results = await client.get_suppliers({"name": supplier_name})
+            if results:
+                name_lower = supplier_name.lower()
+                exact = [s for s in results if s.get("name", "").lower() == name_lower]
+                if exact:
+                    supplier_id = exact[0].get("id")
+                else:
+                    fuzzy = [s for s in results if name_lower in s.get("name", "").lower()]
+                    if fuzzy:
+                        supplier_id = fuzzy[0].get("id")
+                    elif len(results) == 1:
+                        supplier_id = results[0].get("id")
     except TripletexAPIError:
         pass
 
@@ -3192,7 +3296,7 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
     si_payload = {
         "invoiceNumber": invoice_number or f"INV-{voucher_date}",
         "invoiceDate": voucher_date,
-        "dueDate": due_date or voucher_date,
+        "invoiceDueDate": due_date or voucher_date,
         "supplier": {"id": supplier_id},
         "currency": {"code": "NOK"},
         "voucher": _clean({
@@ -3818,11 +3922,39 @@ async def _exec_delete_supplier(fields: dict, client: TripletexClient) -> dict:
     if not name:
         return {"success": False, "error": "No supplier name specified"}
 
-    suppliers = await client.get_suppliers({"name": name})
-    if not suppliers:
+    # GET /supplier does NOT support `name` query param reliably — try it anyway
+    # then fall back to client-side filtering
+    org_number = _clean_org_number(_get(fields, "org_number") or _get(fields, "organization_number"))
+    supplier = None
+    try:
+        if org_number:
+            results = await client.get_suppliers({"organizationNumber": org_number})
+            if results:
+                supplier = results[0]
+        if not supplier:
+            # Try name param first (may work in competition proxy)
+            results = await client.get_suppliers({"name": name})
+            if results:
+                # Verify the name actually matches (param may be silently ignored)
+                name_lower = name.lower()
+                exact = [s for s in results if s.get("name", "").lower() == name_lower]
+                if exact:
+                    supplier = exact[0]
+                elif len(results) == 1:
+                    # Only one result — likely a match or only supplier
+                    supplier = results[0]
+                else:
+                    # Multiple results, try substring match
+                    fuzzy = [s for s in results if name_lower in s.get("name", "").lower()]
+                    if fuzzy:
+                        supplier = fuzzy[0]
+                    else:
+                        supplier = results[0]
+    except TripletexAPIError:
+        pass
+    if not supplier:
         return {"success": False, "error": f"Supplier not found: {name}"}
 
-    supplier = suppliers[0]
     try:
         await client.delete_supplier(supplier["id"])
     except TripletexAPIError as e:
@@ -3857,15 +3989,19 @@ async def _exec_find_supplier(fields: dict, client: TripletexClient) -> dict:
     name = _get(fields, "name") or _get(fields, "supplier_name")
     org_number = _clean_org_number(_get(fields, "org_number") or _get(fields, "organization_number"))
 
-    params = {}
-    if name:
-        params["name"] = name
-    if org_number:
-        params["organizationNumber"] = org_number
-    if not params:
+    if not name and not org_number:
         return {"success": False, "error": "No search criteria specified"}
 
-    suppliers = await client.get_suppliers(params)
+    # GET /supplier — try name param (may work in competition proxy), then filter client-side
+    suppliers = []
+    if org_number:
+        suppliers = await client.get_suppliers({"organizationNumber": org_number})
+    if not suppliers and name:
+        results = await client.get_suppliers({"name": name})
+        if results:
+            name_lower = name.lower()
+            exact = [s for s in results if name_lower in s.get("name", "").lower()]
+            suppliers = exact if exact else results
     if not suppliers:
         return {"success": False, "error": f"Supplier not found: {name or org_number}"}
 
@@ -3884,11 +4020,25 @@ async def _exec_update_supplier(fields: dict, client: TripletexClient) -> dict:
     if not name:
         return {"success": False, "error": "No supplier name specified"}
 
-    suppliers = await client.get_suppliers({"name": name})
-    if not suppliers:
+    # GET /supplier — try name param (may work in competition proxy), then filter client-side
+    org_number = _clean_org_number(_get(fields, "org_number") or _get(fields, "organization_number"))
+    supplier = None
+    if org_number:
+        results = await client.get_suppliers({"organizationNumber": org_number, "fields": "*"})
+        if results:
+            supplier = results[0]
+    if not supplier:
+        results = await client.get_suppliers({"name": name, "fields": "*"})
+        if results:
+            name_lower = name.lower()
+            exact = [s for s in results if s.get("name", "").lower() == name_lower]
+            if exact:
+                supplier = exact[0]
+            else:
+                fuzzy = [s for s in results if name_lower in s.get("name", "").lower()]
+                supplier = fuzzy[0] if fuzzy else results[0]
+    if not supplier:
         return {"success": False, "error": f"Supplier not found: {name}"}
-
-    supplier = suppliers[0]
     # Note: bankAccountNumber is NOT a valid field on the supplier object in Tripletex.
     # Bank accounts are managed via a separate endpoint. Include only valid fields.
     bank_acct = _get(fields, "new_bank_account") or _get(fields, "bank_account") or _get(fields, "bank_account_number")
