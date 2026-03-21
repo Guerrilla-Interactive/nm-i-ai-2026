@@ -456,11 +456,12 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
     if task_type in (TaskType.CREATE_EMPLOYEE, TaskType.UPDATE_EMPLOYEE, TaskType.DELETE_EMPLOYEE,
                      TaskType.SET_EMPLOYEE_ROLES):
         # Pattern 1: "ansatt/employee [named] X Y" (two-name)
+        # re.I needed: German capitalizes nouns ("Mitarbeiter" vs "mitarbeiter")
         m = re.search(
             r"(?:ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário)\s+"
             r"(?:med\s+navn\s+|named?\s+|called\s+|namens\s+|appelée?\s+|chamad[oa]\s+|kalt\s+)?"
             r"([A-ZÆØÅ\u00C0-\u024F]\S+)\s+([A-ZÆØÅ\u00C0-\u024F]\S+)",
-            text,
+            text, re.I,
         )
         if m and "first_name" not in fields:
             fields["first_name"] = m.group(1).rstrip(",.")
@@ -478,12 +479,13 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 fields["last_name"] = m.group(2).rstrip(",.")
 
         # Pattern 3: Single-name fallback — "ansatt/employee X" (only one name given)
+        # re.I needed: German capitalizes nouns ("Mitarbeiter" vs "mitarbeiter")
         if "first_name" not in fields and "employee_identifier" not in fields:
             m = re.search(
                 r"(?:ansatt|tilsett|employee|empleado|mitarbeiter|employé|funcionário)\s+"
                 r"(?:med\s+navn\s+|named?\s+|called\s+|namens\s+|kalt\s+)?"
                 r"([A-ZÆØÅ\u00C0-\u024F]\S+)",
-                text,
+                text, re.I,
             )
             if m:
                 fields["employee_identifier"] = m.group(1).rstrip(",.")
@@ -661,9 +663,9 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         text_lower = text.lower()
         if any(w in text_lower for w in ["kontoadministrator", "administrator", "admin"]):
             fields["user_type"] = "ADMINISTRATOR"
-        elif any(w in text_lower for w in ["begrenset", "restricted", "limited"]):
+        elif any(w in text_lower for w in ["begrenset", "restricted", "limited", "eingeschränkt"]):
             fields["user_type"] = "NO_ACCESS"
-        elif "ingen tilgang" in text_lower or "no access" in text_lower:
+        elif "ingen tilgang" in text_lower or "no access" in text_lower or "ohne registrierungszugang" in text_lower:
             fields["user_type"] = "NO_ACCESS"
         elif "standard" in text_lower:
             fields["user_type"] = "STANDARD"
@@ -1029,20 +1031,22 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
     # --- Set employee roles ---
     if task_type == TaskType.SET_EMPLOYEE_ROLES:
         # Extract employee name: "ansatt X Y" / "employee X Y" / "employee role for X Y"
+        # re.I needed: German capitalizes nouns ("Mitarbeiter" vs "mitarbeiter")
         if "first_name" not in fields:
             m = re.search(
                 r"(?:ansatt|tilsett|employee|mitarbeiter|employé|empleado)\s+"
                 r"(?:role\s+)?(?:for\s+)?"
                 r"([A-ZÆØÅ\u00C0-\u024F0-9]\S+)\s+([A-ZÆØÅ\u00C0-\u024F0-9]\S+)",
-                text,
+                text, re.I,
             )
             if m:
                 fields["first_name"] = m.group(1).rstrip(",.")
                 fields["last_name"] = m.group(2).rstrip(",.")
                 fields["employee_identifier"] = f"{fields['first_name']} {fields['last_name']}"
-        # Extract user type: "som administrator" / "as STANDARD" / "rollen prosjektleder"
+        # Extract user type: "som administrator" / "as STANDARD" / "rollen prosjektleder" / "als eingeschränkten Benutzer"
         m = re.search(
-            r"(?:som|as|to|til|rollen?)\s+(administrator|admin|standard|extended|no.?access|begrenset|limited|"
+            r"(?:som|as|als|to|til|rollen?)\s+(administrator|admin|standard|extended|no.?access|begrenset|limited|"
+            r"eingeschränkt\w*|restricted|"
             r"prosjektleder|project.?manager|kontoadministrator|account.?administrator|"
             r"lønnsadministrator|payroll.?administrator|regnskapsfører|accountant)",
             text, re.I,
@@ -1059,6 +1063,7 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 "NOACCESS": "NO_ACCESS",
                 "BEGRENSET": "NO_ACCESS",
                 "LIMITED": "NO_ACCESS",
+                "RESTRICTED": "NO_ACCESS",
                 "PROSJEKTLEDER": "EXTENDED",
                 "PROJECT_MANAGER": "EXTENDED",
                 "KONTOADMINISTRATOR": "EXTENDED",
@@ -1068,15 +1073,23 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 "REGNSKAPSFØRER": "EXTENDED",
                 "ACCOUNTANT": "EXTENDED",
             }
-            fields["user_type"] = role_map.get(role_raw, "STANDARD")
+            # Handle German inflected forms: eingeschränkten/eingeschränkter → eingeschränkt
+            if role_raw.startswith("EINGESCHRÄNKT"):
+                role_raw = "EINGESCHRÄNKT"
+            mapped = role_map.get(role_raw)
+            if not mapped:
+                # Check executor's _UT_MAP as fallback
+                mapped = {"EINGESCHRÄNKT": "NO_ACCESS", "EINGESCHRAENKT": "NO_ACCESS"}.get(role_raw, "STANDARD")
+            fields["user_type"] = mapped
 
     # --- Payroll: extract employee, salary, bonus ---
     if task_type == TaskType.RUN_PAYROLL:
         # Employee name: "de Jules Leroy" / "for ansatt Kari Hansen" / "für Mitarbeiter X Y"
+        # re.I needed: German capitalizes nouns ("Mitarbeiter")
         m = re.search(
             r"(?:de|for|für|pour|para|av|of)\s+(?:ansatt\s+|employee\s+|mitarbeiter\s+|employé\s+)?"
             r"([A-ZÆØÅ\u00C0-\u024F]\S+)\s+([A-ZÆØÅ\u00C0-\u024F]\S+)",
-            text,
+            text, re.I,
         )
         if m:
             fields["first_name"] = m.group(1).rstrip(",.")
