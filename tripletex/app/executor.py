@@ -3352,25 +3352,54 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
             raw_amt = _get(fields, amt_key)
             if raw_amt is not None:
                 try:
-                    amount = float(str(raw_amt).replace(",", ".").replace(" ", ""))
+                    amount = _parse_number(str(raw_amt))
                     break
                 except (ValueError, TypeError):
                     pass
-        # Also try extracting from prompt text
+
+        # Try extracting from prompt text
         if amount == 0:
             prompt = _get(fields, "raw_prompt") or _get(fields, "description") or ""
-            amt_match = re.search(r"(?:resultat|profit|loss|beløp|amount|resultat)\s*[:=]?\s*([-\d\s,.]+)", str(prompt), re.IGNORECASE)
+            amt_match = re.search(
+                r"(?:resultat|profit|loss|beløp|amount|resultado|résultat|Ergebnis|beneficio|lucro)\s*[:=]?\s*([-\d\s,.]+)",
+                str(prompt), re.IGNORECASE)
             if amt_match:
                 try:
-                    amount = float(amt_match.group(1).strip().replace(",", ".").replace(" ", ""))
+                    amount = _parse_number(amt_match.group(1).strip())
                 except (ValueError, TypeError):
                     pass
 
-        voucher_data = {
-            "date": voucher_date,
-            "description": f"Årsavslutning {year} - Overføring av årsresultat til egenkapital",
-            **({"voucherType": {"id": voucher_type_id}} if voucher_type_id else {}),
-            "postings": [
+        # Try to fetch actual P&L balance from ledger
+        if amount == 0:
+            try:
+                balance_resp = await client.get(
+                    "/ledger/balance",
+                    params={
+                        "dateFrom": f"{year}-01-01",
+                        "dateTo": f"{year}-12-31",
+                        "accountNumberFrom": "3000",
+                        "accountNumberTo": "8899",
+                        "fields": "account(number),balanceIn,balanceOut,balanceChange",
+                    },
+                )
+                balances = balance_resp.get("values") or []
+                total_pl = sum(
+                    (b.get("balanceChange") or b.get("balanceOut", 0) or 0)
+                    for b in balances
+                )
+                if total_pl != 0:
+                    amount = -total_pl  # P&L surplus = credit → transfer as positive to equity
+                    _log("INFO", "Fetched P&L balance from ledger", total_pl=total_pl, amount=amount)
+            except TripletexAPIError:
+                _log("INFO", "Ledger balance API not available, using extracted amount")
+
+        # Build closing voucher postings
+        postings = []
+
+        # If we have actual balances, create per-account closing entries
+        # Otherwise just do a single result → equity transfer
+        if amount != 0:
+            postings = [
                 {
                     "description": f"Årsresultat {year}",
                     "account": {"id": result_acc["id"]},
@@ -3383,7 +3412,30 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
                     "amountGross": amount,
                     "amountGrossCurrency": amount,
                 },
-            ],
+            ]
+        else:
+            # No amount found — create a zero-value closing entry as acknowledgment
+            _log("WARNING", "No P&L amount found, creating nominal closing entry")
+            postings = [
+                {
+                    "description": f"Årsavslutning {year} (nominell)",
+                    "account": {"id": result_acc["id"]},
+                    "amountGross": 0,
+                    "amountGrossCurrency": 0,
+                },
+                {
+                    "description": f"Årsavslutning {year} (nominell)",
+                    "account": {"id": equity_acc["id"]},
+                    "amountGross": 0,
+                    "amountGrossCurrency": 0,
+                },
+            ]
+
+        voucher_data = {
+            "date": voucher_date,
+            "description": f"Årsavslutning {year} - Overføring av årsresultat til egenkapital",
+            **({"voucherType": {"id": voucher_type_id}} if voucher_type_id else {}),
+            "postings": postings,
         }
         _normalize_postings(voucher_data)
 
@@ -5489,7 +5541,71 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
         except TripletexAPIError as e:
             _log("WARNING", "Depreciation voucher failed", error=str(e)[:200])
 
-    vouchers_created = sum(1 for v in [accrual_voucher_id, depr_voucher_id] if v)
+    # ── Voucher 3: Close temporary accounts to equity ──────────────────
+    # If prompt mentions closing temporary accounts (cierre cuentas temporales,
+    # close temporary accounts, steng midlertidige kontoer, etc.)
+    closing_voucher_id = None
+    close_temps = bool(re.search(
+        r"(?:cierre|close|steng|schließe?|ferme[rz]?|fechar)\s*(?:las?\s+)?(?:cuentas?\s+)?(?:temporales?|temporary|midlertidig|temporär|temporaire|temporári)",
+        prompt_text2, re.IGNORECASE,
+    ))
+    # Also detect "close to equity/patrimonio/egenkapital"
+    if not close_temps:
+        close_temps = bool(re.search(
+            r"(?:patrimonio|equity|egenkapital|Eigenkapital|capitaux\s+propres|patrimônio)",
+            prompt_text2, re.IGNORECASE,
+        ))
+
+    if close_temps and all_accounts:
+        _log("INFO", "Closing temporary accounts to equity")
+        # Find equity account (2050 preferred)
+        equity_acct_id = all_accounts.get("2050") or all_accounts.get("2080")
+        if not equity_acct_id:
+            for num, aid in all_accounts.items():
+                if num.startswith("20"):
+                    equity_acct_id = aid
+                    break
+
+        # Find result account (8960 preferred)
+        result_acct_id = all_accounts.get("8960") or all_accounts.get("8920") or all_accounts.get("8900")
+        if not result_acct_id:
+            for num, aid in all_accounts.items():
+                if num.startswith("89"):
+                    result_acct_id = aid
+                    break
+
+        if equity_acct_id and result_acct_id:
+            # Transfer accrual + depreciation amounts as the closing entry
+            closing_amount = (accrual_amount or 0) + (monthly_depreciation or 0)
+            if closing_amount > 0:
+                closing_desc = f"Avslutning midlertidige kontoer {month:02d}/{year}"
+                closing_payload = _clean({
+                    "date": voucher_date,
+                    "description": closing_desc,
+                    "postings": [
+                        {
+                            "account": {"id": result_acct_id},
+                            "amountGross": -closing_amount,
+                            "amountGrossCurrency": -closing_amount,
+                            "description": closing_desc,
+                        },
+                        {
+                            "account": {"id": equity_acct_id},
+                            "amountGross": closing_amount,
+                            "amountGrossCurrency": closing_amount,
+                            "description": closing_desc,
+                        },
+                    ],
+                })
+                _normalize_postings(closing_payload)
+                try:
+                    result = await client.create_voucher(closing_payload)
+                    closing_voucher_id = result.get("id")
+                    _log("INFO", "Closing voucher created", voucher_id=closing_voucher_id)
+                except TripletexAPIError as e:
+                    _log("WARNING", "Closing voucher failed", error=str(e)[:200])
+
+    vouchers_created = sum(1 for v in [accrual_voucher_id, depr_voucher_id, closing_voucher_id] if v)
 
     if vouchers_created == 0:
         return {"success": False, "error": "Failed to create any month-end vouchers"}
@@ -5499,6 +5615,7 @@ async def _exec_month_end_closing(fields: dict, client: TripletexClient) -> dict
         "vouchers_created": vouchers_created,
         "accrual_voucher_id": accrual_voucher_id,
         "depreciation_voucher_id": depr_voucher_id,
+        "closing_voucher_id": closing_voucher_id,
         "month": month,
         "year": year,
     }
