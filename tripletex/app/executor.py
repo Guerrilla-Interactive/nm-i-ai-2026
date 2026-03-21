@@ -3695,8 +3695,8 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
     # Look up voucher type (required for valid voucher creation)
     voucher_type_id = await _get_voucher_type_id(client, ["leverandør", "supplier", "innkjøp", "purchase"])
 
-    # NOTE: "supplier" field does NOT exist on voucher postings — it causes
-    # "Request mapping failed" (code 16000). Only use valid posting fields.
+    # The liability posting (2400) MUST include "supplier" reference — without it
+    # Tripletex rejects with "Leverandør mangler" on postings.supplier.id.
     # "currency" on voucher top-level is also invalid — only on postings via _normalize_postings.
     # "invoiceDueDate" is NOT a voucher field — only on /supplierInvoice.
     voucher_payload = _clean({
@@ -3714,6 +3714,7 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
             {
                 "date": voucher_date,
                 "account": {"id": liability_acct_id},
+                "supplier": {"id": supplier_id},
                 "amountGross": -amount,
                 "amountGrossCurrency": -amount,
                 "description": description,
@@ -4122,18 +4123,11 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
     reason = _get(fields, "reason") or _get(fields, "description") or _get(fields, "comment")
 
     # Step 1: Find the invoice
-    # If we have an invoice_number that looks like an ID, try direct GET first
+    # For small numbers, try invoiceNumber search FIRST (avoids wasted 404 on direct ID)
     if not invoice_id and invoice_number and str(invoice_number).isdigit():
-        try:
-            inv = await client.get_invoice(int(invoice_number))
-            if inv:
-                invoice_id = inv.get("id", int(invoice_number))
-        except TripletexAPIError as e:
-            if e.status_code != 404:
-                _log("WARNING", "Direct invoice GET failed", id=invoice_number, status=e.status_code)
-
-    if not invoice_id:
-        if invoice_number and str(invoice_number).isdigit():
+        num_val = int(invoice_number)
+        if num_val < 1_000_000:
+            # Small number — likely an invoiceNumber, not an internal ID
             invoices = await client.get_invoices({
                 "invoiceNumber": str(invoice_number),
                 "invoiceDateFrom": "2000-01-01",
@@ -4141,6 +4135,32 @@ async def _exec_reverse_payment(fields: dict, client: TripletexClient) -> dict:
             })
             if invoices:
                 invoice_id = invoices[0]["id"]
+            else:
+                # Fallback: try direct GET for small numbers
+                try:
+                    inv = await client.get_invoice(num_val)
+                    if inv:
+                        invoice_id = inv.get("id", num_val)
+                except TripletexAPIError as e:
+                    if e.status_code != 404:
+                        _log("WARNING", "Direct invoice GET failed", id=invoice_number, status=e.status_code)
+        else:
+            # Large number — likely an internal ID
+            try:
+                inv = await client.get_invoice(num_val)
+                if inv:
+                    invoice_id = inv.get("id", num_val)
+            except TripletexAPIError as e:
+                if e.status_code != 404:
+                    _log("WARNING", "Direct invoice GET failed", id=invoice_number, status=e.status_code)
+            if not invoice_id:
+                invoices = await client.get_invoices({
+                    "invoiceNumber": str(invoice_number),
+                    "invoiceDateFrom": "2000-01-01",
+                    "invoiceDateTo": "2099-12-31",
+                })
+                if invoices:
+                    invoice_id = invoices[0]["id"]
         if not invoice_id and customer_name:
             invoices = await client.get_invoices({
                 "customerName": customer_name,
