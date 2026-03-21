@@ -543,6 +543,81 @@ Input: "Eliminar el departamento Ventas del sistema"
 Output:
 {{"task_type": "delete_department", "confidence": 0.96, "fields": {{"name": "Ventas"}}}}
 
+### Example 38 — Update department (Norwegian)
+Input: "Oppdater avdelingen Testdrift1132 med nytt navn Produksjon"
+Output:
+{{"task_type": "update_department", "confidence": 0.97, "fields": {{"department_name": "Testdrift1132", "new_name": "Produksjon"}}}}
+
+### Example 38b — Update department (German)
+Input: "Aktualisieren Sie die Abteilung Verwaltung mit dem neuen Namen Betrieb"
+Output:
+{{"task_type": "update_department", "confidence": 0.96, "fields": {{"department_name": "Verwaltung", "new_name": "Betrieb"}}}}
+
+### Example 38c — Update department (French)
+Input: "Mettre à jour le département Logistique avec le nouveau nom Transport"
+Output:
+{{"task_type": "update_department", "confidence": 0.96, "fields": {{"department_name": "Logistique", "new_name": "Transport"}}}}
+
+### Example 38d — Update department (Spanish)
+Input: "Actualizar el departamento Ventas con el nuevo nombre Comercial"
+Output:
+{{"task_type": "update_department", "confidence": 0.96, "fields": {{"department_name": "Ventas", "new_name": "Comercial"}}}}
+
+### Example 38e — Update department (English)
+Input: "Update department Operations with new name Logistics"
+Output:
+{{"task_type": "update_department", "confidence": 0.96, "fields": {{"department_name": "Operations", "new_name": "Logistics"}}}}
+
+### Example 39 — Find supplier (Norwegian)
+Input: "Finn leverandøren TestLev AS"
+Output:
+{{"task_type": "find_supplier", "confidence": 0.96, "fields": {{"name": "TestLev AS"}}}}
+
+### Example 39b — Find supplier (Portuguese)
+Input: "Procurar o fornecedor Nordic Consulting AS"
+Output:
+{{"task_type": "find_supplier", "confidence": 0.96, "fields": {{"name": "Nordic Consulting AS"}}}}
+
+### Example 40 — Delete supplier (Norwegian)
+Input: "Slett leverandøren Havbris AS"
+Output:
+{{"task_type": "delete_supplier", "confidence": 0.96, "fields": {{"name": "Havbris AS"}}}}
+
+### Example 40b — Delete supplier (Portuguese)
+Input: "Excluir o fornecedor Nordlicht GmbH"
+Output:
+{{"task_type": "delete_supplier", "confidence": 0.96, "fields": {{"name": "Nordlicht GmbH"}}}}
+
+### Example 41 — Delete department (Norwegian)
+Input: "Slett avdelingen Testdrift og Kommunikasjon"
+Output:
+{{"task_type": "delete_department", "confidence": 0.96, "fields": {{"name": "Testdrift og Kommunikasjon"}}}}
+
+### Example 41b — Delete department (Portuguese)
+Input: "Excluir o departamento Vendas"
+Output:
+{{"task_type": "delete_department", "confidence": 0.96, "fields": {{"name": "Vendas"}}}}
+
+### Example 42 — Enable module with compound word (Norwegian — prosjektmodulen)
+Input: "Aktiver prosjektmodulen"
+Output:
+{{"task_type": "enable_module", "confidence": 0.98, "fields": {{"module_name": "project"}}}}
+
+### Example 42b — Enable module with compound word (Norwegian — reiseregningsmodulen)
+Input: "Aktiver reiseregningsmodulen"
+Output:
+{{"task_type": "enable_module", "confidence": 0.98, "fields": {{"module_name": "travelexpense"}}}}
+
+### Example 42c — Enable module with compound word (Norwegian — fakturamodulen)
+Input: "Aktiver fakturamodulen"
+Output:
+{{"task_type": "enable_module", "confidence": 0.98, "fields": {{"module_name": "invoice"}}}}
+
+### Example 42d — Enable module with compound word (Norwegian — lønnsmodulen)
+Input: "Aktiver lønnsmodulen"
+Output:
+{{"task_type": "enable_module", "confidence": 0.98, "fields": {{"module_name": "salary"}}}}
+
 ## BATCH OPERATIONS
 If the prompt asks to create MULTIPLE entities of the same type (e.g., "Create three departments: X, Y, Z"),
 return a JSON object with a "batch" array containing one classification per entity:
@@ -840,7 +915,7 @@ def _rescue_missing_entity_name(task_type: TaskType, fields: dict, prompt: str) 
     non-Norwegian prompts), extract the entity name directly from the prompt text.
     """
     _SUPPLIER_TASKS = (TaskType.FIND_SUPPLIER, TaskType.DELETE_SUPPLIER, TaskType.UPDATE_SUPPLIER)
-    _DEPARTMENT_TASKS = (TaskType.DELETE_DEPARTMENT,)
+    _DEPARTMENT_TASKS = (TaskType.DELETE_DEPARTMENT, TaskType.UPDATE_DEPARTMENT)
 
     has_name = any(fields.get(k) for k in ("name", "supplier_name", "department_name",
                                             "supplier_identifier", "department_identifier",
@@ -890,6 +965,39 @@ def _rescue_missing_entity_name(task_type: TaskType, fields: dict, prompt: str) 
             f["search_query"] = f["organization_number"]
             f["search_field"] = "organization_number"
             logger.info("Rescued org number for FIND_SUPPLIER: %s", f["organization_number"])
+
+    # For UPDATE_DEPARTMENT, rescue new_name if missing
+    if task_type == TaskType.UPDATE_DEPARTMENT and not f.get("new_name"):
+        new_name_match = re.search(
+            r"(?:nytt?\s+navn|new\s+name|neuen?\s+Namen|nouveau\s+nom|nuevo\s+nombre|novo\s+nome)\s+(.+?)(?:\s+og\s+|\s+and\s+|\s+und\s+|\s+et\s+|\s+y\s+|$|[,.])",
+            prompt, re.IGNORECASE,
+        )
+        if new_name_match:
+            f["new_name"] = new_name_match.group(1).strip().rstrip(",.")
+            logger.info("Rescued new_name for UPDATE_DEPARTMENT: %s", f["new_name"])
+
+    # For ENABLE_MODULE, map Norwegian compound module names to API names
+    if task_type == TaskType.ENABLE_MODULE:
+        mod = f.get("module_name", "")
+        if mod and isinstance(mod, str):
+            _MODULE_NAME_MAP = {
+                "prosjektmodulen": "project", "prosjektmodule": "project", "prosjektmodul": "project",
+                "prosjekt": "project", "projekt": "project", "proyecto": "project", "projet": "project",
+                "reiseregningsmodulen": "travelexpense", "reiseregningsmodul": "travelexpense",
+                "reiseregnskap": "travelexpense", "reiseregning": "travelexpense",
+                "frais de voyage": "travelexpense", "travel expense": "travelexpense",
+                "reisekostenabrechnung": "travelexpense", "gasto de viaje": "travelexpense",
+                "fakturamodulen": "invoice", "fakturamodul": "invoice", "faktura": "invoice",
+                "facture": "invoice", "rechnung": "invoice", "factura": "invoice",
+                "lønnsmodulen": "salary", "lønnsmodul": "salary", "lønn": "salary",
+                "lonnsmodulen": "salary", "lonnsmodul": "salary", "lonn": "salary",
+                "salaire": "salary", "gehalt": "salary", "nómina": "salary", "salário": "salary",
+                "personalmodulen": "employee", "personalmodul": "employee",
+            }
+            mod_lower = mod.lower().strip()
+            if mod_lower in _MODULE_NAME_MAP:
+                f["module_name"] = _MODULE_NAME_MAP[mod_lower]
+                logger.info("Mapped module name '%s' → '%s'", mod, f["module_name"])
 
     return f
 
@@ -2242,6 +2350,25 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
             fields.setdefault("search_query", fields["organization_number"])
             fields.setdefault("search_field", "organization_number")
 
+    elif task_type == TaskType.UPDATE_DEPARTMENT:
+        # Extract department name from multilingual prompts
+        dept_match = re.search(
+            r"(?:avdeling(?:a|en)?|department|département|departamento|abteilung)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:og\s+[A-ZÆØÅ\u00C0-\u024F][\w]*)?)"
+            r"(?:\s*[,(.]|\s+(?:med|with|org|på|for|til|mit|avec|con|por|aus|du|from|von|de|par|nytt?|new|neuen?|nouveau|nuevo|novo)\s|$)",
+            prompt, re.IGNORECASE,
+        )
+        if dept_match:
+            fields["department_name"] = dept_match.group(1).strip().rstrip(",.")
+            fields["name"] = fields["department_name"]
+        # Extract new_name
+        new_name_match = re.search(
+            r"(?:nytt?\s+navn|new\s+name|neuen?\s+Namen|nouveau\s+nom|nuevo\s+nombre|novo\s+nome)\s+(.+?)(?:\s+og\s+|\s+and\s+|\s+und\s+|\s+et\s+|\s+y\s+|$|[,.])",
+            prompt, re.IGNORECASE,
+        )
+        if new_name_match:
+            fields["new_name"] = new_name_match.group(1).strip().rstrip(",.")
+
     elif task_type == TaskType.DELETE_DEPARTMENT:
         # Extract department name from multilingual prompts
         dept_match = re.search(
@@ -2268,6 +2395,11 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
         )
         if mod_match:
             fields["module_name"] = mod_match.group(1).strip().rstrip(",.")
+        else:
+            # Try compound word: "prosjektmodulen" → "prosjekt"
+            compound_match = re.search(r"(\w+)modul(?:en)?\b", prompt, re.IGNORECASE)
+            if compound_match:
+                fields["module_name"] = compound_match.group(1)
 
     elif task_type == TaskType.REVERSE_PAYMENT:
         # Extract customer name
@@ -2353,6 +2485,11 @@ def _extract_fields_generic(prompt: str, task_type: TaskType) -> dict:
         )
         if mod_match:
             fields["module_name"] = mod_match.group(1).strip().rstrip(",.")
+        else:
+            # Try compound word: "prosjektmodulen" → "prosjekt"
+            compound_match = re.search(r"(\w+)modul(?:en)?\b", prompt, re.IGNORECASE)
+            if compound_match:
+                fields["module_name"] = compound_match.group(1)
 
     return fields
 

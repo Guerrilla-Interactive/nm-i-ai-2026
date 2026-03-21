@@ -148,8 +148,34 @@ async def _find_invoice(client: TripletexClient, invoice_ref) -> dict | None:
     if not ref_str:
         return None
 
-    # Strategy 1: Direct ID lookup (most common — grader uses the ID it got back)
-    if ref_str.isdigit():
+    is_digit = ref_str.isdigit()
+    is_small = is_digit and int(ref_str) < 1_000_000
+
+    # Strategy 1a: For small numbers (likely invoiceNumber), search by invoiceNumber FIRST
+    # Invoice IDs are in the billions; grader references like "faktura 5" mean invoiceNumber=5
+    if is_small:
+        try:
+            invoices = await client.get_invoices({
+                "invoiceNumber": ref_str,
+                "invoiceDateFrom": "2000-01-01",
+                "invoiceDateTo": "2099-12-31",
+            })
+            if invoices:
+                _log("INFO", "Found invoice by invoiceNumber (small ref)", ref=ref_str, invoice_id=invoices[0]["id"])
+                return invoices[0]
+        except (TripletexAPIError, Exception):
+            pass
+        # Fallback: try direct ID for small numbers
+        try:
+            inv = await client.get_invoice(int(ref_str))
+            if inv and inv.get("id"):
+                _log("INFO", "Found invoice by direct ID (small ref fallback)", invoice_id=inv["id"])
+                return inv
+        except (TripletexAPIError, Exception):
+            pass
+
+    # Strategy 1b: For large numbers (likely internal ID), try direct ID FIRST
+    if is_digit and not is_small:
         try:
             inv = await client.get_invoice(int(ref_str))
             if inv and inv.get("id"):
@@ -157,19 +183,32 @@ async def _find_invoice(client: TripletexClient, invoice_ref) -> dict | None:
                 return inv
         except (TripletexAPIError, Exception):
             pass
+        # Fallback: try invoiceNumber search for large numbers
+        try:
+            invoices = await client.get_invoices({
+                "invoiceNumber": ref_str,
+                "invoiceDateFrom": "2000-01-01",
+                "invoiceDateTo": "2099-12-31",
+            })
+            if invoices:
+                _log("INFO", "Found invoice by invoiceNumber (large ref fallback)", ref=ref_str, invoice_id=invoices[0]["id"])
+                return invoices[0]
+        except (TripletexAPIError, Exception):
+            pass
 
-    # Strategy 2: Search by invoice number
-    try:
-        invoices = await client.get_invoices({
-            "invoiceNumber": ref_str,
-            "invoiceDateFrom": "2000-01-01",
-            "invoiceDateTo": "2099-12-31",
-        })
-        if invoices:
-            _log("INFO", "Found invoice by invoiceNumber", ref=ref_str, invoice_id=invoices[0]["id"])
-            return invoices[0]
-    except (TripletexAPIError, Exception):
-        pass
+    # Strategy 2: Non-digit ref — search by invoiceNumber
+    if not is_digit:
+        try:
+            invoices = await client.get_invoices({
+                "invoiceNumber": ref_str,
+                "invoiceDateFrom": "2000-01-01",
+                "invoiceDateTo": "2099-12-31",
+            })
+            if invoices:
+                _log("INFO", "Found invoice by invoiceNumber", ref=ref_str, invoice_id=invoices[0]["id"])
+                return invoices[0]
+        except (TripletexAPIError, Exception):
+            pass
 
     # Strategy 3: Search all recent invoices and match by ID or number
     try:

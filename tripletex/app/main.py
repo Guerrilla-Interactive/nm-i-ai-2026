@@ -483,8 +483,8 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         if m:
             fields["name"] = m.group(1).strip().rstrip(",.")
 
-    # --- Department name extraction (for delete department) ---
-    if "name" not in fields and task_type == TaskType.DELETE_DEPARTMENT:
+    # --- Department name extraction (for delete/update department) ---
+    if "name" not in fields and task_type in (TaskType.DELETE_DEPARTMENT, TaskType.UPDATE_DEPARTMENT):
         m = re.search(
             r"(?:avdeling(?:a|en)?|department|département|departamento|abteilung)\s+"
             r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?(?:og\s+[A-ZÆØÅ\u00C0-\u024F][\w]*)?)"
@@ -493,6 +493,8 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
         )
         if m:
             fields["name"] = m.group(1).strip().rstrip(",.")
+            if task_type == TaskType.UPDATE_DEPARTMENT:
+                fields["department_name"] = fields["name"]
 
     # Entity-keyword + name (for departments, products, projects without "med navn"/"named")
     # "avdeling HR", "department Finance", "Abteilung Vertrieb", "produkt Widget"
@@ -500,7 +502,8 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                           TaskType.CREATE_PROJECT, TaskType.CREATE_CUSTOMER,
                           TaskType.PROJECT_WITH_CUSTOMER, TaskType.FIND_CUSTOMER,
                           TaskType.UPDATE_CUSTOMER, TaskType.UPDATE_PROJECT,
-                          TaskType.DELETE_PROJECT, TaskType.DELETE_DEPARTMENT)
+                          TaskType.DELETE_PROJECT, TaskType.DELETE_DEPARTMENT,
+                          TaskType.UPDATE_DEPARTMENT)
     if "name" not in fields and task_type in _NAME_ENTITY_TYPES:
         # Try quoted name first: 'prosjektet "Foo Bar"' or "prosjektet 'Foo Bar'"
         m = re.search(
