@@ -938,12 +938,13 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
     # --- Update department: extract department name ---
     if task_type == TaskType.UPDATE_DEPARTMENT:
         m = re.search(
-            r"(?:avdeling|department|département|departamento|abteilung)\s+"
+            r"(?:avdeling\w*|department\w*|département\w*|departamento\w*|abteilung\w*)\s+"
             r"(.+?)(?:\s*[,.]|\s+(?:med|with|mit|og|and|avec|con|til|to)\s|$)",
             text, re.I,
         )
         if m:
             fields["department_identifier"] = m.group(1).strip().rstrip(",.")
+            fields["department_name"] = fields["department_identifier"]
         # New name
         m = re.search(
             r"(?:nytt?\s+(?:navn|name|Namn)|new\s+name|neuer?\s+Name|nouveau\s+nom|nuevo\s+nombre|novo\s+nome)\s+(.+?)(?:\s*[,.]|$)",
