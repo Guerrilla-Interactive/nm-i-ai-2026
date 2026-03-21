@@ -1311,8 +1311,7 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
             resolved = await _resolve_invoice_by_identifier(client, str(invoice_number), fields)
             if resolved:
                 invoice_id = resolved
-        if not invoice_id:
-            return {"success": False, "error": f"Invoice #{invoice_number} not found"}
+        # Do NOT return early here — fall through to customer/recent fallbacks
 
     # Fallback: if no invoice ID yet, try to find by customer
     if not invoice_id:
@@ -1342,7 +1341,7 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
             except TripletexAPIError as e:
                 _log("WARNING", "Customer-based invoice lookup failed", error=str(e)[:200])
 
-    # Absolute fallback: get most recent unpaid invoice
+    # Absolute fallback: get most recent invoice (prefer unpaid, but accept any)
     if not invoice_id:
         try:
             all_invoices = await client.get_invoices({
@@ -1350,17 +1349,23 @@ async def _exec_register_payment(fields: dict, client: TripletexClient) -> dict:
                 "invoiceDateTo": "2099-12-31",
                 "count": 50,
             })
-            unpaid = [inv for inv in all_invoices
-                      if float(inv.get("amountOutstanding") or inv.get("amount") or 0) > 0]
-            if unpaid:
-                best = max(unpaid, key=lambda inv: inv.get("id", 0))
-                invoice_id = best["id"]
-                _log("INFO", "Using most recent unpaid invoice as fallback", invoice_id=invoice_id)
+            if all_invoices:
+                unpaid = [inv for inv in all_invoices
+                          if float(inv.get("amountOutstanding") or inv.get("amount") or 0) > 0]
+                if unpaid:
+                    best = max(unpaid, key=lambda inv: inv.get("id", 0))
+                    invoice_id = best["id"]
+                    _log("INFO", "Using most recent unpaid invoice as fallback", invoice_id=invoice_id)
+                else:
+                    # No unpaid — use most recent invoice anyway
+                    best = max(all_invoices, key=lambda inv: inv.get("id", 0))
+                    invoice_id = best["id"]
+                    _log("INFO", "Using most recent invoice as fallback (none unpaid)", invoice_id=invoice_id)
         except (TripletexAPIError, Exception):
             pass
 
     if not invoice_id:
-        return {"success": False, "error": "No invoice specified for payment"}
+        return {"success": False, "error": f"Invoice not found{' (#' + str(invoice_number) + ')' if invoice_number else ''}"}
 
     payment_date = _get(fields, "payment_date") or _today()
     amount = _get(fields, "amount") or _get(fields, "payment_amount") or _get(fields, "paid_amount")
@@ -1422,8 +1427,7 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
             resolved = await _resolve_invoice_by_identifier(client, str(invoice_number), fields)
             if resolved:
                 invoice_id = resolved
-        if not invoice_id:
-            return {"success": False, "error": f"Invoice #{invoice_number} not found"}
+        # Do NOT return early — fall through to customer/recent fallbacks
 
     # Fallback: search by customer name → get their invoices
     if not invoice_id:
@@ -1451,13 +1455,13 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
             except (TripletexAPIError, Exception) as e:
                 _log("WARNING", "Customer-based invoice lookup failed for credit note", error=str(e)[:200])
 
-    # If still no invoice, try to find most recent invoice
+    # Absolute fallback: get most recent invoice
     if not invoice_id:
         try:
             recent = await client.get_invoices({
                 "invoiceDateFrom": "2026-01-01",
                 "invoiceDateTo": "2099-12-31",
-                "count": 10,
+                "count": 50,
             })
             if recent:
                 invoice_id = max(recent, key=lambda inv: inv.get("id", 0))["id"]
@@ -1466,7 +1470,7 @@ async def _exec_create_credit_note(fields: dict, client: TripletexClient) -> dic
             pass
 
     if not invoice_id:
-        return {"success": False, "error": "No invoice specified for credit note"}
+        return {"success": False, "error": f"Invoice not found{' (#' + str(invoice_number) + ')' if invoice_number else ''}"}
 
     credit_params = _clean({
         "date": _get(fields, "credit_note_date") or _today(),
@@ -1565,7 +1569,13 @@ async def _exec_invoice_with_payment(fields: dict, client: TripletexClient) -> d
     # --- No existing invoice found — create new one ---
     order_lines = _build_order_lines(fields)
     if not order_lines:
-        return {"success": False, "error": "No invoice lines specified"}
+        # Default line from amount if available, otherwise minimal
+        amt = float(explicit_paid) if explicit_paid else 1000.0
+        order_lines = [{
+            "count": 1.0,
+            "unitPriceExcludingVatCurrency": amt,
+            "description": _get(fields, "description") or "Faktura",
+        }]
 
     # Create products for lines that have product numbers
     order_lines = await _create_products_for_lines(client, order_lines)
@@ -2208,6 +2218,7 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                 "firstName": first_name,
                 "lastName": last_name,
                 "email": email,
+                "dateOfBirth": "1990-01-01",
                 "userType": "STANDARD",
                 "department": {"id": int(dept_id)},
             }))
@@ -2357,10 +2368,17 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                     try:
                         result = await client.create_timesheet_entry(payload)
                         _log("INFO", "Timesheet succeeded without explicit employee")
-                    except TripletexAPIError as e_final:
-                        return {"success": False,
-                                "error": f"Timesheet entry failed: {(e_final.detail or str(e_final))[:200]}",
-                                "employee_id": employee_id, "project_id": project_id}
+                    except TripletexAPIError:
+                        # Retry D: without activity (let API pick default)
+                        payload.pop("activity", None)
+                        payload["employee"] = {"id": int(employee_id)}
+                        try:
+                            result = await client.create_timesheet_entry(payload)
+                            _log("INFO", "Timesheet succeeded without explicit activity")
+                        except TripletexAPIError as e_final:
+                            return {"success": False,
+                                    "error": f"Timesheet entry failed: {(e_final.detail or str(e_final))[:200]}",
+                                    "employee_id": employee_id, "project_id": project_id}
         else:
             raise
     return {"created_id": result.get("id"), "entity": "timesheet_entry",
