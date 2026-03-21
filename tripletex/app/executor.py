@@ -2400,6 +2400,7 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
 
     # 2. Resolve project
     project_id = _get(fields, "project_id")
+    _project_just_created = False
     if not project_id:
         proj_name = _get(fields, "project_name") or _get(fields, "project_identifier")
         if proj_name:
@@ -2419,6 +2420,7 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                         "startDate": _today(),
                     }))
                     project_id = proj["id"]
+                    _project_just_created = True
                     _log("INFO", "Created project for timesheet", name=proj_name, id=project_id)
                 except TripletexAPIError as e:
                     if e.status_code == 422 and "prosjektleder" in (e.detail or "").lower() and pm_id != employee_id:
@@ -2429,6 +2431,7 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                             "startDate": _today(),
                         }))
                         project_id = proj["id"]
+                        _project_just_created = True
                     else:
                         raise
 
@@ -2438,6 +2441,7 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
     # 3. Resolve activity — MUST use isProjectActivity=true for timesheet on projects
     activity_id = _get(fields, "activity_id")
     activity_name = _get(fields, "activity_name")
+    activities = []  # initialize for fallback reference later
     if not activity_id:
         activities = await client.get_activities({})
         if activities:
@@ -2489,16 +2493,24 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
     entry_date = _get(fields, "date") or _today()
 
     # Validate entry_date against project startDate — Tripletex rejects entries
-    # before the project start date
-    try:
-        proj_data = await client.get_project(int(project_id))
-        proj_start = proj_data.get("startDate")
-        if proj_start and entry_date < proj_start:
+    # before the project start date. Skip GET if project was just created (startDate=today).
+    if _project_just_created:
+        # Project was just created with startDate=today, entry_date should be >= today
+        proj_start = _today()
+        if entry_date < proj_start:
             _log("INFO", "Entry date before project start, adjusting",
                  entry_date=entry_date, proj_start=proj_start)
             entry_date = proj_start
-    except (TripletexAPIError, Exception):
-        pass  # Best-effort; proceed with original date
+    else:
+        try:
+            proj_data = await client.get_project(int(project_id))
+            proj_start = proj_data.get("startDate")
+            if proj_start and entry_date < proj_start:
+                _log("INFO", "Entry date before project start, adjusting",
+                     entry_date=entry_date, proj_start=proj_start)
+                entry_date = proj_start
+        except (TripletexAPIError, Exception):
+            pass  # Best-effort; proceed with original date
 
     payload = _clean({
         "employee": {"id": int(employee_id)},
@@ -4433,8 +4445,11 @@ async def _exec_update_product(fields: dict, client: TripletexClient) -> dict:
     if _get(fields, "number"):
         update["number"] = _get(fields, "number")
 
-    result = await client.put(f"/product/{product['id']}", data=update)
-    result = client._extract_value(result)
+    try:
+        result = await client.put(f"/product/{product['id']}", data=update)
+        result = client._extract_value(result)
+    except TripletexAPIError as e:
+        return {"success": False, "error": f"Failed to update product: {e.detail[:200] if e.detail else str(e)}"}
     return {"updated_id": result.get("id"), "entity": "product"}
 
 
