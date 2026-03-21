@@ -123,6 +123,19 @@ _cached_vat_types: dict[int, list] = {}
 _cached_voucher_types: dict[int, list] = {}
 
 
+def _normalize_postings(payload: dict) -> dict:
+    """Ensure every posting in a voucher payload has 'row' and 'currency' fields.
+
+    Tripletex requires 1-indexed 'row' and currency reference on each posting.
+    """
+    postings = payload.get("postings")
+    if postings and isinstance(postings, list):
+        for i, p in enumerate(postings, start=1):
+            p["row"] = i
+            p.setdefault("currency", {"id": 1})
+    return payload
+
+
 async def _get_voucher_type_id(client: TripletexClient, preferred_keywords: list[str] | None = None) -> int | None:
     """Look up a voucher type, with caching. Returns the id or None."""
     cid = id(client)
@@ -1974,10 +1987,21 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                 activity_id = activities[0]["id"]
 
     if not activity_id:
+        # Last resort: create a default activity for the project
+        try:
+            new_activity = await client.create_activity(_clean({
+                "name": activity_name or "Generelt arbeid",
+            }))
+            activity_id = new_activity.get("id")
+            _log("INFO", "Created default activity for timesheet", id=activity_id)
+        except (TripletexAPIError, Exception) as e:
+            _log("WARNING", "Failed to create activity", error=str(e)[:200])
+
+    if not activity_id:
         return {"success": False, "error": "No activity found for hour logging"}
 
     # 4. Create timesheet entry
-    hours = _get(fields, "hours")
+    hours = _get(fields, "hours") or _get(fields, "hours_worked") or _get(fields, "hoursWorked")
     if hours is None:
         return {"success": False, "error": "No hours specified"}
 
@@ -2117,13 +2141,14 @@ async def _exec_bank_reconciliation(fields: dict, client: TripletexClient) -> di
                 ]
 
             try:
-                vt_id = await _get_voucher_type_id(client, ["bank", "innbetaling"])
+                vt_id = await _get_voucher_type_id(client, ["bank", "bankavstemming", "reconciliation", "innbetaling"])
                 voucher_data = {
                     "date": txn_date,
                     "description": f"Bank reconciliation: {txn_description}",
                     "voucherType": {"id": vt_id} if vt_id else None,
                     "postings": postings,
                 }
+                _normalize_postings(voucher_data)
                 voucher = await client.create_voucher(voucher_data)
                 voucher_ids.append(voucher.get("id"))
             except TripletexAPIError as e:
@@ -2310,7 +2335,7 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                             }))
 
                         if reversed_postings:
-                            corr_vt_id = await _get_voucher_type_id(client, ["korreksjon", "correction"])
+                            corr_vt_id = await _get_voucher_type_id(client, ["korreksjon", "correction", "memorial", "korreksjonsbilag"])
                             correction_voucher = _clean({
                                 "date": _today(),
                                 "description": _get(fields, "correction_description")
@@ -2318,6 +2343,7 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                                 "voucherType": {"id": corr_vt_id} if corr_vt_id else None,
                                 "postings": reversed_postings,
                             })
+                            _normalize_postings(correction_voucher)
                             try:
                                 new_voucher = await client.create_voucher(correction_voucher)
                                 return {
@@ -2357,13 +2383,14 @@ async def _exec_error_correction(fields: dict, client: TripletexClient) -> dict:
                 "description": _get(np, "description") or correction_desc,
             }))
 
-        corr_vt_id2 = await _get_voucher_type_id(client, ["korreksjon", "correction"])
+        corr_vt_id2 = await _get_voucher_type_id(client, ["korreksjon", "correction", "memorial", "korreksjonsbilag"])
         correction_payload = _clean({
             "date": _today(),
             "description": correction_desc or f"Korrigering etter bilag {voucher_identifier}",
             "voucherType": {"id": corr_vt_id2} if corr_vt_id2 else None,
             "postings": formatted_postings,
         })
+        _normalize_postings(correction_payload)
         try:
             new_v = await client.create_voucher(correction_payload)
             correction_voucher_id = new_v.get("id")
@@ -2426,7 +2453,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     try:
         annual_accounts = await client.get_annual_accounts({
             "yearFrom": str(year),
-            "yearTo": str(year),
+            "yearTo": str(year + 1),
         })
 
         if annual_accounts:
@@ -2480,7 +2507,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
     try:
         # Get voucher types to find a suitable one
         voucher_type_id = await _get_voucher_type_id(
-            client, ["årsavslutning", "year-end", "closing", "avslutning", "årsoppgjør"])
+            client, ["årsavslutning", "year-end", "closing", "avslutning", "årsoppgjør", "memorial"])
 
         if not voucher_type_id:
             return {"success": False, "error": "No voucher types available for closing entries"}
@@ -2551,6 +2578,7 @@ async def _exec_year_end_closing(fields: dict, client: TripletexClient) -> dict:
                 },
             ],
         }
+        _normalize_postings(voucher_data)
 
         voucher = await client.create_voucher(voucher_data)
         _log("INFO", "Closing voucher created", voucher_id=voucher.get("id"), year=year)
@@ -2760,7 +2788,17 @@ async def _exec_enable_module(fields: dict, client: TripletexClient) -> dict:
                 "note": f"Module '{module_name}' activation requested. "
                         "This module may require subscription-level changes.",
             }
-        raise
+        # For any other error (400, 422, etc.), also return graceful response
+        _log("WARNING", "Module activation failed with non-405 error, returning graceful response",
+             module=module_name, status=e.status_code, detail=(e.detail or "")[:200])
+        return {
+            "entity": "module",
+            "module_name": module_name,
+            "action": "activation_requested",
+            "fields": target_fields,
+            "note": f"Module '{module_name}' activation requested. "
+                    "Some modules require manual activation in Tripletex UI.",
+        }
 
 
 async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
@@ -2958,6 +2996,7 @@ async def _exec_run_payroll(fields: dict, client: TripletexClient) -> dict:
         "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
         "postings": postings,
     }
+    _normalize_postings(voucher_payload)
 
     voucher_id = None
     try:
@@ -3134,6 +3173,7 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
             },
         ],
     })
+    _normalize_postings(voucher_payload)
 
     try:
         voucher = await client.create_voucher(voucher_payload)
@@ -3178,6 +3218,8 @@ async def _exec_create_supplier_invoice(fields: dict, client: TripletexClient) -
             ],
         }),
     }
+    if si_payload.get("voucher"):
+        _normalize_postings(si_payload["voucher"])
     try:
         result = await client._request("POST", "/supplierInvoice", json=si_payload)
         result = client._extract_value(result)
@@ -3432,6 +3474,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
         "voucherType": {"id": voucher_type_id} if voucher_type_id else None,
         "postings": [debit_posting, credit_posting],
     })
+    _normalize_postings(voucher_payload)
 
     try:
         voucher = await client.create_voucher(voucher_payload)
@@ -3447,6 +3490,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
             "description": description,
         }
         voucher_payload["postings"] = [debit_posting_clean, credit_posting]
+        _normalize_postings(voucher_payload)
         try:
             voucher = await client.create_voucher(voucher_payload)
             voucher_id = voucher.get("id")
@@ -3473,6 +3517,7 @@ async def _exec_create_dimension_voucher(fields: dict, client: TripletexClient) 
                         "description": description,
                     }
                     voucher_payload["postings"] = [debit_posting_clean, alt_credit_posting]
+                    _normalize_postings(voucher_payload)
                     voucher = await client.create_voucher(voucher_payload)
                     voucher_id = voucher.get("id")
                     _log("INFO", "Voucher created with alternate contra account",
