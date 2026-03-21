@@ -1,1585 +1,529 @@
 #!/usr/bin/env python3
-"""Full E2E smoke tests replaying ALL graded prompts from Cloud Run logs.
+from __future__ import annotations
 
-Each graded prompt is sent to the /solve endpoint with real Tripletex credentials.
-Verifies: HTTP 200, correct task_type, and success status.
+"""Full E2E smoke tests from graded Cloud Run logs.
+
+Tests classification AND execution against live Tripletex sandbox.
+Loads 1,241 unique prompts from /tmp/tripletex_all_parsed.json.
 
 Usage:
-    # Dry run (classification only, no API calls — uses fake credentials)
-    python test_smoketest_graded.py --dry-run
+    # Classify-only (fast, ~5s)
+    python test_smoketest_graded.py --classify-only
+
+    # Full E2E against local server
+    python test_smoketest_graded.py --sample 3
 
     # Full E2E against Cloud Run
-    python test_smoketest_graded.py \
-        --endpoint https://tripletex-agent-785696234845.europe-north1.run.app \
-        --base-url https://tx-proxy.ainm.no/v2 \
-        --token YOUR_SESSION_TOKEN
+    python test_smoketest_graded.py --cloud --sample 3
 
-    # Full E2E against local
-    python test_smoketest_graded.py --base-url https://kkpqfuj-amager.tripletex.dev/v2 --token TOKEN
+    # Filter by task type / tier
+    python test_smoketest_graded.py --task-type CREATE_CUSTOMER --cloud
+    python test_smoketest_graded.py --tier 2 --sample 2 --cloud
 
-    # Test specific task types only
-    python test_smoketest_graded.py --types CREATE_CUSTOMER,BANK_RECONCILIATION --dry-run
+    # High concurrency for classify-only
+    python test_smoketest_graded.py --classify-only --concurrency 10
 """
 import argparse
 import asyncio
 import json
 import os
+import random
+import subprocess
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
+
+import httpx
 
 # ---------------------------------------------------------------------------
-# All graded prompts grouped by expected task_type
-# Format: {task_type: [{prompt, result, fields, api_calls, api_errors}, ...]}
+# Constants
 # ---------------------------------------------------------------------------
-GRADED_PROMPTS: dict[str, list[dict]] = {
-    "BANK_RECONCILIATION": [
-        {"prompt": "Utfør bankavstemming for konto 1920 for perioden mars 2026", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Utfør bankavstemming for konto 1920 for perioden 2026-03-01 til 2026-03-31.", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Effectuez le rapprochement bancaire du compte 1920 pour la période février 2026", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Realizar la conciliación bancaria de la cuenta 1920 para marzo 2026", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Realizar a conciliação bancária da conta 1920 para março de 2026", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Eseguire la riconciliazione bancaria del conto 1920 per marzo 2026", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Kontoabstimmung für Nordfjord AS", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Effectuer le rapprochement pour konto 1920", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Avstem bankbetalinger for februar", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Realizar la conciliación bancaria del mes de marzo", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Registreer een bankafstemming voor rekening 1920 voor maart 2026", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Reconcile the bank statement (attached CSV) against open invoices in Tripletex. Match incoming payme...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Utfor bankavstemming for konto 1920", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Perform bank reconciliation for account 1920", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Bankabstimmung fuer Konto 1920 durchfuehren", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-    ],
-    "BATCH": [
-        {"prompt": "Supprimer le département Testdrift0941 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1042 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett tre avdelinger: Salg, Drift og IT", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett tre avdelinger: IT med nummer 10, HR med nummer 20, og Salg med nummer 30", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Opprett tre avdelinger: IT med nummer 20, HR med nummer 30, og Marked med nummer 40", "result": "SUCCESS", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Descobrimos erros no livro razão de janeiro e fevereiro de 2026. Revise todos os vouchers e encontre...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Nous avons découvert des erreurs dans le grand livre de janvier et février 2026. Vérifiez toutes les...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-    ],
-    "CREATE_CONTACT": [
-        {"prompt": "Opprett kontaktperson Maria Hansen med e-post maria@test.no for kunde Havbris AS", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Havblikk AS, email emile@havblikk.no, téléphone 9988776...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell0921 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell0941 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell0949 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1038 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1047 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1129 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1132 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1156 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1159 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1211 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1243 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell77936 GmbH, email emile@testfjell.no, téléphon...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1249 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell88997 GmbH, email emile88997@testfjell.no, tél...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett kontaktperson Erik Berg for kunde Nordfjord AS med e-post erik@smoke2.no", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett kontaktperson Erik Berg for kunde Nordfjord Consulting AS med e-post erik@nordfjord.no", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1338 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1340 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1344 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile Dupont pour le client Testfjell1345 GmbH, email emile@testfjell.no, téléphone...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1346 Dupont pour le client Testfjell1346 GmbH, email emile1346@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1347 Dupont pour le client Testfjell1347 GmbH, email emile1347@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1349 Dupont pour le client Testfjell1349 GmbH, email emile1349@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1352 Dupont pour le client Testfjell1352 GmbH, email emile1352@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1354 Dupont pour le client Testfjell1354 GmbH, email emile1354@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1410 Dupont pour le client Testfjell1410 GmbH, email emile1410@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1415 Dupont pour le client Testfjell1415 GmbH, email emile1415@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1435 Dupont pour le client Testfjell1435 GmbH, email emile1435@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Créer un contact Émile1449 Dupont pour le client Testfjell1449 GmbH, email emile1449@testfjell.no, t...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-    ],
-    "CREATE_CREDIT_NOTE": [
-        {"prompt": "Create a credit note for invoice number 2147535451. Comment: \"Incorrect billing amount.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell0921 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell0941 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell0949 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "kreditnota", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Opprett kreditnota for faktura 888888", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Crear una nota de crédito para la factura 3045 por importe incorrecto", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1113 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett en kreditnota for faktura 1001", "result": "FAILED", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1156 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1159 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1211 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1132 GmbH. Comment: Incorrect bill...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1132 GmbH", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1243 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell77936 GmbH. Comment: \"Incorrect bi...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1249 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell88997 GmbH. Comment: \"Incorrect bi...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Opprett kreditnota for faktura 1", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Opprett kreditnota for faktura 3", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1338 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1340 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1344 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1345 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1346 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1347 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1349 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1352 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1354 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Opprett kreditnota for faktura til Havbris AS — feil beløp ble fakturert", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1410 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1415 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1435 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1449 GmbH. Comment: \"Incorrect bil...", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Le client Colline SARL (nº org. 879532124) a réclamé concernant la facture pour \"Conseil en données\"...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-    ],
-    "CREATE_CUSTOMER": [
-        {"prompt": "Create a customer called Nordic Solutions AS with email info@nordic.no and org number 987654321", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Nordfjell GmbH mit der Organisationsnummer 912345678. Die Adresse ist Fjord...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell0921 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell0941 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell0949 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett kunde Spaces AS med org. nr. 912 345 678", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett kunde Solfjord Shipping AS med org.nr 776655443", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1038 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1042 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1120 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "lag kunde", "result": "FAILED", "api_calls": 1, "api_errors": 1},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1129 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1132 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett kunde Fjord AS med org.nr 987654321", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1156 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1159 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1211 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett kunde TestKunde AS med org.nr 111222333", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett kunde Fjord Consulting AS med org.nr 912345678", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um cliente Empresa Teste Lda", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1243 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell77936 GmbH mit der Organisationsnummer 912345678. Die Adresse ist ...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1249 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell88997 GmbH mit der Organisationsnummer 912345678. Die Adresse ist ...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Registrer kunde Nordfjord AS med e-post post@nordfjord2.no", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Registrer kunde Nordfjord Consulting AS med e-post post@nordfjord.no og org.nr 987654321", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1338 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1340 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1344 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1345 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1346 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1347 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1349 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1352 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett kunde Test AS med org.nr 999999999", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1354 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1410 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1415 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1435 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Create a customer called Test Corp with organization number 999888777", "result": "FAILED", "api_calls": 1, "api_errors": 1},
-        {"prompt": "Erstellen Sie den Kunden Grünfeld GmbH mit der Organisationsnummer 835026434. Die Adresse ist Fjordv...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie den Kunden Testfjell1449 GmbH mit der Organisationsnummer 912345678. Die Adresse ist F...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-    ],
-    "CREATE_DEPARTMENT": [
-        {"prompt": "Créer un département appelé Ressources Humaines avec le numéro 20", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift0921.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift0941.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift0949.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett avdeling Utvikling med avdelingsnummer 10", "result": "FAILED", "api_calls": 1, "api_errors": 1},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1038.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1054.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1120.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1129.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1132.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett avdeling Økonomi med avdelingsnummer 42", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1156.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1159.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1211.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett avdeling Salg", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1243.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift77936.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1249.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift88997.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett avdeling Markedsføring med nummer 40", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Opprett avdeling Salg med nummer 10", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1338.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1340.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1344.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1345.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1346.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1347.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1349.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1352.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1354.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Marknadsføring.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1410.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1415.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1435.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ein ny avdeling som heiter Testdrift1449.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "CREATE_DIMENSION_VOUCHER": [
-        {"prompt": "Opprett en ny dimensjon \"Kostnadssted\" med verdiene Oslo, Bergen og Trondheim. Opprett deretter et b...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett dimensjonsbilag: debet konto 6300 (Leie lokale) 25 000 kr, kredit konto 1920 (Bank), dimensj...", "result": "SUCCESS", "api_calls": 13, "api_errors": 6},
-        {"prompt": "Créer la dimension 'Département' avec les valeurs: Île-de-France, Rhône-Alpes, Provence-Alpes-Côte d...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Creare una dimensione contabile 'Centro di Costo' con valori: Nord, Sud, Est, Ovest", "result": "SUCCESS", "api_calls": 10, "api_errors": 4},
-        {"prompt": "Erstellen Sie die Dimension 'Bürokosten' für Zürich", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Opprett dimensjon for avdeling", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Opprett en fri dimensjon 'Kostsenter' med verdiene 'Salg' og 'Drift', og bokfør et bilag på konto 60...", "result": "SUCCESS", "api_calls": 17, "api_errors": 8},
-        {"prompt": "Erstellen Sie eine Buchhaltungsdimension 'Kostenstelle' mit den Werten Nord, Süd, Ost, West", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett fri dimensjon Kostsenter med verdier Salg og Drift", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett bilag med dimensjon Avdeling verdi IT for konto 7000 med beløp 19450 NOK", "result": "SUCCESS", "api_calls": 13, "api_errors": 6},
-        {"prompt": "Opprett bilag med dimensjon Avdeling verdi Salg for konto 7000 med beløp 19450 NOK", "result": "SUCCESS", "api_calls": 10, "api_errors": 4},
-        {"prompt": "Opprett dimensjon Kostnadssted med verdiene Nord, Sør, Øst, Vest", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Opprett dimensjon Avdeling med verdi Oslo og for bilag", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Create dimension Department with value Oslo and post a voucher", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-    ],
-    "CREATE_EMPLOYEE": [
-        {"prompt": "Opprett en ansatt med fornavn Lars og etternavn Berg, e-post lars.berg@firma.no", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Lars Eriksen, født 12. juni 1990. Opprett vedkommende som ansatt med e...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen0921, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen0941, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen0949, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ansatt Maria Olsen med e-post maria.olsen@bedrift.no og telefon 41234567", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "ny ansatt", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ansatt Erik Solberg med e-post erik.solberg@bedrift.no", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1038, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1042, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1054, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Crear un empleado llamado Carlos García con correo carlos@empresa.es", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "oppret anstt Per Berg, epost per@berg.no", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1113, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett en ny ansatt: Kari Nordmann, epost kari.test@example.com", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett en anstt med nvn Per", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1129, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1129 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1132, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1132 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett en ansatt med navn Petter Hansen, e-post petter@edge.no", "result": "SUCCESS", "api_calls": 5, "api_errors": 1},
-        {"prompt": "Create an employee named Sarah Connor with email sarah@skynet.com and phone +47 900 11 222", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett en ansatt med navn Ole Berg, e-post ole@test.no", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1156, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1156 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1159, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1159 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1211, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1211 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett ansatt Kari Nordmann med e-post kari@test.no", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Create an employee named John Smith with email john@test.no", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett timeføring for ansatt Kari Nordmann på prosjekt Nettside, 8 timer i dag", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1243, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1243 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen77936, født 12. juni 1990. Opprett vedkommende som a...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen77936 på prosjekt \"Analyse Fjorddata\" den 2026-03-2...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1249, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1249 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen88997, født 12. juni 1990. Opprett vedkommende som a...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett ansatt med fornavn Kari og etternavn Hansen, e-post kari@smoketest2.no", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett ansatt med fornavn Kari og etternavn Hansen, e-post kari.hansen@firma.no", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1338, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1340, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1344, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1345, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1346, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1347, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1349, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1352, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1354, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett ansatt Bø Ærlig Ås, e-post boe@aas.no", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1410, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1415, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett en ansatt med navn Kari Nordmann", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1435, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Has recibido un contrato de trabajo (ver PDF adjunto). Crea el empleado en Tripletex con todos los d...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Has recibido una carta de oferta (ver PDF adjunto) para un nuevo empleado. Completa la incorporacion...", "result": "FAILED", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Vi har en ny ansatt som heter Smoketest Tesansen1449, født 12. juni 1990. Opprett vedkommende som an...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-    ],
-    "CREATE_INVOICE": [
-        {"prompt": "trenger å sende regning til Ola på 3000 spenn", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Crie uma fatura para o cliente Porto Digital Lda por 2 horas de consultoria a 500 NOK cada e registe...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell0921 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell0941 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell0949 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til Kantega AS for prosjektrådgivning 15000 kr", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag en faktura til kunde Nordlys Drift AS for 3 timer konsulentarbeid à 1200", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Bergen Shipping AS for 3 stk Cloud Migration Service à 4.500,00 kr", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1038 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1047 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1054 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1113 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "faktura", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Wir haben die Rechnung INV-2026-8810 vom Lieferanten Sonnental GmbH (Org.-Nr. 988926221) über 8050 N...", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-    ],
-    "CREATE_PRODUCT": [
-        {"prompt": "Erstellen Sie ein Produkt namens Beratungsstunde mit einem Preis von 1200 NOK", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulenttjeneste Premium\" mit der Produktnummer 7701. Der Preis beträgt ...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Opprett produkt Konsulenttjeneste med pris 1500 kr", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulenttjeneste Premium 77936\" mit der Produktnummer 7701. Der Preis be...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulenttjeneste Premium 88997\" mit der Produktnummer 7701. Der Preis be...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Opprett produkt Kontorstol med pris 3500 NOK", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1346 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1347 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1349 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1352 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1354 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1410 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1415 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1435 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Create the product \"Web Design\" with product number 9780. The price is 30200 NOK excluding VAT, usin...", "result": "FAILED", "api_calls": 4, "api_errors": 4},
-        {"prompt": "Erstellen Sie das Produkt \"Konsulent1449 Premium\" mit der Produktnummer 7701. Der Preis beträgt 1850...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Erstellen Sie das Produkt \"Beratungsstunden\" mit der Produktnummer 3512. Der Preis beträgt 42600 NOK...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-    ],
-    "CREATE_PROJECT": [
-        {"prompt": "Crear un proyecto llamado Migración Cloud con fecha de inicio 2026-03-20", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migration Cloud\" avec date de début 2026-04-01 et date de fin 2026-09-30. Le...", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Créer un projet appelé \"Migrering0921\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering0941\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering0949\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Projekt erstellen: Datenanalyse für Kunde Hamburg GmbH", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1038\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1054\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1129\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1132\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1156\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1159\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1211\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett prosjekt Nettside med prosjektleder Kari Nordmann", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1243\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering77936\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1249\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering88997\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett prosjekt Nettside Redesign", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1338\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1340\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1344\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1345\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1346\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1347\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1349\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1352\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1354\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Lag prosjekt Mobilapp med startdato 2026-04-01", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1410\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1415\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Créer un projet appelé \"Migrering1435\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Os custos totais aumentaram significativamente de janeiro a fevereiro de 2026. Analise o livro razão...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Totalkostnadene auka monaleg frå januar til februar 2026. Analyser hovudboka og finn dei tre kostnad...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Créer un projet appelé \"Migrering1449\" avec date de début 2026-04-01 et date de fin 2026-09-30.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "CREATE_SUPPLIER": [
-        {"prompt": "Registrieren Sie den Lieferanten Bürobedarf Schmidt mit der Organisationsnummer 444555666", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado Acme Leverandør AS com número de organização 987654321 e email kontakt@a...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev0921 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev0941 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev0949 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett ny leverandør: Havnelageret AS, org.nr 998877665", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett leverandør Nordic Parts med org.nr NO912345678", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett leverandør Société Générale Trading med org.nr 876543210", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett leverandør Fjordservice AS med org.nr 911223344", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1038 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1042 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1054 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1113 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1120 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Create en leverandør called Müller GmbH med org.nr 912345678", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1129 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1129 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1132 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1132 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett leverandør Bygg Bedrift AS med org.nr 923456789", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1156 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1159 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1159 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1211 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1211 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett leverandør Bygg AS med org.nr 923456789", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1243 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1243 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev77936 AS com número de organização 987654321 e email kontakt@test...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev77936 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1249 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1249 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev88997 AS com número de organização 987654321 e email kontakt@test...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett leverandør Bergen Supplies AS med e-post post@bergensupplies.no", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Opprett leverandør Staples Norge AS med e-post staples@test.no", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1338 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1340 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1344 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1345 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1346 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1347 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1349 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1352 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1354 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1410 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1415 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1435 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Exécutez le cycle de vie complet du projet 'Mise à Niveau Système Soleil' (Soleil SARL, nº org. 8698...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Criar um fornecedor chamado TestLev1449 AS com número de organização 987654321 e email kontakt@testl...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-    ],
-    "CREATE_SUPPLIER_INVOICE": [
-        {"prompt": "registrer leverandørfatkura fra Kontor AS på 2300 kr", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra Acme Leverandør AS på 25000 kr inkl. MVA. Fakturanummer SUP-2026-001...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev0921 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Registrer leverandørfaktura fra Bygg AS på 45000 kr inkl. mva for materialer levert til Storgata 15,...", "result": "FAILED", "api_calls": 7, "api_errors": 3},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1129 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 7, "api_errors": 3},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1129 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 7, "api_errors": 3},
-        {"prompt": "Create a credit note for the latest invoice for customer Testfjell1132 GmbH. Comment: \"Incorrect bil...", "result": "FAILED", "api_calls": 7, "api_errors": 3},
-    ],
-    "CREATE_TRAVEL_EXPENSE": [
-        {"prompt": "Create a travel expense for employee Lars Berg, trip to Oslo from Bergen, departure 2026-03-21", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Lars Eriksen, dagsreise frå Oslo til Bergen den 2026-04-10. Formål:...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen0921, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen0941, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiseregning for ansatt Petter Hansen, reise til Bergen 20.-22. mars 2026", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1038, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1042, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1047, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1054, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1113, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1129, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1132, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1156, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1159, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1211, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1243, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen77936, dagsreise frå Oslo til Bergen den 2026-04-...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1249, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen88997, dagsreise frå Oslo til Bergen den 2026-04-...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiseregning for ansatt Kari Hansen med tittel Kundebesøk Bergen", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiseregning for ansatt Kari Hansen med tittel Kundebesøk Oslo", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1338, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1340, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1344, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1345, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1346, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1347, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1349, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1352, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1354, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1410, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1415, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1435, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Opprett reiserekning for tilsett Smoketest Tesansen1449, dagsreise frå Oslo til Bergen den 2026-04-1...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-    ],
-    "DELETE_CUSTOMER": [
-        {"prompt": "Slett kunden Fjordane Bygg AS", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Delete the customer Nordfjell GmbH from the system.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the customer Testfjell0921 GmbH from the system.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Delete the customer Testfjell0941 GmbH from the system.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Delete the customer Testfjell0949 GmbH from the system.", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1042 GmbH from the system.", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1113 GmbH from the system.", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1120 GmbH from the system.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the customer Testfjell1129 GmbH from the system.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the customer Testfjell1132 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1156 GmbH from the system.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the customer Testfjell1159 GmbH from the system.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the customer Testfjell1211 GmbH from the system.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the customer Testfjell1132 GmbH", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1243 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Löschen Sie den Kunden Testfjell77936 GmbH aus dem System.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1249 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Löschen Sie den Kunden Testfjell88997 GmbH aus dem System.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Slett kunde Nordfjord AS", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Slett kunde Nordfjord Consulting AS", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1338 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1340 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1344 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1345 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1346 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1347 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1349 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1352 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1354 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Slett kunden Nordlys Drift AS", "result": "SUCCESS", "api_calls": 4, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1410 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1415 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1435 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-        {"prompt": "Delete the customer Testfjell1449 GmbH from the system.", "result": "SUCCESS", "api_calls": 5, "api_errors": 2},
-    ],
-    "DELETE_DEPARTMENT": [
-        {"prompt": "Supprimer le département Markedsføring og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1120 og Kommunikasjon du système.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1129 og Kommunikasjon du système.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1132 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1156 og Kommunikasjon du système.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1159 og Kommunikasjon du système.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1211 og Kommunikasjon du système.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Supprimer le département Marketing du système", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Marketing", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1243 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Slett avdeling Testdrift77936 og Kommunikasjon", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1249 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Slett avdeling Testdrift88997 og Kommunikasjon", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Slett avdeling Markedsføring", "result": "FAILED", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Slett avdeling Salg", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1338 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1340 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1344 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1345 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1346 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1347 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1349 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1352 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1354 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1410 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1415 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1435 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Supprimer le département Testdrift1449 og Kommunikasjon du système.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "DELETE_EMPLOYEE": [
-        {"prompt": "Slett ansatt som heter Finnes Ikke Nordansen", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the employee Lars Eriksen from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Slett ansatt Petter Hansen", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the employee Smoketest Tesansen0921 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen0949 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1047 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1054 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1113 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1129 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1132 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1156 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1159 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1211 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1243 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen77936 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1249 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen88997 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Slett ansatt Kari Hansen", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1338 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1340 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1344 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1345 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1346 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1347 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1349 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1352 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1354 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1410 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1415 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1435 from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Delete the employee Smoketest Tesansen1449 from the system.", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-    ],
-    "DELETE_PRODUCT": [
-        {"prompt": "Delete the product called \"Konsulenttjeneste Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called 'Konsulenttjeneste Premium' from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulenttjeneste Premium 77936\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulenttjeneste Premium 88997\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Slett produktet Kontorstol", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1346 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1347 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1349 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1352 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1354 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1410 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1415 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1435 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Delete the product called \"Konsulent1449 Premium\" from the system.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-    ],
-    "DELETE_PROJECT": [
-        {"prompt": "Slett prosjekt Finnes-Ikke-Prosjekt", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migration Cloud\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering0921\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering0949\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Slett prosjekt Midlertidig Analyse", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1054\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1120\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1129\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1132\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1156\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1159\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1211\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1243\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering77936\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1249\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering88997\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Slett prosjekt Nettside Redesign", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1338\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1340\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1344\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1345\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1346\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1347\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1349\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1352\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1354\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Lösche das Projekt Webapp-redesign", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1410\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1415\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1435\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Eliminar el proyecto \"Migrering1449\" del sistema.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "DELETE_SUPPLIER": [
-        {"prompt": "Slett leverandør Staples Norge AS", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten Acme Leverandør AS aus dem System.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Löschen Sie den Lieferanten TestLev0921 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Slett leverandør Vestkysten Logistikk AS", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1042 AS aus dem System.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1047 AS aus dem System.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1129 AS aus dem System.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1132 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1156 AS aus dem System.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1159 AS aus dem System.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1211 AS aus dem System.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Löschen Sie den Lieferanten Nordfjord AS aus dem System", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Löschen Sie den Lieferanten TestLev AS", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1243 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev77936 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1249 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev88997 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1338 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1340 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1344 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1345 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1346 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1347 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1349 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1352 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1354 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1410 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1415 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1435 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-        {"prompt": "Löschen Sie den Lieferanten TestLev1449 AS aus dem System.", "result": "SUCCESS", "api_calls": 3, "api_errors": 2},
-    ],
-    "DELETE_TRAVEL_EXPENSE": [
-        {"prompt": "Slett reiseregningen til Petter Hansen fra mars 2026", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the travel expense report number 11144710 for employee Lars Eriksen.", "result": "FAILED", "api_calls": 1, "api_errors": 1},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen0941.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1113.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1120.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1129.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1132.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1156.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1159.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1211.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1243.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen77936.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1249.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen88997.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Slett reiseregning for ansatt Kari Hansen", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1338.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1340.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1344.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1345.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1346.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1347.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1349.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1352.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1354.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1410.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1415.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1435.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Delete the most recent travel expense report for employee Smoketest Tesansen1449.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "ENABLE_MODULE": [
-        {"prompt": "Aktiver reiseregning-modulen i Tripletex", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Aktivieren Sie das Modul Reisekostenabrechnung in Tripletex.", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Enable the project module in Tripletex", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "activer le module'; DROP TABLE modules;--", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Enable prosjektmodulen in Tripletex bitte", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Attivare il modulo progetto in Tripletex", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Aktiver prosjektmodulen i Tripletex", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "attivare il modulo progetto per favore grazie mille", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "module module module enable please", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "aktivieren aktivieren aktivieren das Modul", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Activer le module projet dans Tripletex", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Aktiver project module i Tripletex", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Activar el módulo de reiseregning en Tripletex", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Aktiver fakturamodulen i Tripletex", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Erstellen Sie das Projektmodul", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Aktiver lønnsmodulen og opprett en ansatt med navn Test Testesen", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Aktiver modulen Prosjekt", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Enable the Project module", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Modul Projekt aktivieren", "result": "SUCCESS", "api_calls": 2, "api_errors": 1},
-    ],
-    "ERROR_CORRECTION": [
-        {"prompt": "Korriger feilpostering på bilag 12345. Den opphavlege posteringa var feil — rett opp beløpet frå 500...", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Führen Sie eine Buchungskorrektur für Beleg 3002 durch — Konto 6300 statt 7000", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Korriger bilag fra forrige postering — konto 6300 skulle vært 6800 (Kontorrekvisita)", "result": "SUCCESS", "api_calls": 2, "api_errors": 2},
-        {"prompt": "Corrigir o lançamento 5006 — conta errada, deveria ser 6800 em vez de 4300", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Correggere la registrazione 5007 — conto errato, cambiare da 4000 a 6800", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "korrigering", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Korrigér feil i bilag 4500, konto 6000, beløp 19450 kr, dato 15.03.2026", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Korriger bilag 5001 — feil konto ble brukt, skal være konto 3000 i stedet for 4000", "result": "SUCCESS", "api_calls": 4, "api_errors": 1},
-        {"prompt": "Gjer forenkla årsoppgjer for 2025: 1) Rekn ut og bokfør årlege avskrivingar for tre eigedelar: IT-ut...", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Korriger feilpostering pa bilag 12345", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Correct the posting error on voucher 12345", "result": "SUCCESS", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Fehlbuchung auf Beleg 12345 korrigieren", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-    ],
-    "FIND_CUSTOMER": [
-        {"prompt": "Encontrar o cliente Havblikk AS no sistema pelo número de organização 883693329.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell0941 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1038 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1120 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1129 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1132 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1156 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1159 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1211 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1243 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell77936 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1249 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Nordfjord GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell88997 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Finn kunde Nordfjord AS", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Finn kunde Nordfjord Consulting AS", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1338 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1340 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1344 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1345 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1346 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1347 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1349 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1352 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1354 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1410 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1415 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1435 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Encontrar o cliente Testfjell1449 GmbH no sistema.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-    ],
-    "FIND_SUPPLIER": [
-        {"prompt": "Buscar el proveedor Acme Leverandør AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev0921 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Søk etter leverandør med org.nr 912345678", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Finn leverandør Vestkysten Logistikk", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "finn leverandør Staples", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1038 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1047 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1120 AS por número de organización 987654321.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1129 AS por número de organización 987654321.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1132 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1156 AS por número de organización 987654321.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1159 AS por número de organización 987654321.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1211 AS por número de organización 987654321.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Buscar el proveedor Nordfjord AS por número de organización 987654321", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor Bygg AS", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1243 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1249 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor Staples Norge AS por número de organización 912345678.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Finn leverandør Staples Norge AS", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1338 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1340 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1344 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1345 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1346 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1347 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1349 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1352 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1354 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1410 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1415 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1435 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Buscar el proveedor TestLev1449 AS por número de organización 987654321.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-    ],
-    "INVOICE_EXISTING_CUSTOMER": [
-        {"prompt": "Lag en faktura til kunde Havbris AS for 5 timer rådgivning à 950 kr per time", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Havblikk AS, 3 unidades de Konsulenttjeneste a 1500 NOK cada...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell0921 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell0941 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell0949 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1047 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1120 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1120 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1129 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1129 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1132 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1132 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Opprett faktura til kunde Fjord AS for 5 timer konsulentarbeid à 1500 kr", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1156 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1156 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1159 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1159 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1211 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1211 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Opprett faktura til kunde Fjord Consulting AS for 3 timer rådgivning a 1200 kr", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1243 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1243 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell77936 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifte...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1249 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1249 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell88997 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifte...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett faktura til kunde Nordfjord AS for 2 stk Kontorstol à 3500 NOK", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer kunde Nordfjord AS for 3 stk Widget à 1000 NOK", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett faktura til ny kunde Fjord Shipping AS for 2 stk Kontorstol à 3500 NOK", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer kunde Nordfjord Consulting AS for 1 stk Rådgivning à 1200 NOK", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1338 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1338 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1340 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1340 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1344 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1344 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1345 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1345 GmbH, 3 unidades de Konsulenttjeneste a 1500 N...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1346 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1346 GmbH, 3 unidades de Konsulent1346 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1347 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1347 GmbH, 3 unidades de Konsulent1347 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1349 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1349 GmbH, 3 unidades de Konsulent1349 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1352 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1352 GmbH, 3 unidades de Konsulent1352 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1354 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1354 GmbH, 3 unidades de Konsulent1354 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Create an invoice for customer Edge Corp for 2 units of Consulting at 2000 NOK each", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear una factura para el cliente Empresa SA por 5 unidades de Servicio Premium a 3000 NOK", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1410 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1410 GmbH, 3 unidades de Konsulent1410 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1415 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1415 GmbH, 3 unidades de Konsulent1415 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1435 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1435 GmbH, 3 unidades de Konsulent1435 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registre 15 horas para Miguel Torres (miguel.torres@example.org) en la actividad \"Design\" del proyec...", "result": "SUCCESS", "api_calls": 7, "api_errors": 0},
-        {"prompt": "Ejecute el ciclo de vida completo del proyecto 'Actualización Sistema Dorada' (Dorada SL, org. nº 88...", "result": "SUCCESS", "api_calls": 8, "api_errors": 0},
-        {"prompt": "Einer Ihrer Kunden hat eine uberfallige Rechnung. Finden Sie die uberfallige Rechnung und buchen Sie...", "result": "SUCCESS", "api_calls": 7, "api_errors": 0},
-        {"prompt": "Opprett ein faktura til kunden Fossekraft AS (org.nr 913494253) med tre produktlinjer: Skylagring (4...", "result": "SUCCESS", "api_calls": 7, "api_errors": 0},
-        {"prompt": "Lag faktura til kunde Testfjell1449 GmbH: 5 stk Konsulenttjeneste til 1200 kr og 2 stk Reiseutgifter...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Crear factura para el cliente existente Testfjell1449 GmbH, 3 unidades de Konsulent1449 Premium a 15...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-    ],
-    "INVOICE_WITH_PAYMENT": [
-        {"prompt": "Le client Colline SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heures ...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Le client Colline SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour 'Heures ...", "result": "SUCCESS", "api_calls": 7, "api_errors": 0},
-        {"prompt": "Opprett faktura til ny kunde Betaler AS for 10000 kr og registrer betaling", "result": "SUCCESS", "api_calls": 7, "api_errors": 0},
-        {"prompt": "Le client Colline77936 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"He...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline88997 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"He...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Opprett faktura til ny kunde Test Betaling AS for 1 stk Produkt à 500 NOK og registrer betaling", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Opprett faktura til ny kunde Bergen Tech AS med e-post post@bergentech.no for 1 stk Lisens à 5000 NO...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Le client Colline1346 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline1347 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline1349 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline1352 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline1354 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline1410 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline1415 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline1435 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Le client Colline1449 SARL (nº org. 850491941) a une facture impayée de 10550 NOK hors TVA pour \"Heu...", "result": "SUCCESS", "api_calls": 11, "api_errors": 0},
-        {"prompt": "Wir haben eine Rechnung über 6073 EUR an Flussgold GmbH (Org.-Nr. 849416243) gesendet, als der Wechs...", "result": "SUCCESS", "api_calls": 10, "api_errors": 0},
-        {"prompt": "Opprett en ordre for kunden Snøhetta AS (org.nr 914443806) med produktene Datarådgivning (7906) til ...", "result": "SUCCESS", "api_calls": 9, "api_errors": 0},
-        {"prompt": "El cliente Viento SL (org. nº 908616537) tiene una factura pendiente de 37850 NOK sin IVA por \"Mante...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-    ],
-    "LOG_HOURS": [
-        {"prompt": "Registrer 7.5 timer for ansatt Lars Berg på prosjekt Migración Cloud den 2026-03-20", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Lars Eriksen på prosjekt \"Analyse Fjorddata\" den 2026-03-20 med komme...", "result": "FAILED", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Registrer 7,5 timer for ansatt Petter Hansen på prosjekt Nettside-redesign", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Registrer 3 timer på prosjekt Havnelogistikk i dag", "result": "FAILED", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1042 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "FAILED", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1113 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "FAILED", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen på prosjekt \"Alpha\" den 2026-03-20.", "result": "FAILED", "api_calls": 7, "api_errors": 2},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen88997 på prosjekt \"Analyse Fjorddata 88997\" den 202...", "result": "FAILED", "api_calls": 7, "api_errors": 2},
-        {"prompt": "Registrer 7.5 timer for ansatt Kari Nordmann på prosjekt Kontorvedlikehold den 2026-03-15", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-        {"prompt": "Registrer 7.5 timer for ansatt Kari Nordmann på prosjekt TestPMFix den 2026-03-21", "result": "SUCCESS", "api_calls": 7, "api_errors": 0},
-        {"prompt": "Registrer 7.5 timer for ansatt Kari Hansen på prosjekt SmokeV2 den 2026-03-21", "result": "SUCCESS", "api_calls": 7, "api_errors": 0},
-        {"prompt": "Registrer 7.5 timer for ansatt Kari Hansen på prosjekt Nettside Redesign den 2026-03-21", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1338 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1340 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1344 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1345 på prosjekt \"Analyse Fjorddata\" den 2026-03-20...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1346 på prosjekt \"Analyse1346 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1347 på prosjekt \"Analyse1347 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1349 på prosjekt \"Analyse1349 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1352 på prosjekt \"Analyse1352 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1354 på prosjekt \"Analyse1354 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1410 på prosjekt \"Analyse1410 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1415 på prosjekt \"Analyse1415 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1435 på prosjekt \"Analyse1435 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer 7,5 timer for ansatt Smoketest Tesansen1449 på prosjekt \"Analyse1449 Fjorddata\" den 2026-0...", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Führen Sie den vollständigen Projektzyklus für 'Digitalportal Brückentor' (Brückentor GmbH, Org.-Nr....", "result": "FAILED", "api_calls": 3, "api_errors": 1},
-    ],
-    "MONTH_END_CLOSING": [
-        {"prompt": "Realice el cierre mensual de marzo de 2026. Registre la periodificación (12500 NOK por mes de la cue...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Effectuez la clôture mensuelle de mars 2026. Comptabilisez la régularisation (13850 NOK par mois du ...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-    ],
-    "PROJECT_BILLING": [
-        {"prompt": "Fakturer prosjekt \"Analyse Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt Alpha for 40 timer konsulentarbeid à 1200 kr", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt 'Analyse Fjorddata'", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1346 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1347 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1349 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1352 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1354 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1410 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1415 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1435 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Fakturer prosjekt \"Analyse1449 Fjorddata\" med 40 timer konsulentarbeid à 1500 kr.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-    ],
-    "PROJECT_WITH_CUSTOMER": [
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Havblikk AS (org.nr 883693329). Prosjektleia...", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell0949 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett prosjekt Webapp-redesign for kunde Kantega AS", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1047 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1120 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1129 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1132 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1156 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1159 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1211 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1243 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell77936 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1249 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata 88997\" knytt til kunden Testfjell88997 GmbH (org.nr 912345678)...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjekt Digitalisering for kunde Nordfjord AS", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett prosjekt Digitalisering for kunde Nordfjord Consulting AS", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1338 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1340 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1344 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse Fjorddata\" knytt til kunden Testfjell1345 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1346 Fjorddata\" knytt til kunden Testfjell1346 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1347 Fjorddata\" knytt til kunden Testfjell1347 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1349 Fjorddata\" knytt til kunden Testfjell1349 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1352 Fjorddata\" knytt til kunden Testfjell1352 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1354 Fjorddata\" knytt til kunden Testfjell1354 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1410 Fjorddata\" knytt til kunden Testfjell1410 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1415 Fjorddata\" knytt til kunden Testfjell1415 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1435 Fjorddata\" knytt til kunden Testfjell1435 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Opprett prosjektet \"Analyse1449 Fjorddata\" knytt til kunden Testfjell1449 GmbH (org.nr 912345678).", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-    ],
-    "REGISTER_PAYMENT": [
-        {"prompt": "Registreer een betaling van 5000 NOK op factuur nummer 12345", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 7500 kr på faktura 2147535451 med betalingsdato 2026-03-21.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell0921 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell0941 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer innbetaling på faktura 1001 med beløp 15000 kr", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Registrer betaling på faktura 999999 med beløp 5000 kr", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Register payment of 22,500 NOK on invoice 5501 with payment date 2026-03-15", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Registrar o pagamento de 18.000 NOK na fatura número 7721", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1038 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1129 GmbH med betalingsdato 2026-...", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1132 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1156 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1159 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1211 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer innbetaling på faktura 1 med beløp 3600 kr", "result": "SUCCESS", "api_calls": 5, "api_errors": 1},
-        {"prompt": "Register payment of 5000 NOK on invoice 1001", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1243 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell77936 GmbH med betalingsdato 2026...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1249 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell88997 GmbH med betalingsdato 2026...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling for faktura 1", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1338 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1340 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1344 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1345 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1346 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1347 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1349 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1352 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1354 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 4.500,00 kr for faktura nr 3201", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1410 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1415 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling for faktura 1 fra kunde Ola Hansen", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1435 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Registrer betaling på 6900 kr på siste faktura for kunden Testfjell1449 GmbH med betalingsdato 2026-...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-    ],
-    "REGISTER_SUPPLIER_INVOICE": [
-        {"prompt": "Registrer leverandørfaktura fra TestLev0941 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev0949 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Registrer en inngående faktura fra Kontorhuset AS på 12 750 kr inkl. mva for kontorrekvisita", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Enregistrer une facture fournisseur de Kontorrekvisita AS pour 3200 NOK TTC", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Vi har mottatt faktura fra Wave4 Supplies AS på kr 15 000 inkl. mva for kontorrekvisita", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Registrer faktura fra Kontorutstyr AS på 3600 eks. mva", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Register supplier invoice from Global Parts Inc for 10000 NOK including VAT", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Eingangsrechnung von Bürobedarf Schmidt über 8000 NOK buchen", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandør Havbris Shipping med org.nr 922976457 og e-post: faktura@havbris.no", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Registrer en inngående faktura fra Staples Norge AS på 4 500 kr inkl. mva", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer inngående faktura på 4500 inkl. mva", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer betaling på leverandørfaktura fra Papirsenteret AS, beløp 8 900 kr", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrieren Sie eine Eingangsrechnung von Bürobedarf Schmidt über 8.500 NOK inkl. MwSt.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra IT-Service AS på 3600 eks. mva, mva 25%", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-        {"prompt": "Registrer en inngående faktura fra Vestkysten Logistikk AS på 18 500 kr inkl. mva for frakt", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "registrer inngaende faktura fra Kontor AS pa 5000 kr", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1038 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 8, "api_errors": 3},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1042 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 8, "api_errors": 3},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1047 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 8, "api_errors": 3},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1132 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 7, "api_errors": 3},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1156 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 7, "api_errors": 3},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1159 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 7, "api_errors": 3},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1211 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "FAILED", "api_calls": 7, "api_errors": 3},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1243 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev77936 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1249 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev88997 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra Staples Norge AS på 15000 NOK for kontorrekvisita", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra Staples Norge AS på 15000 NOK for kontorrekvisita, konto 6800", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1338 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1340 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1344 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1345 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1346 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1347 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1349 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1352 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1354 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Enregistrer une facture fournisseur de Bureau Express pour 3 200 NOK TTC", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer en inngående faktura fra Kontorrekvisita AS på 4500 kr inkl. mva", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1410 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1415 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1435 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Precisamos da despesa de Kaffemøte deste recibo registada no departamento Utvikling. Use a conta de ...", "result": "SUCCESS", "api_calls": 8, "api_errors": 0},
-        {"prompt": "Precisamos da despesa de Oppbevaringsboks deste recibo registada no departamento Markedsføring. Use ...", "result": "SUCCESS", "api_calls": 8, "api_errors": 0},
-        {"prompt": "Registrer leverandørfaktura fra TestLev1449 AS på 25000 kr inkl. MVA. Forfallsdato 2026-04-15.", "result": "SUCCESS", "api_calls": 8, "api_errors": 2},
-        {"prompt": "Rapprochez le releve bancaire (CSV ci-joint) avec les factures ouvertes dans Tripletex. Associez les...", "result": "SUCCESS", "api_calls": 9, "api_errors": 2},
-        {"prompt": "Nous avons besoin de la depense Overnatting de ce recu enregistree au departement HR. Utilisez le bo...", "result": "SUCCESS", "api_calls": 8, "api_errors": 0},
-        {"prompt": "Vous avez recu une facture fournisseur (voir PDF ci-joint). Enregistrez la facture dans Tripletex. C...", "result": "SUCCESS", "api_calls": 9, "api_errors": 2},
-        {"prompt": "Registrer leverandorfaktura fra Acme AS pa 10000 kr", "result": "SUCCESS", "api_calls": 8, "api_errors": 2},
-        {"prompt": "Register a supplier invoice from Acme AS for 10000 NOK", "result": "SUCCESS", "api_calls": 8, "api_errors": 2},
-        {"prompt": "Lieferantenrechnung von Acme AS ueber 10000 NOK erfassen", "result": "SUCCESS", "api_calls": 6, "api_errors": 0},
-    ],
-    "REVERSE_PAYMENT": [
-        {"prompt": "The payment on invoice for customer Edge Corp was returned by the bank. Reverse it.", "result": "SUCCESS", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Reverse the payment on the invoice for customer Havblikk AS. The payment of 7500 NOK was returned by...", "result": "SUCCESS", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell0949 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Reverse the payment on invoice for customer Nordlys Drift AS", "result": "FAILED", "api_calls": 6, "api_errors": 3},
-        {"prompt": "reverser betaling på faktura som ikkje finst", "result": "FAILED", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverser betaling på faktura til Havbris AS", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Banken har returnert betaling på faktura til kunde Nordfjord AS. Reverser betalingen.", "result": "FAILED", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1054 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 2},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1129 GmbH. The payment of 6900 NOK was retu...", "result": "FAILED", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1132 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1156 GmbH. The payment of 6900 NOK was retu...", "result": "FAILED", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1159 GmbH. The payment of 6900 NOK was retu...", "result": "FAILED", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1211 GmbH. The payment of 6900 NOK was retu...", "result": "FAILED", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1243 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1249 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverser betaling for faktura 1", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverser betaling for kunde Bergen Tech AS", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1338 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1340 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1344 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1345 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1346 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1347 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1349 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1352 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1354 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1410 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1415 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1435 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse the payment on the invoice for customer Testfjell1449 GmbH. The payment of 6900 NOK was retu...", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverser betaling pa faktura 99999", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-        {"prompt": "Reverse payment on invoice 99999", "result": "SUCCESS", "api_calls": 6, "api_errors": 3},
-    ],
-    "RUN_PAYROLL": [
-        {"prompt": "Kjør lønnskjøring for ansatt Lars Eriksen for mars 2026 med grunnlønn 45000 kr og bonus 5000 kr.", "result": "FAILED", "api_calls": 5, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen0921 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 20, "api_errors": 16},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen0949 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Exécutez la paie pour l'employé Marie Dupont, salaire de base 48000 NOK pour mars 2026", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1038 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1042 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønn for ansatt Petter Hansen med grunnlønn 45000 kr for mars 2026", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1113 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønn for ansatt Kari Hansen, grunnlønn 45000 NOK for mars 2026", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1129 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1132 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Führen Sie die Gehaltsabrechnung für Mitarbeiter Hans Weber durch, Grundgehalt 50000 NOK", "result": "SUCCESS", "api_calls": 9, "api_errors": 2},
-        {"prompt": "Kjør lønn for ansatt Ole Berg, grunnlønn 45000 NOK for mars 2026", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1156 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1159 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1211 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønn for ansatt Test User, grunnlønn 40000 NOK for mars 2026", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønn for ansatt Kari Nordmann, grunnlønn 45000 NOK for mars 2026", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1243 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen77936 for mars 2026 med grunnlønn 45000 kr og bonus 5...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1249 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen88997 for mars 2026 med grunnlønn 45000 kr og bonus 5...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Kari Hansen med grunnlønn 45000 NOK", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1338 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1340 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1344 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1345 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1346 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1347 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1349 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1352 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1354 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1410 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1415 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1435 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Exécutez la paie de Sarah Moreau (sarah.moreau@example.org) pour ce mois. Le salaire de base est de ...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Du har motteke ein arbeidskontrakt (sjaa vedlagt PDF). Opprett den tilsette i Tripletex med alle det...", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Kjør lønnskjøring for ansatt Smoketest Tesansen1449 for mars 2026 med grunnlønn 45000 kr og bonus 50...", "result": "SUCCESS", "api_calls": 5, "api_errors": 0},
-        {"prompt": "Gjer månavslutninga for mars 2026. Periodiser forskotsbetalt kostnad (11700 kr per månad frå konto 1...", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Kjor lonnskjoring for mars 2026", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Run payroll for March 2026", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Gehaltsabrechnung fuer Maerz 2026 ausfuehren", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-    ],
-    "SET_EMPLOYEE_ROLES": [
-        {"prompt": "Setzen Sie den Mitarbeiter Lars Eriksen als eingeschränkten Benutzer ohne Registrierungszugang.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Sett rollen til ansatt Petter Hansen til administrator", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen0921 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen0941 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen0949 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Sett ansatt Erik Solberg som standard bruker med registreringstilgang", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1042 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1038 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1047 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1054 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1113 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1129 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1132 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1156 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1159 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1211 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1243 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen77936 als eingeschränkten Benutzer ohne Registrierungsz...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1249 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen88997 als eingeschränkten Benutzer ohne Registrierungsz...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Gi ansatt Kari Hansen rollen prosjektleder", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1338 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1340 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1344 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1345 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1346 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1347 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1349 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1352 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1354 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1410 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1415 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1435 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Setzen Sie den Mitarbeiter Smoketest Tesansen1449 als eingeschränkten Benutzer ohne Registrierungszu...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-    ],
-    "UNKNOWN": [
-        {"prompt": "Slett alt", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-    ],
-    "UPDATE_CONTACT": [
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Havblikk AS mit neuer E-Mail emile.dupont@hav...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell0921 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell0941 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell0949 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1038 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1047 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1113 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Nordfjord GmbH mit neuer E-Mail emile.dupont@...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell88997 GmbH mit neuer E-Mail emile.du...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kontaktperson Erik Berg hos Nordfjord AS med telefon 99001122", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kontaktperson Erik Berg hos kunde Nordfjord Consulting AS med telefon 99001122", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1338 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1340 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1344 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1345 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1346 Dupont beim Kunden Testfjell1346 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1347 Dupont beim Kunden Testfjell1347 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1349 Dupont beim Kunden Testfjell1349 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1352 Dupont beim Kunden Testfjell1352 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1354 Dupont beim Kunden Testfjell1354 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1410 Dupont beim Kunden Testfjell1410 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1415 Dupont beim Kunden Testfjell1415 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1435 Dupont beim Kunden Testfjell1435 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile1449 Dupont beim Kunden Testfjell1449 GmbH mit neuer E-Mail emile...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "UPDATE_CUSTOMER": [
-        {"prompt": "Aggiornare l'indirizzo email del cliente Nordic Solutions AS a nuovo@nordic.no", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Nordfjell GmbH med ny telefon 22334455 og e-post kontakt@nordfjell.no.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell0921 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell0941 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell0949 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Nordkapp Handel AS med ny e-post post@nordkapp-handel.no og telefon 77889900", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1038 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1047 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1120 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1129 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1129 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1132 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1132 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1156 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1156 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1159 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1159 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1211 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1211 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1243 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1243 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell77936 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell77936 GmbH mit neuer E-Mail emile.du...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1249 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Aktualisieren Sie den Kontakt Émile Dupont beim Kunden Testfjell1249 GmbH mit neuer E-Mail emile.dup...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell88997 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunde Nordfjord AS med telefon 55443322", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunde Nordfjord Consulting AS med telefon 55443322", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1338 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1340 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1344 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1345 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1346 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1347 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1349 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1352 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1354 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1410 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1415 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1435 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater kunden Testfjell1449 GmbH med ny telefon 22334455 og e-post kontakt@testfjell.no.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "UPDATE_DEPARTMENT": [
-        {"prompt": "Oppdater avdelingen Marknadsføring med nytt navn Markedsføring og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift0921 med nytt navn Testdrift0921 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift0949 med nytt navn Testdrift0949 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1120 med nytt navn Testdrift1120 og Kommunikasjon.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1129 med nytt navn Testdrift1129 og Kommunikasjon.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1132 med nytt navn Testdrift1132 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1156 med nytt navn Testdrift1156 og Kommunikasjon.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1159 med nytt navn Testdrift1159 og Kommunikasjon.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1211 med nytt navn Testdrift1211 og Kommunikasjon.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Salg med nytt navn Salg og Marked", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1132 med nytt navn Testdrift1132 og Kommunikasjon", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1243 med nytt navn Testdrift1243 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift77936 med nytt namn Testdrift77936 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1249 med nytt navn Testdrift1249 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift88997 med nytt namn Testdrift88997 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdeling Markedsføring med nytt nummer 42", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Oppdater avdeling Salg med nytt nummer 15", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1338 med nytt navn Testdrift1338 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1340 med nytt navn Testdrift1340 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1344 med nytt navn Testdrift1344 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1345 med nytt navn Testdrift1345 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1346 med nytt navn Testdrift1346 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1347 med nytt navn Testdrift1347 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1349 med nytt navn Testdrift1349 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1352 med nytt navn Testdrift1352 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1354 med nytt navn Testdrift1354 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1410 med nytt navn Testdrift1410 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1415 med nytt navn Testdrift1415 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater avdelingen Testdrift1435 med nytt navn Testdrift1435 og Kommunikasjon.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "UPDATE_EMPLOYEE": [
-        {"prompt": "Oppdater tilsett Lars Eriksen si e-postadresse til lars.eriksen@nydomain.no og telefon til 91234567.", "result": "FAILED", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen0921 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen0941 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen0949 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Endre telefonnummeret til ansatt Kari Haugen til 99887766", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Endre telefonnummeret til ansatt Erik Solberg til 48123456", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1038 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1047 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1054 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1113 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1120 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1129 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1132 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1156 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1159 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1211 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1243 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen77936 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1249 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen88997 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater ansatt Kari Hansen med telefon 99887766", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1338 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1340 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1344 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1345 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1346 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1347 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1349 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1352 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1354 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1410 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1415 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1435 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater tilsett Smoketest Tesansen1449 med ny telefon 91234567.", "result": "SUCCESS", "api_calls": 3, "api_errors": 0},
-    ],
-    "UPDATE_PRODUCT": [
-        {"prompt": "Oppdater produktet Konsulenttjeneste Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulenttjeneste Premium 77936 med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulenttime med ny pris 2100 NOK eksklusiv MVA.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulenttjeneste Premium 88997 med ny pris 2100 NOK eksklusiv MVA.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Oppdater produktet Widget Pro med ny pris 1500 NOK", "result": "FAILED", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater prisen på produktet Kontorstol til 4500 NOK", "result": "FAILED", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Kontorstol med ny pris 4500 NOK", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1346 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1347 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1349 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1352 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1354 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1410 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1415 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1435 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater produktet Konsulent1449 Premium med ny pris 2100 NOK eksklusiv MVA.", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "UPDATE_PROJECT": [
-        {"prompt": "Update project Alpha to set end date to 2026-12-31", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migration Cloud\" with new end date 2026-12-31 and mark it as fixed price at 5000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering0921\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater prosjekt Havnelogistikk med ny sluttdato 2026-06-30", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1113\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1129\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1132\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1156\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1159\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1211\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1243\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering77936\" with new end date 2026-12-31 and mark it as fixed price at 50000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1249\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering88997\" with new end date 2026-12-31 and mark it as fixed price at 50000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Oppdater prosjekt Nettside Redesign med ny beskrivelse Redesign av bedriftens nettside", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1338\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1340\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1344\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1345\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1346\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1347\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1349\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1352\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1354\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1410\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1415\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1435\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Update the project \"Migrering1449\" with new end date 2026-12-31 and mark it as fixed price at 500000...", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-    ],
-    "UPDATE_SUPPLIER": [
-        {"prompt": "Update the supplier Acme Leverandør AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev0921 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev0941 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Oppdater leverandør Acme Leverandør AS med ny e-post innkjop@acme.no", "result": "SUCCESS", "api_calls": 2, "api_errors": 0},
-        {"prompt": "Endre telefonnummer for leverandør Staples Norge AS til 22334455", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1038 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1047 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1054 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1113 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 4, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1156 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 0, "api_errors": 0},
-        {"prompt": "Update the supplier Staples Norge AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev88997 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Oppdater leverandøren Staples Norway AS med nytt bankkontonummer 1234.56.78901", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Oppdater leverandøren Staples Norge AS med e-post ny@staples.no", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Oppdater leverandøren Staples Norge AS med ny e-post nyepost@staples.no", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1338 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1340 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1344 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1345 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1346 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1347 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1349 AS with new bank account number 1234.56.78903.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Update the supplier TestLev1352 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1354 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Oppdater leverandør Kontorrekvisita AS med ny adresse Storgata 1, 0155 Oslo", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1410 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1415 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1435 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-        {"prompt": "Update the supplier TestLev1449 AS with new bank account number 1234.56.78903.", "result": "SUCCESS", "api_calls": 1, "api_errors": 0},
-    ],
-    "YEAR_END_CLOSING": [
-        {"prompt": "Utfør årsavslutning for 2025", "result": "SUCCESS", "api_calls": 6, "api_errors": 1},
-        {"prompt": "Perform year-end closing procedures for the fiscal year 2025.", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Gjennomfør årsoppgjer for rekneskapsåret 2025", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "årsavsluttning 2025", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Effectuer la clôture annuelle pour l'exercice 2025", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Eseguire la chiusura annuale per l'esercizio 2025", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Perform year-end closing for fiscal year 2025", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Führen Sie den Jahresabschluss für das Geschäftsjahr 2025 durch", "result": "SUCCESS", "api_calls": 7, "api_errors": 1},
-        {"prompt": "Realize o encerramento anual simplificado de 2025: 1) Calcule e registe a depreciação anual de três ...", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Utfor arsavslutning for 2025", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Perform year-end closing for 2025", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-        {"prompt": "Jahresabschluss fuer 2025 durchfuehren", "result": "FAILED", "api_calls": 2, "api_errors": 1},
-    ],
-}
 
-TOTAL_PROMPTS = sum(len(v) for v in GRADED_PROMPTS.values())
-TASK_TYPE_ALIASES = {
-    "CREATE_SUPPLIER_INVOICE": "REGISTER_SUPPLIER_INVOICE",
-    "INVOICE_EXISTING_CUSTOMER": "CREATE_INVOICE",
+DATA_FILE = "/tmp/tripletex_all_parsed.json"
+DEFAULT_ENDPOINT = "http://localhost:8080"
+MAX_REQ_PER_SEC = 5.0  # API rate limit
+
+# Tier assignments (mirrors task_types.py)
+TIER_MAP = {
+    # Tier 1
+    "CREATE_EMPLOYEE": 1, "UPDATE_EMPLOYEE": 1, "DELETE_EMPLOYEE": 1,
+    "SET_EMPLOYEE_ROLES": 1, "CREATE_CUSTOMER": 1, "UPDATE_CUSTOMER": 1,
+    "CREATE_PRODUCT": 1, "DELETE_PRODUCT": 1, "UPDATE_PRODUCT": 1,
+    "CREATE_INVOICE": 1, "CREATE_DEPARTMENT": 1, "CREATE_PROJECT": 1,
+    # Tier 2
+    "INVOICE_EXISTING_CUSTOMER": 2, "REGISTER_PAYMENT": 2,
+    "CREATE_CREDIT_NOTE": 2, "INVOICE_WITH_PAYMENT": 2,
+    "CREATE_TRAVEL_EXPENSE": 2, "DELETE_TRAVEL_EXPENSE": 2,
+    "PROJECT_WITH_CUSTOMER": 2, "PROJECT_BILLING": 2,
+    "CREATE_CONTACT": 2, "FIND_CUSTOMER": 2, "UPDATE_PROJECT": 2,
+    "DELETE_PROJECT": 2, "LOG_HOURS": 2, "DELETE_CUSTOMER": 2,
+    "UPDATE_CONTACT": 2, "UPDATE_DEPARTMENT": 2,
+    "CREATE_SUPPLIER_INVOICE": 2, "CREATE_SUPPLIER": 2,
+    "DELETE_DEPARTMENT": 2, "DELETE_SUPPLIER": 2,
+    "FIND_SUPPLIER": 2, "UPDATE_SUPPLIER": 2,
+    "RUN_PAYROLL": 2, "REVERSE_PAYMENT": 2,
+    # Tier 3
+    "BANK_RECONCILIATION": 3, "ERROR_CORRECTION": 3,
+    "YEAR_END_CLOSING": 3, "MONTH_END_CLOSING": 3,
+    "ENABLE_MODULE": 3, "REGISTER_SUPPLIER_INVOICE": 3,
+    "CREATE_DIMENSION_VOUCHER": 3,
+    # Special
+    "BATCH": 0, "UNKNOWN": 0,
 }
 
 
-def normalize_type(t: str) -> str:
-    t = t.replace("TaskType.", "").upper()
-    return TASK_TYPE_ALIASES.get(t, t)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def load_env(env_path: str | None = None) -> dict[str, str]:
+    """Load dotenv-style file into a dict (no dependencies)."""
+    env = {}
+    paths = [env_path] if env_path else [
+        str(Path(__file__).resolve().parent.parent / ".env"),
+        str(Path(__file__).resolve().parent / ".env"),
+    ]
+    for p in paths:
+        if p and os.path.isfile(p):
+            with open(p) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    val = val.strip().strip("'\"")
+                    env[key.strip()] = val
+    return env
 
 
-async def run_tests(endpoint: str, base_url: str, token: str,
-                    dry_run: bool, type_filter=None, concurrency: int = 5):
-    """Run all smoke tests with controlled concurrency."""
-    import httpx
+def strip_task_type(raw: str) -> str:
+    """'TaskType.CREATE_CUSTOMER' -> 'CREATE_CUSTOMER'."""
+    return raw.replace("TaskType.", "").strip()
 
-    results = defaultdict(lambda: {
-        "total": 0, "pass": 0, "fail": 0, "new_fail": 0,
-        "errors": [], "misclass": [],
-    })
-    sem = asyncio.Semaphore(concurrency)
-    tested = [0]  # mutable counter for progress
 
-    async def test_one(client, expected_type, p):
-        async with sem:
-            tested[0] += 1
-            prompt_text = p["prompt"]
-            prev_result = p["result"]
+def load_test_data(path: str) -> list[dict]:
+    """Load and parse test data from JSON file, deduplicating by prompt."""
+    if not os.path.isfile(path):
+        print(f"ERROR: Test data file not found: {path}")
+        print("Generate it from Cloud Run logs first.")
+        sys.exit(1)
+    with open(path) as f:
+        raw = json.load(f)
 
-            creds = {
-                "base_url": base_url,
-                "session_token": token,
+    entries = []
+    seen_prompts = set()
+    for entry in raw:
+        prompt = entry.get("prompt", "").strip()
+        if not prompt:
+            continue
+        task_type = strip_task_type(entry.get("task_type", "UNKNOWN"))
+        # Deduplicate by prompt (keep first occurrence)
+        if prompt in seen_prompts:
+            continue
+        seen_prompts.add(prompt)
+        entries.append({
+            "prompt": prompt,
+            "expected_type": task_type,
+            "result": entry.get("result", ""),
+            "fields": entry.get("fields", "{}"),
+            "tier": TIER_MAP.get(task_type, 0),
+        })
+    return entries
+
+
+def discover_cloud_url() -> str:
+    """Use gcloud to discover the Cloud Run service URL."""
+    try:
+        result = subprocess.run(
+            ["gcloud", "run", "services", "describe", "tripletex-agent",
+             "--region", "europe-north1", "--format", "value(status.url)"],
+            capture_output=True, text=True, timeout=15,
+        )
+        url = result.stdout.strip()
+        if url and url.startswith("https://"):
+            return url
+        print(f"WARNING: gcloud returned unexpected URL: {url!r}")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"WARNING: Could not discover Cloud Run URL: {e}")
+    # Fallback
+    return "https://tripletex-agent-490723.europe-north1.run.app"
+
+
+# ---------------------------------------------------------------------------
+# Rate-limited async HTTP client
+# ---------------------------------------------------------------------------
+
+class RateLimiter:
+    """Token-bucket rate limiter."""
+
+    def __init__(self, max_per_sec: float):
+        self._interval = 1.0 / max_per_sec
+        self._lock = asyncio.Lock()
+        self._last = 0.0
+
+    async def acquire(self):
+        async with self._lock:
+            now = time.monotonic()
+            wait = self._last + self._interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = time.monotonic()
+
+
+class TestResult:
+    """Result of a single test."""
+
+    def __init__(self, prompt: str, expected_type: str, tier: int):
+        self.prompt = prompt
+        self.expected_type = expected_type
+        self.tier = tier
+        self.actual_type: str | None = None
+        self.classify_ok: bool = False
+        self.exec_status: str | None = None  # "completed", "error", etc.
+        self.exec_ok: bool = False
+        self.duration: float = 0.0
+        self.error: str | None = None
+        self.response: dict | None = None
+
+
+async def send_request(
+    client: httpx.AsyncClient,
+    rate_limiter: RateLimiter,
+    endpoint: str,
+    prompt: str,
+    credentials: dict | None,
+    classify_only: bool,
+    timeout: float = 120.0,
+) -> dict:
+    """Send a single request to the /solve endpoint."""
+    await rate_limiter.acquire()
+
+    payload: dict = {"prompt": prompt, "files": []}
+    if credentials:
+        payload["tripletex_credentials"] = credentials
+
+    url = f"{endpoint.rstrip('/')}/solve"
+    t0 = time.monotonic()
+    try:
+        resp = await client.post(url, json=payload, timeout=timeout)
+        elapsed = time.monotonic() - t0
+        if resp.status_code == 200:
+            data = resp.json()
+            data["_elapsed"] = elapsed
+            return data
+        else:
+            return {
+                "_error": f"HTTP {resp.status_code}: {resp.text[:300]}",
+                "_elapsed": elapsed,
             }
+    except Exception as e:
+        elapsed = time.monotonic() - t0
+        return {"_error": f"{type(e).__name__}: {e}", "_elapsed": elapsed}
 
-            try:
-                resp = await client.post(
-                    f"{endpoint}/solve",
-                    json={
-                        "prompt": prompt_text,
-                        "tripletex_credentials": creds,
-                    },
-                    timeout=60.0,
-                )
 
-                if resp.status_code != 200:
-                    results[expected_type]["total"] += 1
-                    results[expected_type]["fail"] += 1
-                    if prev_result == "SUCCESS":
-                        results[expected_type]["new_fail"] += 1
-                    results[expected_type]["errors"].append(
-                        (prompt_text[:80], f"HTTP {resp.status_code}")
-                    )
-                    return
+# ---------------------------------------------------------------------------
+# Test runner
+# ---------------------------------------------------------------------------
 
-                body = resp.json()
-                got_type = body.get("task_type", "UNKNOWN")
-                success = body.get("success", False)
+async def run_tests(
+    entries: list[dict],
+    endpoint: str,
+    credentials: dict | None,
+    classify_only: bool,
+    concurrency: int,
+    timeout: float,
+) -> list[TestResult]:
+    """Run all tests with bounded concurrency and rate limiting."""
+    rate_limiter = RateLimiter(MAX_REQ_PER_SEC)
+    semaphore = asyncio.Semaphore(concurrency)
+    results: list[TestResult] = []
 
-                got_norm = normalize_type(got_type)
-                exp_norm = normalize_type(expected_type)
+    async def run_one(entry: dict) -> TestResult:
+        tr = TestResult(entry["prompt"], entry["expected_type"], entry["tier"])
+        async with semaphore:
+            resp = await send_request(
+                client, rate_limiter, endpoint,
+                entry["prompt"], credentials, classify_only, timeout,
+            )
 
-                type_ok = got_norm == exp_norm
-                # In dry-run, we only check classification
-                result_ok = True if dry_run else (success or prev_result != "SUCCESS")
+        tr.duration = resp.get("_elapsed", 0.0)
+        tr.response = resp
 
-                results[expected_type]["total"] += 1
-                if type_ok and result_ok:
-                    results[expected_type]["pass"] += 1
-                else:
-                    results[expected_type]["fail"] += 1
-                    if prev_result == "SUCCESS" and not success and not dry_run:
-                        results[expected_type]["new_fail"] += 1
-                    if not type_ok:
-                        results[expected_type]["misclass"].append(
-                            (prompt_text[:80], got_type)
-                        )
-                    if not result_ok:
-                        msg = body.get("message", "")[:60]
-                        results[expected_type]["errors"].append(
-                            (prompt_text[:80], f"success=False: {msg}")
-                        )
+        if "_error" in resp:
+            tr.error = resp["_error"]
+            return tr
 
-            except Exception as e:
-                results[expected_type]["total"] += 1
-                results[expected_type]["fail"] += 1
-                if prev_result == "SUCCESS":
-                    results[expected_type]["new_fail"] += 1
-                results[expected_type]["errors"].append(
-                    (prompt_text[:80], f"ERROR: {e}")
-                )
+        # Check classification
+        actual = resp.get("task_type", "")
+        # Normalize: the endpoint may return "create_customer" or "CREATE_CUSTOMER"
+        tr.actual_type = actual.upper().replace("TASKTYPE.", "").replace(".", "_")
+        tr.classify_ok = tr.actual_type == tr.expected_type
 
-            if tested[0] % 50 == 0:
-                print(f"  Progress: {tested[0]}/{TOTAL_PROMPTS}...", flush=True)
+        # Check execution (full mode)
+        if not classify_only:
+            status = resp.get("status", "")
+            tr.exec_status = status
+            tr.exec_ok = status == "completed"
 
-    async with httpx.AsyncClient() as client:
-        tasks = []
-        for expected_type, prompts in sorted(GRADED_PROMPTS.items()):
-            if type_filter and expected_type.upper() not in type_filter:
-                continue
-            for p in prompts:
-                tasks.append(test_one(client, expected_type, p))
+        return tr
 
-        await asyncio.gather(*tasks)
+    # Use a single client for connection pooling
+    transport = httpx.AsyncHTTPTransport(retries=1)
+    async with httpx.AsyncClient(transport=transport) as client:
+        tasks = [run_one(e) for e in entries]
+        total = len(tasks)
+        completed = 0
+
+        # Process with progress updates
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            results.append(result)
+            completed += 1
+            if completed % 20 == 0 or completed == total:
+                pct = 100 * completed / total
+                print(f"  Progress: {completed}/{total} ({pct:.0f}%)", flush=True)
 
     return results
 
 
-def print_summary(results: dict, elapsed: float, dry_run: bool):
-    """Print summary table."""
-    mode = "CLASSIFICATION ONLY (dry-run)" if dry_run else "FULL E2E"
-    print(f"\n{'=' * 100}")
-    print(f"  SMOKE TEST RESULTS — {mode}")
-    print(f"{'=' * 100}")
-    print(f"{'Task Type':<35} {'Total':>6} {'Pass':>6} {'Fail':>6} {'New⚠':>6} {'Rate':>7}")
-    print("-" * 100)
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
 
-    total_all = pass_all = fail_all = new_fail_all = 0
-    for task_type in sorted(results.keys()):
-        r = results[task_type]
-        total_all += r["total"]
-        pass_all += r["pass"]
-        fail_all += r["fail"]
-        new_fail_all += r["new_fail"]
-        rate = f"{100 * r['pass'] / r['total']:.0f}%" if r["total"] else "N/A"
-        marker = ""
-        if r["new_fail"] > 0:
-            marker = " !!NEW REGRESSION!!"
-        elif r["fail"] > 0:
-            marker = " *"
-        print(f"  {task_type:<33} {r['total']:>6} {r['pass']:>6} {r['fail']:>6} {r['new_fail']:>6} {rate:>7}{marker}")
+def print_summary(results: list[TestResult], classify_only: bool) -> int:
+    """Print summary table and detailed failure report. Returns exit code."""
+    # Group by expected type
+    by_type: dict[str, list[TestResult]] = defaultdict(list)
+    for r in results:
+        by_type[r.expected_type].append(r)
 
-    print("-" * 100)
-    rate = f"{100 * pass_all / total_all:.1f}%" if total_all else "N/A"
-    print(f"  {'TOTAL':<33} {total_all:>6} {pass_all:>6} {fail_all:>6} {new_fail_all:>6} {rate:>7}")
-    print(f"\nElapsed: {elapsed:.1f}s")
+    total_classify_ok = sum(1 for r in results if r.classify_ok)
+    total_exec_ok = sum(1 for r in results if r.exec_ok) if not classify_only else 0
+    total_errors = sum(1 for r in results if r.error)
+    total = len(results)
 
-    # Misclassifications
-    all_misclass = []
-    for task_type, r in sorted(results.items()):
-        for snip, got in r["misclass"]:
-            all_misclass.append((task_type, got, snip))
-    if all_misclass:
-        print(f"\n{'='*100}")
-        print(f"MISCLASSIFICATIONS ({len(all_misclass)}):")
-        print(f"{'-'*100}")
-        for expected, got, snip in all_misclass[:30]:
-            print(f"  Expected: {expected:<30} Got: {got}")
-            print(f"    Prompt: {snip}")
-        if len(all_misclass) > 30:
-            print(f"  ... and {len(all_misclass) - 30} more")
+    mode = "CLASSIFY-ONLY" if classify_only else "FULL E2E"
+    print(f"\n{'=' * 80}")
+    print(f"  SMOKE TEST RESULTS ({mode})")
+    print(f"  {total} prompts | {len(by_type)} task types")
+    print(f"{'=' * 80}\n")
 
-    # New regressions
-    all_new = []
-    for task_type, r in sorted(results.items()):
-        for snip, err in r["errors"]:
-            all_new.append((task_type, err, snip))
-    if all_new and not dry_run:
-        print(f"\n{'='*100}")
-        print(f"ERRORS ({len(all_new)}):")
-        print(f"{'-'*100}")
-        for tt, err, snip in all_new[:30]:
-            print(f"  [{tt}] {err}")
-            print(f"    Prompt: {snip}")
-        if len(all_new) > 30:
-            print(f"  ... and {len(all_new) - 30} more")
+    # Header
+    if classify_only:
+        hdr = f"{'Task Type':<35} {'N':>4} {'Cls OK':>7} {'Rate':>6} {'Err':>4}"
+    else:
+        hdr = f"{'Task Type':<35} {'N':>4} {'Cls OK':>7} {'Exec OK':>8} {'Rate':>6} {'Err':>4} {'Avg(s)':>7}"
+    print(hdr)
+    print("-" * len(hdr))
 
+    for ttype in sorted(by_type.keys()):
+        group = by_type[ttype]
+        n = len(group)
+        cls_ok = sum(1 for r in group if r.classify_ok)
+        cls_rate = 100 * cls_ok / n if n else 0
+        errs = sum(1 for r in group if r.error)
+
+        if classify_only:
+            print(f"{ttype:<35} {n:>4} {cls_ok:>4}/{n:<2} {cls_rate:>5.0f}% {errs:>4}")
+        else:
+            exec_ok = sum(1 for r in group if r.exec_ok)
+            avg_dur = sum(r.duration for r in group) / n if n else 0
+            print(f"{ttype:<35} {n:>4} {cls_ok:>4}/{n:<2} {exec_ok:>5}/{n:<2} {cls_rate:>5.0f}% {errs:>4} {avg_dur:>6.1f}s")
+
+    # Totals
+    print("-" * len(hdr))
+    cls_pct = 100 * total_classify_ok / total if total else 0
+    if classify_only:
+        print(f"{'TOTAL':<35} {total:>4} {total_classify_ok:>4}/{total:<2} {cls_pct:>5.1f}% {total_errors:>4}")
+    else:
+        exec_pct = 100 * total_exec_ok / total if total else 0
+        avg_all = sum(r.duration for r in results) / total if total else 0
+        print(f"{'TOTAL':<35} {total:>4} {total_classify_ok:>4}/{total:<2} {total_exec_ok:>5}/{total:<2} {cls_pct:>5.1f}% {total_errors:>4} {avg_all:>6.1f}s")
+
+    # ----- Misclassification details -----
+    misclassified = [r for r in results if not r.classify_ok and not r.error]
+    if misclassified:
+        print(f"\n{'=' * 80}")
+        print(f"  MISCLASSIFICATIONS ({len(misclassified)})")
+        print(f"{'=' * 80}")
+        # Group by (expected, actual) for a confusion-matrix view
+        confusion: dict[tuple[str, str], list[str]] = defaultdict(list)
+        for r in misclassified:
+            confusion[(r.expected_type, r.actual_type or "NONE")].append(r.prompt)
+        for (exp, act), prompts in sorted(confusion.items()):
+            print(f"\n  {exp} -> {act}  ({len(prompts)}x)")
+            for p in prompts[:5]:
+                print(f"    - {p[:110]}")
+            if len(prompts) > 5:
+                print(f"    ... and {len(prompts) - 5} more")
+
+    # ----- Execution failures (full mode only) -----
+    if not classify_only:
+        exec_failures = [r for r in results if r.classify_ok and not r.exec_ok and not r.error]
+        if exec_failures:
+            print(f"\n{'=' * 80}")
+            print(f"  EXECUTION FAILURES ({len(exec_failures)}) -- correctly classified but execution failed")
+            print(f"{'=' * 80}")
+            for r in exec_failures[:30]:
+                status = r.exec_status or "N/A"
+                detail = ""
+                if r.response:
+                    detail = r.response.get("error", "")
+                    if not detail:
+                        details_obj = r.response.get("details", {})
+                        if isinstance(details_obj, dict):
+                            detail = details_obj.get("error", "")
+                    if isinstance(detail, dict):
+                        detail = json.dumps(detail)[:200]
+                    elif isinstance(detail, str):
+                        detail = detail[:200]
+                print(f"\n  Type:   {r.expected_type}")
+                print(f"  Status: {status}")
+                print(f"  Prompt: {r.prompt[:120]}")
+                if detail:
+                    print(f"  Error:  {detail}")
+            if len(exec_failures) > 30:
+                print(f"\n  ... and {len(exec_failures) - 30} more failures")
+
+    # ----- HTTP / transport errors -----
+    http_errors = [r for r in results if r.error]
+    if http_errors:
+        print(f"\n{'=' * 80}")
+        print(f"  HTTP / TRANSPORT ERRORS ({len(http_errors)})")
+        print(f"{'=' * 80}")
+        for r in http_errors[:20]:
+            print(f"\n  Type:   {r.expected_type}")
+            print(f"  Error:  {r.error}")
+            print(f"  Prompt: {r.prompt[:100]}")
+        if len(http_errors) > 20:
+            print(f"\n  ... and {len(http_errors) - 20} more errors")
+
+    # ----- Final verdict -----
+    print(f"\n{'=' * 80}")
+    if classify_only:
+        ok = total_classify_ok == total and total_errors == 0
+        verdict = "PASS" if ok else "FAIL"
+        print(f"  Classification accuracy: {cls_pct:.1f}% ({total_classify_ok}/{total})")
+    else:
+        exec_pct = 100 * total_exec_ok / total if total else 0
+        ok = total_exec_ok == total and total_errors == 0
+        verdict = "PASS" if ok else ("MIXED" if total_exec_ok > total * 0.8 else "FAIL")
+        print(f"  Classification: {cls_pct:.1f}% | Execution: {exec_pct:.1f}% | Errors: {total_errors}")
+    print(f"  Verdict: {verdict}")
+    print(f"{'=' * 80}\n")
+
+    return 0 if verdict != "FAIL" else 1
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="E2E smoke tests from grader logs")
-    parser.add_argument("--endpoint", default="http://localhost:8080")
-    parser.add_argument("--base-url", default=os.environ.get("TRIPLETEX_BASE_URL", "https://tx-proxy.ainm.no/v2"))
-    parser.add_argument("--token", default=os.environ.get("TRIPLETEX_SESSION_TOKEN", ""))
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Classification only — no real API calls (uses fake token)")
-    parser.add_argument("--types", default="",
-                        help="Comma-separated task types to test (default: all)")
-    parser.add_argument("--concurrency", type=int, default=5,
-                        help="Max concurrent requests (default: 5)")
+    parser = argparse.ArgumentParser(
+        description="E2E smoke test for Tripletex AI agent using graded Cloud Run logs",
+    )
+    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT,
+                        help="Service URL (default: http://localhost:8080)")
+    parser.add_argument("--cloud", action="store_true",
+                        help="Discover and use Cloud Run URL")
+    parser.add_argument("--classify-only", action="store_true",
+                        help="Test only classification (no execution)")
+    parser.add_argument("--task-type", type=str, default=None,
+                        help="Filter to a specific task type (e.g. CREATE_CUSTOMER)")
+    parser.add_argument("--tier", type=int, default=None,
+                        help="Filter to a specific tier (1, 2, or 3)")
+    parser.add_argument("--sample", type=int, default=None,
+                        help="Random sample N prompts per task type")
+    parser.add_argument("--concurrency", type=int, default=3,
+                        help="Max concurrent requests (default: 3)")
+    parser.add_argument("--timeout", type=float, default=120.0,
+                        help="Request timeout in seconds (default: 120)")
+    parser.add_argument("--data-file", default=DATA_FILE,
+                        help=f"Path to parsed grader JSON (default: {DATA_FILE})")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for --sample (default: 42)")
     args = parser.parse_args()
 
-    type_filter = set(t.strip().upper() for t in args.types.split(",") if t.strip()) if args.types else None
-    filtered_count = sum(
-        len(v) for k, v in GRADED_PROMPTS.items()
-        if not type_filter or k.upper() in type_filter
-    )
+    # Endpoint
+    endpoint = args.endpoint
+    if args.cloud:
+        print("Discovering Cloud Run URL...")
+        endpoint = discover_cloud_url()
+    print(f"Endpoint: {endpoint}")
 
-    if args.dry_run:
-        args.token = "dry-run-no-token"
+    # Credentials
+    env = load_env()
+    base_url = os.environ.get("TRIPLETEX_BASE_URL") or env.get("TRIPLETEX_BASE_URL", "")
+    session_token = os.environ.get("TRIPLETEX_SESSION_TOKEN") or env.get("TRIPLETEX_SESSION_TOKEN", "")
+    credentials = None
+    if base_url and session_token:
+        credentials = {"base_url": base_url, "session_token": session_token}
+        print(f"Credentials: loaded (base_url={base_url[:40]}...)")
+    else:
+        if not args.classify_only:
+            print("WARNING: No Tripletex credentials found. Full E2E tests will fail.")
+            print("  Set TRIPLETEX_BASE_URL and TRIPLETEX_SESSION_TOKEN in env or .env file.")
 
-    if not args.token and not args.dry_run:
-        print("ERROR: --token required for E2E tests (or use --dry-run)")
+    # Load data
+    print(f"Loading test data from {args.data_file}...")
+    entries = load_test_data(args.data_file)
+    print(f"  Loaded {len(entries)} unique prompts")
+
+    # Filter by task type
+    if args.task_type:
+        target = args.task_type.upper().replace("TASKTYPE.", "")
+        entries = [e for e in entries if e["expected_type"] == target]
+        print(f"  Filtered to task type {target}: {len(entries)} prompts")
+
+    # Filter by tier
+    if args.tier is not None:
+        entries = [e for e in entries if e["tier"] == args.tier]
+        print(f"  Filtered to tier {args.tier}: {len(entries)} prompts")
+
+    if not entries:
+        print("ERROR: No test entries after filtering.")
         sys.exit(1)
 
-    print(f"Smoke test: {filtered_count} prompts, {'dry-run' if args.dry_run else 'full E2E'}")
-    print(f"Endpoint: {args.endpoint}")
-    if type_filter:
-        print(f"Filter: {', '.join(sorted(type_filter))}")
+    # Sample
+    if args.sample:
+        random.seed(args.seed)
+        by_type: dict[str, list[dict]] = defaultdict(list)
+        for e in entries:
+            by_type[e["expected_type"]].append(e)
+        sampled = []
+        for ttype in sorted(by_type.keys()):
+            group = by_type[ttype]
+            n = min(args.sample, len(group))
+            sampled.extend(random.sample(group, n))
+        entries = sampled
+        print(f"  Sampled {args.sample} per type: {len(entries)} prompts total")
 
-    t0 = time.time()
+    # Type summary
+    type_counts: dict[str, int] = defaultdict(int)
+    for e in entries:
+        type_counts[e["expected_type"]] += 1
+    print(f"  Task types: {len(type_counts)}")
+    for t in sorted(type_counts):
+        print(f"    {t}: {type_counts[t]}")
+
+    mode = "classify-only" if args.classify_only else "full E2E"
+    print(f"\nRunning {mode} tests ({len(entries)} prompts, concurrency={args.concurrency})...\n")
+
+    t0 = time.monotonic()
     results = asyncio.run(run_tests(
-        args.endpoint, args.base_url, args.token,
-        args.dry_run, type_filter, args.concurrency,
+        entries, endpoint, credentials,
+        classify_only=args.classify_only,
+        concurrency=args.concurrency,
+        timeout=args.timeout,
     ))
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - t0
 
-    print_summary(results, elapsed, args.dry_run)
+    print(f"\nCompleted in {elapsed:.1f}s ({len(results) / elapsed:.1f} req/s)")
 
-    new_failures = sum(r["new_fail"] for r in results.values())
-    total_fail = sum(r["fail"] for r in results.values())
-    if new_failures > 0:
-        print(f"\n*** {new_failures} NEW REGRESSIONS DETECTED ***")
-        sys.exit(2)
-    sys.exit(1 if total_fail > 0 else 0)
+    exit_code = print_summary(results, args.classify_only)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
