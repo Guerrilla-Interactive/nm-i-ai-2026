@@ -567,7 +567,11 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
                 r"kund(?:e|en)\w*|customer\w*|client\w*|cliente\w*)\s+"
                 r"(?:med\s+(?:namn\s+|navn\s+)?|named?\s+|called\s+|kalt\s+|appelée?\s+|nommée?\s+|"
                 r"namens\s+|genannt\s+|chamad[oa]\s+|llamad[oa]\s+)?"
-                r"([A-Za-zÆØÅæøå\u00C0-\u024F][\w&-]+(?:\s+[A-Za-zÆØÅæøå\u00C0-\u024F&][\w&-]+)*)"
+                r"([A-Za-zÆØÅæøå\u00C0-\u024F][\w&-]+"
+                r"(?:\s+(?!(?:og|and|avec|mit|con|com|med|with|und|et|til|at|for|zu|à|"
+                r"nummer|number|numéro|número|pris|price|prix|Preis|precio|preço|"
+                r"ny|new|neu|nouveau|nuevo|novo|start|fra|from|von|de|du|par|por|aus)\b)"
+                r"[A-Za-zÆØÅæøå\u00C0-\u024F&][\w&-]+)*)"
                 r"(?:\s*[,.]|\s+(?:og|and|avec|mit|con|com|med|with|und|et|til|at|for|zu|à|"
                 r"nummer|number|numéro|número|avdelingsnummer|abteilungsnummer|"
                 r"department.?number|e-post|email|telefon|phone|pris|price|prix|Preis|precio|preço|"
