@@ -672,6 +672,16 @@ class TripletexClient:
         resp = await self._request("POST", "/timesheet/entry", json=data)
         return self._extract_value(resp)
 
+    async def get_timesheet_entries(self, params: dict | None = None) -> list:
+        p = dict(params or {})
+        p.setdefault("count", 100)
+        resp = await self._request("GET", "/timesheet/entry", params=p)
+        return self._extract_values(resp)
+
+    async def update_timesheet_entry(self, entry_id: int, data: dict) -> dict:
+        resp = await self._request("PUT", f"/timesheet/entry/{entry_id}", json=data)
+        return self._extract_value(resp)
+
     # ------------------------------------------------------------------
     # Supplier (Tier 2)
     # ------------------------------------------------------------------

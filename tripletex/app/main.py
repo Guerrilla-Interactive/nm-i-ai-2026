@@ -939,9 +939,22 @@ def _extract_fields_rule_based(task_type: TaskType, prompt: str) -> dict:
             fields["customer_name"] = m.group(1).strip().rstrip(".,:")
         # Fallback: "faktura til X:" / "Lag faktura til X:" (no kunde/customer keyword)
         if "customer_name" not in fields:
-            m = re.search(r"(?:faktura|invoice|factura|rechnung|facture|fatura)\s+(?:til|for|to|für|pour|para|per)\s+(.+?)(?:\s*:\s*|\s*[.,]\s*|\s+med\s+\d|\s+with\s+\d|\s+for\s+\d|\s+\d+\s*(?:stk|pcs|x|timer|hours?)\b|\s*$)", text, re.I)
+            m = re.search(r"(?:faktura|invoice|factura|rechnung|facture|fatura)\s+(?:til|for|to|für|pour|para|per|al)\s+(.+?)(?:\s*:\s*|\s*[.,]\s*|\s+med\s+\d|\s+with\s+\d|\s+for\s+\d|\s+\d+\s*(?:stk|pcs|x|timer|hours?)\b|\s*$)", text, re.I)
             if m:
                 fields["customer_name"] = m.group(1).strip().rstrip(".,:")
+        # Fallback: "al cliente X" / "para el cliente X" / "pour le client X" / "für den Kunden X"
+        if "customer_name" not in fields:
+            m = re.search(
+                r"(?:al|para\s+(?:el|o)?|pour\s+(?:le|la)?|für\s+(?:den|die)?|ao)\s+"
+                r"(?:client(?:e)?|Kunde[n]?|customer)\s+"
+                r"(.+?)(?:\s*[.,:\s]*:\s*|\s*[.,]\s*|\s+med\s+\d|\s+with\s+\d|\s+con\s+\d|\s+\d+\s*(?:stk|pcs|x)\b|\s*$)",
+                text, re.I,
+            )
+            if m:
+                fields["customer_name"] = m.group(1).strip().rstrip(".,:")
+        # Last fallback: use generic "name" field if it looks like a company name
+        if "customer_name" not in fields and fields.get("name"):
+            fields["customer_name"] = fields["name"]
 
     # --- Invoice line extraction ---
     if task_type in (TaskType.CREATE_INVOICE, TaskType.INVOICE_EXISTING_CUSTOMER,
@@ -1580,8 +1593,9 @@ def _detect_batch(prompt: str, task_type: TaskType) -> list[dict] | None:
         return None
 
     # Pattern: "create N entities: X, Y, Z" or "create N entities: X, Y and Z"
+    # Includes imperative forms: crie (PT), cree (ES), créez (FR), opprett (NO)
     m = re.search(
-        r"(?:opprett|create|lag|erstellen|créer|crear|criar)\s+"
+        r"(?:opprett\w*|create|lag\w?|erstellen|créer|créez|crear|cree|criar|crie)\s+"
         r"(?:tre|three|drei|trois|tres|três|3|fire|four|vier|quatre|cuatro|quatro|4|"
         r"fem|five|fünf|cinq|cinco|5|seks|six|sechs|6|sju|seven|sieben|sept|siete|sete|7|"
         r"åtte|eight|acht|huit|ocho|oito|8|ni|nine|neun|neuf|nueve|nove|9|"
@@ -1589,7 +1603,8 @@ def _detect_batch(prompt: str, task_type: TaskType) -> list[dict] | None:
         r"(?:nye?\s+)?"
         r"(?:avdeling\w*|department\w*|département\w*|departamento\w*|abteilung\w*|"
         r"ansatt\w*|employee\w*|kunde\w*|customer\w*|produkt\w*|product\w*|"
-        r"prosjekt\w*|project\w*)\s*[:\-]\s*"
+        r"prosjekt\w*|project\w*)"
+        r"(?:\s+\w+)*?\s*[:\-]\s*"
         r"(.+)",
         prompt, re.I | re.DOTALL,
     )
@@ -1597,6 +1612,10 @@ def _detect_batch(prompt: str, task_type: TaskType) -> list[dict] | None:
         return None
 
     items_text = m.group(1).strip()
+    # Strip quotes from items (handles "X", 'X', «X»)
+    items_text = items_text.replace("\u201c", "").replace("\u201d", "").replace(
+        "\u00ab", "").replace("\u00bb", "")
+    items_text = items_text.replace('"', '').replace("'", "")
     # Split by comma or " og "/" and "/" und "/" et "/" y "/" e "
     items = re.split(r"\s*(?:,\s*(?:og|and|und|et|y|e)\s+|,\s+|\s+og\s+|\s+and\s+|\s+und\s+|\s+et\s+|\s+y\s+|\s+e\s+)\s*", items_text)
     items = [item.strip().rstrip(".,") for item in items if item.strip()]
@@ -1745,6 +1764,80 @@ async def classify(prompt: str, files: Optional[list[dict]] = None) -> TaskClass
                         "rapproch", "reconcil", "avstem", "abgleich"]
         if any(sig in p_lower for sig in bank_signals):
             override_type = TaskType.BANK_RECONCILIATION
+    # REVERSE PAYMENT — German "zurückgebucht/Stornieren" patterns
+    # The keyword classifier misses these German variants, causing misclassification as invoice_with_payment
+    elif any(sig in p_lower for sig in [
+        "zurückgebucht", "zuruckgebucht", "zurueckgebucht",
+        "stornieren sie die zahlung", "zahlung stornieren",
+        "zurückgesandt", "zuruckgesandt", "zurueckgesandt",
+        "wurde von der bank", "von der bank zurück",
+    ]) and any(sig in p_lower for sig in [
+        "zahlung", "payment", "betaling", "paiement", "pago",
+        "rechnung", "invoice", "faktura", "facture", "factura",
+    ]):
+        override_type = TaskType.REVERSE_PAYMENT
+
+    # EXCHANGE RATE INVOICE — "Wechselkurs" / "exchange rate" / "taux de change" / "tipo de cambio" / "taxa de câmbio"
+    # These are invoice_with_payment tasks with foreign currency. The Gemini classifier
+    # extracts the exchange rate as the amount (e.g., 11.14 instead of 218K NOK).
+    # We detect these and extract the correct fields.
+    elif any(sig in p_lower for sig in [
+        "wechselkurs", "exchange rate", "taux de change", "tipo de cambio",
+        "taxa de câmbio", "taxa de cambio", "kursdifferanse", "valutadifferanse",
+        "disagio", "agio", "wechselkursdifferenz", "currency difference",
+        "différence de change",
+    ]):
+        override_type = TaskType.INVOICE_WITH_PAYMENT
+        # Extract fields manually for exchange rate invoices
+        _exr_fields = _extract_fields_generic(prompt, TaskType.INVOICE_WITH_PAYMENT)
+        # Extract org number (handles "Org.-Nr." with hyphen that generic regex misses)
+        _org_m = re.search(r"(?:org\.?\s*-?\s*n[rº]\.?|org(?:anisas?jon)?s?nummer)\s*:?\s*(\d{9})", prompt, re.I)
+        if _org_m:
+            _exr_fields["organization_number"] = _org_m.group(1)
+            _exr_fields.pop("phone", None)  # Remove misdetected phone
+        # Extract customer name: "an Waldstein GmbH" / "à Client SARL" / "to Customer Ltd"
+        _cust_m = re.search(
+            r"(?:an|à|to|a|para)\s+"
+            r"([A-ZÆØÅ\u00C0-\u024F][\w\s]*?"
+            r"(?:GmbH|AS|ASA|Ltd|Inc|SARL|SRL|Lda|SL|AG|AB|ApS|Corp))",
+            prompt)
+        if _cust_m:
+            _exr_fields["customer_name"] = _cust_m.group(1).strip()
+        # Extract foreign amount: "über 19629 EUR" / "de 6073 EUR" / "of 19629 EUR"
+        _amt_m = re.search(
+            r"(?:über|de|of|por|di)\s+([\d.,]+)\s*(EUR|USD|GBP|SEK|DKK|CHF)",
+            prompt, re.I)
+        if _amt_m:
+            _foreign_amt = float(_amt_m.group(1).replace(",", "."))
+            _currency = _amt_m.group(2).upper()
+            _exr_fields["foreign_amount"] = _foreign_amt
+            _exr_fields["currency"] = _currency
+        # Extract exchange rates: "11.14 NOK/EUR" or "Wechselkurs 11.14"
+        _rates = re.findall(r"(\d+[.,]\d+)\s*(?:NOK/?(?:EUR|USD|GBP|SEK|DKK|CHF))", prompt, re.I)
+        if not _rates:
+            _rates = re.findall(r"(?:kurs(?:en)?|rate|taux|tipo|taxa)\s+(?:er|ist|is|de|var|was|liegt bei|bei)\s+(\d+[.,]\d+)", prompt, re.I)
+        if len(_rates) >= 1:
+            _exr_fields["original_rate"] = float(_rates[0].replace(",", "."))
+        if len(_rates) >= 2:
+            _exr_fields["current_rate"] = float(_rates[1].replace(",", "."))
+        # Calculate NOK amount from foreign amount × original rate
+        if "foreign_amount" in _exr_fields and "original_rate" in _exr_fields:
+            nok_amount = _exr_fields["foreign_amount"] * _exr_fields["original_rate"]
+            _exr_fields["amount"] = nok_amount
+            _exr_fields["price_excluding_vat"] = nok_amount
+        # Override the generic extraction with our corrected fields
+        fields = _exr_fields
+        fields = _post_process_fields(override_type, fields)
+        fields = _normalize_fields(override_type, fields)
+        log("INFO", "Hard override classification",
+            task_type=str(override_type), trigger="exchange_rate_invoice")
+        return TaskClassification(
+            task_type=override_type,
+            confidence=0.95,
+            fields=fields,
+            raw_prompt=prompt,
+        )
+
     # German: "Rechnung" + supplier signal → REGISTER_SUPPLIER_INVOICE
     elif "rechnung" in p_lower and any(s in p_lower for s in [
         "lieferant", "zulieferer", "vom lieferant", "des lieferant",

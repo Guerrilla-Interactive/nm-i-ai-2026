@@ -364,6 +364,18 @@ async def _find_employee(client: TripletexClient, fields: dict) -> dict | None:
     email = _get(fields, "email")
     single_name = None  # Track if we only got one name (could be first OR last)
 
+    # Try "name" field (full name) if first/last not set
+    if not first_name and not last_name:
+        full_name = _get(fields, "name") or _get(fields, "employee_name")
+        if full_name:
+            parts = full_name.strip().split()
+            if len(parts) >= 2:
+                first_name = parts[0]
+                last_name = parts[-1]
+            elif len(parts) == 1:
+                single_name = parts[0]
+                first_name = parts[0]
+
     # If only employee_identifier is set, try splitting into first/last
     if not first_name and not email:
         emp_id = _get(fields, "employee_identifier")
@@ -407,6 +419,46 @@ async def _find_employee(client: TripletexClient, fields: dict) -> dict | None:
                        or single_name.lower() in e.get("firstName", "").lower()]
             if matches:
                 return matches[0]
+        return None
+
+    if not employees and (first_name or last_name):
+        # API firstName filter may be too strict — fetch all and match client-side
+        _log("INFO", "API search returned no results, fetching all employees",
+             first_name=first_name, last_name=last_name)
+        all_emps = await client.get_employees({"count": 100})
+        if all_emps:
+            fn = (first_name or "").lower()
+            ln = (last_name or "").lower()
+            # Exact first+last
+            if fn and ln:
+                matches = [e for e in all_emps
+                           if e.get("firstName", "").lower() == fn
+                           and e.get("lastName", "").lower() == ln]
+                if matches:
+                    return matches[0]
+            # Fuzzy: contains in both names
+            if fn and ln:
+                matches = [e for e in all_emps
+                           if fn in e.get("firstName", "").lower()
+                           and ln in e.get("lastName", "").lower()]
+                if matches:
+                    return matches[0]
+            # Fuzzy: contains in either direction
+            if fn:
+                matches = [e for e in all_emps if fn in e.get("firstName", "").lower()
+                           or fn in e.get("lastName", "").lower()]
+                if ln:
+                    both = [e for e in matches if ln in e.get("lastName", "").lower()
+                            or ln in e.get("firstName", "").lower()]
+                    if both:
+                        return both[0]
+                if matches:
+                    return matches[0]
+            if ln:
+                matches = [e for e in all_emps if ln in e.get("lastName", "").lower()
+                           or ln in e.get("firstName", "").lower()]
+                if matches:
+                    return matches[0]
         return None
 
     if not employees:
@@ -557,10 +609,17 @@ async def _find_project(client: TripletexClient, name: str) -> dict | None:
                        or p.get("name", "").lower() in name_lower]
             if partial:
                 return partial[0]
-            first_word = name_lower.split()[0] if name_lower.split() else name_lower
-            if len(first_word) >= 4:
+            # Try each word (≥3 chars) from the search name
+            words = [w for w in name_lower.split() if len(w) >= 3]
+            for word in words:
                 word_match = [p for p in all_projects
-                              if first_word in p.get("name", "").lower()]
+                              if word in p.get("name", "").lower()]
+                if len(word_match) == 1:
+                    return word_match[0]
+            # If first word matched multiple, still return best
+            if words:
+                word_match = [p for p in all_projects
+                              if words[0] in p.get("name", "").lower()]
                 if word_match:
                     return word_match[0]
     except (TripletexAPIError, Exception):
@@ -1118,13 +1177,22 @@ async def _exec_create_department(fields: dict, client: TripletexClient) -> dict
         "departmentManager": _ref(_get(fields, "manager_id")),
     })
 
-    # Department number conflicts are already handled above via GET check.
-    # No retry loop — write once.
     try:
         result = await client.create_department(payload)
         return {"created_id": result.get("id"), "entity": "department"}
     except TripletexAPIError as e:
         if e.status_code == 422:
+            # Retry without departmentNumber (let Tripletex auto-assign)
+            if payload.get("departmentNumber") is not None:
+                _log("INFO", "Department 422 with number, retrying without",
+                     dept_num=payload["departmentNumber"])
+                payload.pop("departmentNumber", None)
+                try:
+                    result = await client.create_department(payload)
+                    return {"created_id": result.get("id"), "entity": "department"}
+                except TripletexAPIError as e2:
+                    return {"success": False, "entity": "department",
+                            "error": f"Department creation failed: {(e2.detail or str(e2))[:200]}"}
             return {"success": False, "entity": "department",
                     "error": f"Department creation failed: {(e.detail or str(e))[:200]}"}
         raise
@@ -2342,6 +2410,13 @@ async def _exec_find_customer(fields: dict, client: TripletexClient) -> dict:
     # search_query is the canonical field from the classifier
     search_query = _get(fields, "search_query") or _get(fields, "name") or _get(fields, "customer_identifier")
     if search_query:
+        # Strip language suffixes the classifier may include from the prompt
+        search_query = re.sub(
+            r"\s+(?:no sistema|dans le syst[eè]me|im System|in the system|en el sistema|nel sistema"
+            r"|i systemet|no Tripletex|dans Tripletex|im Tripletex|in Tripletex"
+            r"|from the|fra|von|de|du)\s*$",
+            "", search_query, flags=re.IGNORECASE,
+        ).strip()
         params["customerName"] = search_query
     if _get(fields, "email"):
         params["email"] = fields["email"]
@@ -2361,7 +2436,21 @@ async def _exec_update_project(fields: dict, client: TripletexClient) -> dict:
     if not project_id and proj_name:
         proj = await _find_project(client, proj_name)
         if not proj:
-            return {"success": False, "error": "Project not found"}
+            # Create the project so we can update it (fresh sandbox)
+            _log("INFO", "Project not found for update, creating", name=proj_name)
+            try:
+                pm_id = await client.get_session_employee_id()
+                if not pm_id:
+                    emps = await client.get_employees({"count": 1})
+                    pm_id = emps[0]["id"] if emps else None
+                proj = await client.create_project(_clean({
+                    "name": proj_name,
+                    "startDate": _get(fields, "start_date") or _today(),
+                    **({"projectManager": {"id": int(pm_id)}} if pm_id else {}),
+                }))
+                _log("INFO", "Created project for update", id=proj["id"])
+            except (TripletexAPIError, Exception) as e:
+                return {"success": False, "error": f"Project not found and creation failed: {str(e)[:150]}"}
         project_id = proj["id"]
 
     if not project_id:
@@ -2966,6 +3055,37 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                     "project_id": proj_id, "activity_id": act_id}
         except TripletexAPIError as e:
             last_error = e
+            # 409 = duplicate entry — find existing and update hours
+            if e.status_code == 409:
+                _log("INFO", "Timesheet 409 duplicate, searching existing entry",
+                     emp=emp_id, date=entry_date)
+                try:
+                    existing = await client.get_timesheet_entries({
+                        "employeeId": str(emp_id),
+                        "dateFrom": entry_date,
+                        "dateTo": entry_date,
+                        "projectId": str(proj_id),
+                        "activityId": str(act_id),
+                    })
+                    if existing:
+                        entry = existing[0]
+                        updated = await client.update_timesheet_entry(entry["id"], {
+                            "id": entry["id"],
+                            "version": entry.get("version", 0),
+                            "employee": {"id": int(emp_id)},
+                            "project": {"id": int(proj_id)},
+                            "activity": {"id": int(act_id)},
+                            "date": entry_date,
+                            "hours": parsed_hours,
+                        })
+                        return {"created_id": updated.get("id"), "entity": "timesheet_entry",
+                                "hours": parsed_hours, "employee_id": emp_id,
+                                "project_id": proj_id, "activity_id": act_id,
+                                "note": "Updated existing entry (duplicate date)"}
+                except (TripletexAPIError, Exception) as dup_err:
+                    _log("WARNING", "Failed to update duplicate timesheet entry",
+                         error=str(dup_err)[:200])
+                continue
             if e.status_code != 422:
                 raise
             _log("WARNING", "Timesheet 422, trying next combo",
@@ -2990,6 +3110,36 @@ async def _exec_log_hours(fields: dict, client: TripletexClient) -> dict:
                         "project_id": project_id, "activity_id": act_id}
             except TripletexAPIError as e:
                 last_error = e
+                if e.status_code == 409:
+                    _log("INFO", "Timesheet 409 duplicate with session owner",
+                         emp=session_emp_id, date=entry_date)
+                    try:
+                        existing = await client.get_timesheet_entries({
+                            "employeeId": str(session_emp_id),
+                            "dateFrom": entry_date,
+                            "dateTo": entry_date,
+                            "projectId": str(project_id),
+                            "activityId": str(act_id),
+                        })
+                        if existing:
+                            entry = existing[0]
+                            updated = await client.update_timesheet_entry(entry["id"], {
+                                "id": entry["id"],
+                                "version": entry.get("version", 0),
+                                "employee": {"id": int(session_emp_id)},
+                                "project": {"id": int(project_id)},
+                                "activity": {"id": int(act_id)},
+                                "date": entry_date,
+                                "hours": parsed_hours,
+                            })
+                            return {"created_id": updated.get("id"), "entity": "timesheet_entry",
+                                    "hours": parsed_hours, "employee_id": session_emp_id,
+                                    "project_id": project_id, "activity_id": act_id,
+                                    "note": "Updated existing entry (duplicate date)"}
+                    except (TripletexAPIError, Exception) as dup_err:
+                        _log("WARNING", "Failed to update duplicate timesheet",
+                             error=str(dup_err)[:200])
+                    continue
                 if e.status_code != 422:
                     raise
                 _log("WARNING", "Timesheet 422 with session owner",
@@ -5747,16 +5897,23 @@ async def _exec_find_supplier(fields: dict, client: TripletexClient) -> dict:
             }
         return {"success": False, "error": "No search criteria specified"}
 
-    # GET /supplier — try name param (may work in competition proxy), then filter client-side
+    # GET /supplier — search by name first (preferred), then org_number as fallback
     suppliers = []
-    if org_number:
-        suppliers = await client.get_suppliers({"organizationNumber": org_number})
-    if not suppliers and name:
+    if name:
+        # Strip language suffixes the classifier may include
+        name = re.sub(
+            r"\s+(?:no sistema|dans le syst[eè]me|im System|in the system|en el sistema|nel sistema"
+            r"|i systemet|no Tripletex|dans Tripletex|im Tripletex|in Tripletex"
+            r"|from the|fra|von|de|du)\s*$",
+            "", name, flags=re.IGNORECASE,
+        ).strip()
         results = await client.get_suppliers({"name": name})
         if results:
             name_lower = name.lower()
             exact = [s for s in results if name_lower in s.get("name", "").lower()]
             suppliers = exact if exact else results
+    if not suppliers and org_number:
+        suppliers = await client.get_suppliers({"organizationNumber": org_number})
     # Broad fallback: fetch all and substring match
     if not suppliers and name:
         all_suppliers = await client.get_suppliers({"count": 100})
