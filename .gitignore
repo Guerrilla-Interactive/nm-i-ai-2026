@@ -57,3 +57,4 @@ Thumbs.db
 
 # Tripletex app artifacts
 tripletex/app/__pycache__/
+*.md

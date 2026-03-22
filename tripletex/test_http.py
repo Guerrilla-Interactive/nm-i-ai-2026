@@ -17,7 +17,7 @@ BASE = f"http://127.0.0.1:{PORT}"
 # Sample credentials matching competition format
 CREDS = {
     "base_url": "https://kkpqfuj-amager.tripletex.dev/v2",
-    "session_token": "REDACTED_TRIPLETEX_TOKEN",
+    "session_token": __import__('os').environ.get("TRIPLETEX_SESSION_TOKEN", ""),
 }
 
 

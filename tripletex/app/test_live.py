@@ -1,12 +1,13 @@
 import httpx
 import asyncio
 import json
+import os
 import sys
 
-ENDPOINT = "https://coralie-overaffected-mazie.ngrok-free.dev"
+ENDPOINT = os.environ.get("TEST_ENDPOINT", "http://localhost:8080")
 CREDS = {
     "base_url": "https://kkpqfuj-amager.tripletex.dev/v2",
-    "session_token": "REDACTED_TRIPLETEX_TOKEN"
+    "session_token": os.environ.get("TRIPLETEX_SESSION_TOKEN", "")
 }
 
 # Test ALL task types across multiple languages
