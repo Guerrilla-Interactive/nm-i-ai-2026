@@ -77,10 +77,12 @@ async def run_test(client: httpx.AsyncClient, endpoint: str, test_id: str, promp
         data = resp.json() if resp.status_code == 200 else {}
 
         actual_type = data.get("task_type", "")
+        # Normalize enum repr like "TaskType.BANK_RECONCILIATION" → "bank_reconciliation"
+        normalized_type = actual_type.split(".")[-1].lower() if "." in actual_type else actual_type
         status_field = data.get("status", "")
         success_field = data.get("success", False)
 
-        type_ok = actual_type == expected_type
+        type_ok = normalized_type == expected_type
         status_ok = status_field == "completed"
         success_ok = success_field is True
 
